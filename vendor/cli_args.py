@@ -101,18 +101,32 @@ def write_error(message: str, *, error: str = "usage", exit_code: int = EXIT_USA
     return exit_code
 
 
-class _AgentArgumentParser(argparse.ArgumentParser):
-    """Opt-in agent ergonomics: unknown-option hints and JSON usage errors.
+_STDLIB_SUGGEST = sys.version_info >= (3, 14)  # argparse grew ``suggest_on_error`` in 3.14 (default True from 3.15)
 
-    ``suggest_unknown`` offers the closest *option* on unknown-argument errors,
-    without accepting it. ``json_errors`` turns every ``error()`` into one
-    ``write_error`` JSON record when the argv asked for ``--format json``; text
-    mode keeps argparse's usage line and message. The exit code stays 2.
+
+class _AgentArgumentParser(argparse.ArgumentParser):
+    """Agent ergonomics: typo hints and JSON usage errors. Parsing never changes.
+
+    ``suggest_unknown`` offers the closest *long option* on unknown-argument
+    errors (searching the chosen subcommand's options too), without accepting
+    it. ``suggest_on_error`` offers the closest *choice or subcommand name*
+    exactly as Python 3.15's argparse does, also on 3.11-3.13. ``json_errors``
+    turns every ``error()`` into one ``write_error`` JSON record when the argv
+    asked for ``--format json``; text mode keeps argparse's usage line and
+    message. The exit code stays 2.
     """
 
     suggest_unknown = False
     json_errors = False
     _cli_argv: list[str] | None = None
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        # Subparsers are built with parser_class=type(parent), so children inherit this default.
+        on = kwargs.pop("suggest_on_error", True)
+        if _STDLIB_SUGGEST:
+            kwargs["suggest_on_error"] = on
+        super().__init__(*args, **kwargs)
+        self.suggest_on_error = on
 
     def parse_args(self, args=None, namespace=None):
         # Keep structured argv: error text loses token and -- boundaries.
@@ -131,17 +145,51 @@ class _AgentArgumentParser(argparse.ArgumentParser):
         return parsed
 
     def error(self, message):
+        # A typo'd option can surface as a different error first (e.g. its value read as a
+        # subcommand name, or a required option reported missing); point at it there too.
+        if self.suggest_unknown and self._cli_argv is not None and "(did you mean " not in message:
+            message += self._unknown_option_hint(self._cli_argv, self._cli_argv)
         if self.json_errors and requested_format(self._cli_argv) == "json":
             write_error(message, error="usage", exit_code=EXIT_USAGE, format="json")
             self.exit(EXIT_USAGE)
         super().error(message)
 
+    if not _STDLIB_SUGGEST:
+        def _check_value(self, action, value):
+            # Backport of the 3.14+ wording so every supported Python says the same thing.
+            try:
+                super()._check_value(action, value)
+            except argparse.ArgumentError as exc:
+                choices = action.choices
+                if (not self.suggest_on_error or not isinstance(value, str) or isinstance(choices, str)
+                        or not all(isinstance(choice, str) for choice in choices)):
+                    raise
+                close = get_close_matches(value, list(choices), 1)
+                head, sep, tail = exc.message.partition(" (choose from ")
+                if not close or not sep:
+                    raise
+                raise argparse.ArgumentError(action, f"{head}, maybe you meant {close[0]!r}?{sep}{tail}") from None
+
+    def _option_pool(self, tokens):
+        """Long options visible along the subcommand path the argv selected: {option: hidden}."""
+        pool: dict[str, bool] = {}
+        parser: argparse.ArgumentParser | None = self
+        rest = list(tokens)
+        while parser is not None:
+            pool.update({option: action.help == argparse.SUPPRESS
+                         for action in parser._actions for option in action.option_strings
+                         if option.startswith("--")})
+            sub = next((a for a in parser._actions if isinstance(a, argparse._SubParsersAction)), None)
+            index = next((i for i, token in enumerate(rest) if sub is not None and token in sub.choices), None)
+            if index is None:
+                break
+            parser, rest = sub.choices[rest[index]], rest[index + 1:]
+        return pool
+
     def _unknown_option_hint(self, tokens, extras):
         boundary = tokens.index("--") if "--" in tokens else len(tokens)
         wrapper_tokens = tokens[:boundary]
-        options = {option: action.help == argparse.SUPPRESS
-                   for action in self._actions for option in action.option_strings
-                   if option.startswith("--")}
+        options = self._option_pool(wrapper_tokens)
         for token in extras:
             if token == "--":
                 break
@@ -160,19 +208,29 @@ class _AgentArgumentParser(argparse.ArgumentParser):
         return ""
 
 
-def make_parser(arguments: Iterable[Argument] = (), *, suggest_unknown: bool = False,
+def make_parser(arguments: Iterable[Argument] = (), *, suggest_unknown: bool = True,
                 json_errors: bool = False, **kwargs: Any) -> argparse.ArgumentParser:
-    """Create a parser; optional hints and JSON usage errors never change parsing."""
+    """Create a parser; typo hints (on by default) and JSON usage errors never change parsing.
+
+    ``suggest_unknown=False`` restores plain argparse diagnostics, including on
+    Python 3.15+ where argparse itself suggests choices unless told otherwise.
+    Pass ``suggest_on_error=`` to control choice/subcommand hints separately.
+    """
     if type(suggest_unknown) is not bool:
         raise TypeError("suggest_unknown must be bool")
     if type(json_errors) is not bool:
         raise TypeError("json_errors must be bool")
     kwargs.setdefault("allow_abbrev", False)
     if suggest_unknown or json_errors:
+        kwargs.setdefault("suggest_on_error", suggest_unknown)
         parser: argparse.ArgumentParser = _AgentArgumentParser(**kwargs)
         parser.suggest_unknown = suggest_unknown  # type: ignore[attr-defined]
         parser.json_errors = json_errors  # type: ignore[attr-defined]
     else:
+        if _STDLIB_SUGGEST:
+            kwargs.setdefault("suggest_on_error", False)
+        else:
+            kwargs.pop("suggest_on_error", None)
         parser = argparse.ArgumentParser(**kwargs)
     for argument in arguments:
         parser.add_argument(*argument.names, **argument.kwargs)
