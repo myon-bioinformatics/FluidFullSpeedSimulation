@@ -1,0 +1,25 @@
+{
+  "schema": "fluidfullspeedsimulation-pixel-water/1",
+  "files": {
+    "gif": {
+      "name": "dam-break_water_s0_t0800_r01.gif",
+      "bytes": 69320,
+      "sha256": "3f27236065a40421ef3d12d7f47074b5f5dbdc929843f79c4a8a0a80adc56ed4"
+    }
+  },
+  "frames": 401,
+  "canvas": "256x192",
+  "plan": {
+    "scene": "dam-break",
+    "fluid": "water",
+    "ticks": 800,
+    "seed": 0,
+    "scale": 8,
+    "frame_every": 2,
+    "base_rate": 0.5
+  },
+  "pixels": 152,
+  "count_error": 0,
+  "settle_tick": 295,
+  "hash": "d7fc9da9248190912a05ff7eede6b7d46648893262e251e3cfeaf44ea68a12f9"
+}

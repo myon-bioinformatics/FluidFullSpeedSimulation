@@ -7,16 +7,20 @@ MONIAC は「水が流れ落ちる様子」の手本。部品は物理のまま�
 
 - ``tank``: 体積を Q 整数で持つ水槽。水位 h = V / A。流入と流出の差を積み上げる積分器そのもの
 - ``channel``: 傾いた樋を ``cells`` 個の区間セル（``<prefix>:0`` …）に分けたもの。断面は長方形・半円（竹）
+- ``flume``: 竹を継いだ流しそうめんの台。継ぎ目は段差（自由落下）か縁（たまってから越える）、曲がりはあふれうる
 
 管（リンク）の法則は ``LAWS`` 登録簿にあり、``register_law`` で増やせる:
 
 - ``pipe``（Hagen–Poiseuille、層流）/ ``orifice``（Torricelli）/ ``weir_rect`` ``weir_v``（堰）
 - ``cam``（水位 → 流量の表）/ ``rating``（セル体積 → 流量の表。樋の区間をつなぐ）
+- ``lip``（継ぎ目の縁を越える堰）/ ``spill``（曲がりの外側から横へあふれる）
 - ``pump``（一定流量）/ ``float_valve``（浮き弁。測った水位が遅れの段を通って弁を開く）
+- ``valve``（弁つきの出口。開き具合は一定か、別の水槽の浮き → カムで決まる。MONIAC の弁）
 - どの管にも ``delay``（輸送の遅れ）を付けられる。管の中の水も総量に数える
 
 運ばれる物 ``tracer``（そうめん・葉っぱ・浮き）: 入った節点に先にいた水が全部出たら、いちばん多く
 流れた管で次へ進む（押し出し流れ・先入れ先出し）。水槽では平均滞留時間 V/Q、樋では L/v に当たる。
+太さ ``size`` を持たせると、継ぎ目の縁の越流水深がそれより浅いあいだ引っかかる（``PASSABLE``）。
 
 1 ステップでは全部の管の流量を同じ状態から求め（同時更新）、出す側の水が足りなければ整数のまま按分する。
 移動は引いた整数をそのまま足すだけなので、総量は 1 ulp も変わらない。``build(spec)`` で JSON から組める。
@@ -25,12 +29,20 @@ MONIAC は「水が流れ落ちる様子」の手本。部品は物理のまま�
 from __future__ import annotations
 
 import math
+import random
 from typing import Callable
 
-from fixedq import Cam, DelayLine, clamp, from_q, lag_gain, lag_step, qdiv, qmul, qsqrt, to_q
-from fluids import G, RE_LAMINAR, Section, channel_flow, get_fluid, reynolds
+from fixedq import ONE, Cam, DelayLine, clamp, from_q, lag_gain, lag_step, qdiv, qmul, qsqrt, to_q
+from fluids import G, RE_LAMINAR, Section, channel_flow, fall_time, get_fluid, lip_flow, reynolds, side_spill
+from fluids import viscous_orifice
+from fluids import superelevation
 
 LAWS: dict[str, Callable] = {}
+PASSABLE: dict[str, Callable] = {}  # 運ばれる物がその管を通れるか（net, link, tracer）→ bool。無ければ常に通れる
+EJECT: dict[str, Callable] = {}  # 運ばれる物がその管へはじき出されるか（net, link, tracer）→ bool
+
+# 麺のたまり（縁に積もった麺）の詰め方: 平行な円柱の最密充填 π/(2√3)（六方。いちばん低く積もる側の仮定）
+PACKING = math.pi / (2.0 * math.sqrt(3.0))
 
 
 def register_law(kind: str):
@@ -49,10 +61,21 @@ def _law_pipe(net, ln, n):
     return qmul(net.nodes[ln["src"]]["v"], ln["k"])
 
 
+ORIFICE_RE_STEADY = 1.0e4  # これより低い Re では鋭いふちの小孔の Cd が Re で大きく変わる（Sci. Rep. 2023 ほか）
+
+
 @register_law("orifice")
 def _law_orifice(net, ln, n):
     h = net.head_q(ln["src"])
-    return qmul(ln["coef"], qsqrt(h)) if h > 0 else 0
+    if h <= 0:
+        return 0
+    ln["max_head"] = max(ln["max_head"], h)
+    if not ln["viscous"]:
+        return qmul(ln["coef"], qsqrt(h))
+    hf = from_q(h)
+    cd, re = viscous_orifice(hf, ln["diameter"], net.fluid.nu, ln["cd"], ln["delta"], net.g)
+    ln["min_cd"] = cd if ln["min_cd"] is None else min(ln["min_cd"], cd)
+    return qmul(to_q(cd * ln["orifice_area"] * math.sqrt(2.0 * net.g * hf)), net.dt_q)
 
 
 @register_law("weir_rect")
@@ -82,9 +105,89 @@ def _law_rating(net, ln, n):
 
 @register_law("pump")
 def _law_pump(net, ln, n):
-    if ln["until_step"] is not None and n >= ln["until_step"]:
+    if n < ln["start_step"] or (ln["until_step"] is not None and n >= ln["until_step"]):
         return 0
     return ln["amount"]
+
+
+@register_law("lip")
+def _law_lip(net, ln, n):
+    """継ぎ目の段（次の竹の縁が lip だけ高い）。セルの水深が縁を越えた分だけ流れる。
+    縁に麺がたまっていれば、そのぶん縁が高くなる（crest = lip + たまりの高さ）。"""
+    v = net.nodes[ln["src"]]["v"]
+    ln["max_v"] = max(ln["max_v"], v)
+    h = from_q(net.head_q(ln["src"]))
+    return qmul(to_q(lip_flow(ln["section"], h, crest(net, ln), ln["cd"], net.g, width=ln["width"])), net.dt_q)
+
+
+def pile_members(net, ln) -> list[dict]:
+    """その縁に引っかかって積もっている麺（長さのある麺だけ。長さ 0 の点は重さも体積も持たない）。"""
+    return [tr for tr in net.tracers if tr["held"] and tr["held_link"] is ln and tr["length"] > 0]
+
+
+def pile_height(net, ln) -> float:
+    """縁に積もった麺の高さ Δ = Σ(本数·πd²/4) / (PACKING·w)。w は縁の高さでの水面幅（たまりの間は一定とみなす）。"""
+    area = sum(tr["strands"] * math.pi * tr["size"] ** 2 / 4.0 for tr in pile_members(net, ln))
+    return area / (PACKING * ln["width"]) if area else 0.0
+
+
+def crest(net, ln) -> float:
+    return ln["lip"] + pile_height(net, ln)
+
+
+def _lip_passable(net, ln, tr):
+    """越流水深（水深 − 縁。麺が積もっていればその上）が運ばれる物の太さ以上なら越えられる。
+    押し流された（flushed）麺はその縁をそのまま越える。"""
+    if id(ln) in tr["flushed"]:
+        return True
+    return from_q(net.head_q(ln["src"])) - crest(net, ln) >= tr["size"]
+
+
+PASSABLE["lip"] = _lip_passable
+
+
+@register_law("spill")
+def _law_spill(net, ln, n):
+    """樋の縁からあふれる。曲がり（radius あり）では外側の水面 h + Δh/2（Δh = v²B/(gR)）が縁を越えた分が
+    横越流堰として流れ、どのセルでも縁の高さの容量を超えた体積はそのまま外へ落ちる。"""
+    nd = net.nodes[ln["src"]]
+    sec = nd["section"]
+    h = from_q(net.head_q(ln["src"]))
+    a = sec.area(h)
+    amount = 0
+    ln["last_outer"] = h
+    if a > 0 and ln["radius"] is not None:
+        v = from_q(qdiv(net.last_flow[ln["main"]], net.dt_q)) / a  # そのセルの本流（前のステップ）の流速
+        h_out = h + superelevation(v, sec.top_width(h), ln["radius"], net.g) / 2.0
+        ln["max_outer"] = max(ln["max_outer"], h_out)
+        ln["last_outer"] = h_out
+        amount = qmul(to_q(side_spill(nd["length"], h_out, ln["rim"], ln["cd"], net.g)), net.dt_q)
+    return max(amount, nd["v"] - ln["v_cap"])
+
+
+def _spill_eject(net, ln, tr):
+    """曲がりの外側の水面に乗った麺は、その上面（水面 + 太さ）が縁に届くと縁の外へはじき出される。
+    （麺は水面に浮いて外側の壁へ寄せられる、とみなす。水そのものがあふれるより太さの分だけ早い）"""
+    return ln["radius"] is not None and ln.get("last_outer", 0.0) + tr["size"] >= ln["rim"]
+
+
+EJECT["spill"] = _spill_eject
+
+
+@register_law("valve")
+def _law_valve(net, ln, n):
+    """弁つきの出口: 全開で時定数 tau の線形流出に、開き具合（0..1）を掛ける。
+    開き具合は一定か、別の水槽の浮き（sensor の水位）→ カム（表）で決まる。浮きと弁の間に遅れの段も持てる。"""
+    if ln["cam"] is None:
+        o = ln["opening"]
+    else:
+        u = net.head_q(ln["sensor"])
+        for i in range(ln["stages"]):
+            ln["z"][i] = lag_step(ln["z"][i], u, ln["k_link"])
+            u = ln["z"][i]
+        o = clamp(ln["cam"](u), 0, ONE)
+    ln["last_opening"] = o
+    return qmul(qmul(net.nodes[ln["src"]]["v"], ln["k"]), o)
 
 
 @register_law("float_valve")
@@ -98,18 +201,22 @@ def _law_float_valve(net, ln, n):
 
 
 class Network:
-    def __init__(self, dt: float, fluid: str = "water", g: float = G):
+    def __init__(self, dt: float, fluid: str = "water", g: float = G, temp_c: float | None = None,
+                 mu: float | None = None, mu_scale: float | None = None):
         if dt <= 0:
             raise ValueError("dt must be positive")
         self.dt = dt
         self.dt_q = to_q(dt)
-        self.fluid = get_fluid(fluid)
+        # 🧊 temp_c を渡すと温度表で μ・ρ が動く。🍯 mu（Pa·s）か mu_scale（倍率）で粘度を直接変えられる
+        self.fluid = get_fluid(fluid, temp_c, mu=mu, mu_scale=mu_scale)
         self.g = g
         self.nodes: dict[str, dict] = {}
         self.links: list[dict] = []
         self.channels: dict[str, dict] = {}
         self.tracers: list[dict] = []
+        self.catchers: list[dict] = []
         self._groups: tuple[int, dict] | None = None
+        self.last_flow: list[int] = []  # 前のステップに各管で動いた量（Q）
 
     # --- 節点 -----------------------------------------------------------
     def _node(self, name: str, **data) -> dict:
@@ -127,17 +234,31 @@ class Network:
 
     def channel(self, prefix: str, dst: str, *, length: float, cells: int, slope: float, section,
                 law: str = "manning", n_manning: float = 0.010, beta: float | None = None,
-                max_depth: float | None = None, table_points: int = 256, delay: float = 0.0) -> dict:
+                max_depth: float | None = None, table_points: int = 256, delay: float = 0.0,
+                lip: float = 0.0, bend_radius: float | None = None, spill: str | None = None,
+                cd: float = 0.62, cracks: list[dict] | None = None) -> dict:
         """傾いた樋。区間セル <prefix>:0 … <prefix>:cells-1 を作り、末端を dst へつなぐ。
 
         各セルの流出は「セル体積 → 流量」の表（rating カム）で引く。表は等流の式から一度だけ作り、
         水深の浅い側ほど点を密にする（(i/N)² 刻み）。表の上端（半円なら縁、長方形なら max_depth）を
         超えた分は流量が頭打ちになるので、結果の overflow で知らせる。
+
+        - lip > 0: 末端は「次の竹の縁が lip だけ高い」継ぎ目。末端セルに水がたまり、越えた分だけ流れる
+        - bend_radius: 曲がり（半径 R）。外側の水面が縁を越えた分は各セルから spill の節点へあふれる
+        - delay: 末端の管の遅れ（段差の自由落下などに使う）
+        - cracks: 竹の割れ目 ``[{"cell": i, "area": m², "cd": 0.61}]``。そのセルの水深 h で
+          Torricelli（Cd·a·√(2gh)）だけ spill の節点へ漏れる
         """
         if cells < 1 or length <= 0 or slope <= 0:
             raise ValueError("channel needs cells >= 1, length > 0, slope > 0")
         if dst not in self.nodes:
             raise ValueError(f"unknown node {dst!r}")
+        if bend_radius is not None and spill is None:
+            raise ValueError("a bend needs a spill node")
+        if cracks and spill is None:
+            raise ValueError("cracks need a spill node")
+        if spill is not None and spill not in self.nodes:
+            raise ValueError(f"unknown spill node {spill!r}")
         sec = section if isinstance(section, Section) else Section(section["shape"], section["size"])
         lc = length / cells
         h_cap = sec.size if sec.shape == "semicircle" else (0.05 if max_depth is None else max_depth)
@@ -154,12 +275,70 @@ class Network:
             self._node(name, kind="reach", length=lc, section=sec, v=0, channel=prefix)
         for i, name in enumerate(names):
             nxt = names[i + 1] if i + 1 < cells else dst
-            self._link("rating", name, nxt, delay if nxt == dst else 0.0, cam=cam, max_v=0, channel=prefix)
+            if nxt == dst and lip > 0:
+                self._link("lip", name, nxt, delay, section=sec, lip=lip, cd=cd, max_v=0, channel=prefix,
+                           width=sec.top_width(lip), releases=[])
+            else:
+                self._link("rating", name, nxt, delay if nxt == dst else 0.0, cam=cam, max_v=0, channel=prefix)
+            if bend_radius is not None or (spill is not None and nxt == dst and lip > 0):
+                # 曲がりの全セルと、縁の手前でたまるセルには縁からあふれる口を付ける
+                self._link("spill", name, spill, 0.0, main=len(self.links) - 1, radius=bend_radius, rim=h_cap,
+                           v_cap=to_q(a_max * lc), cd=cd, max_outer=0.0, channel=prefix)
+        for crack in cracks or ():
+            unknown = set(crack) - {"cell", "area", "cd"}
+            if unknown or not 0 <= crack["cell"] < cells:
+                raise ValueError(f"bad crack {crack!r}")
+            ln = self.orifice(names[crack["cell"]], spill, area=crack["area"], cd=crack.get("cd", 0.61))
+            ln.update(channel=prefix, crack=True)
         info = {"prefix": prefix, "cells": names, "length": length, "cell_length": lc, "slope": slope,
                 "section": sec.to_dict(), "law": law, "n_manning": n_manning, "beta": beta, "depth_cap": h_cap,
-                "volume_cap": a_max * lc, "table": table}
+                "volume_cap": a_max * lc, "table": table, "lip": lip, "bend_radius": bend_radius,
+                "cracks": [dict(c) for c in cracks or ()]}
         self.channels[prefix] = info
         return info
+
+    def flume(self, prefix: str, dst: str, segments: list[dict], spill: str | None = None) -> list[dict]:
+        """竹をつないだ流しそうめんの台。segments を上流から順に並べ、<prefix>/<i>:<cell> を作る。
+
+        各 segment は channel() の引数（length・cells・slope・section・law・cracks …）に加えて
+        ``joint``（次の竹との継ぎ目）を持てる: ``{"drop": 段差 m}``（自由落下の遅れ）か
+        ``{"lip": 縁の高さ m}``（たまってから越える）。``bend_radius`` の竹は spill へあふれうる。
+        ``node_remnant``（節の削り残し）``{"at": 0〜1 の位置, "height": m}`` は竹の途中の低い縁で、
+        竹を <prefix>/<i>（節の手前、末端に縁）と <prefix>/<i>b（節の後ろ）の 2 つに分けて作る。
+        cracks の cell は分ける前の竹の通し番号。
+        """
+        if not segments:
+            raise ValueError("flume needs at least one segment")
+        infos = [None] * len(segments)
+        nxt = dst
+        for i in range(len(segments) - 1, -1, -1):  # 下流から作る（行き先の節点を先に用意する）
+            seg = dict(segments[i])
+            joint = seg.pop("joint", None) or {}
+            node = seg.pop("node_remnant", None)
+            unknown = set(joint) - {"drop", "lip"}
+            if unknown:
+                raise ValueError(f"unknown joint keys: {sorted(unknown)}")
+            end = {"delay": fall_time(joint.get("drop", 0.0), self.g), "lip": joint.get("lip", 0.0)}
+            if node is None:
+                infos[i] = self.channel(f"{prefix}/{i}", nxt, spill=spill, **end, **seg)
+            else:
+                if set(node) - {"at", "height"} or not 0 < node["at"] < 1 or node["height"] <= 0:
+                    raise ValueError(f"bad node_remnant {node!r}")
+                cells, length = seg.pop("cells"), seg.pop("length")
+                cracks = seg.pop("cracks", None) or []
+                cut = max(1, min(cells - 1, round(cells * node["at"])))
+                after = self.channel(f"{prefix}/{i}b", nxt, spill=spill, cells=cells - cut,
+                                     length=length * (cells - cut) / cells, **end,
+                                     cracks=[{**c, "cell": c["cell"] - cut} for c in cracks if c["cell"] >= cut],
+                                     **seg)
+                infos[i] = self.channel(f"{prefix}/{i}", after["cells"][0], spill=spill, cells=cut,
+                                        length=length * cut / cells, lip=node["height"],
+                                        cracks=[c for c in cracks if c["cell"] < cut], **seg)
+                infos[i]["node_remnant"] = dict(node)
+                infos[i]["after_node"] = after
+            infos[i]["joint"] = joint
+            nxt = infos[i]["cells"][0]
+        return infos
 
     # --- 管 -------------------------------------------------------------
     def _link(self, kind: str, src: str, dst: str, delay: float, **extra) -> dict:
@@ -174,7 +353,8 @@ class Network:
         link = {
             "kind": kind, "src": src, "dst": dst, "delay": steps * self.dt, "delay_steps": steps,
             "line": DelayLine(steps - 1) if steps else None,
-            "pending": 0, "flow_sum": 0, "max_head": 0, "first_arrival_step": None, **extra,
+            "pending": 0, "flow_sum": 0, "max_head": 0, "first_arrival_step": None, "first_flow_step": None,
+            **extra,
         }
         self.links.append(link)
         return link
@@ -192,9 +372,15 @@ class Network:
         return self._link("pipe", src, dst, delay, radius=radius, length=length,
                           conductance=c, tau=tau, k=lag_gain(self.dt, tau))
 
-    def orifice(self, src: str, dst: str, *, area: float, cd: float = 0.61, delay: float = 0.0) -> dict:
+    def orifice(self, src: str, dst: str, *, area: float, cd: float = 0.61, delay: float = 0.0,
+                viscous: bool = False, delta: float | None = None) -> dict:
+        """小孔（Torricelli）。viscous=True で、粘度で下がる流量係数（fluids.orifice_cd）を毎ステップ解く。
+        省くと Cd 一定のまま（粘度によらない）。どちらでも結果に Re と、Re の低さの印 viscous_regime を残す。"""
+        from fluids import ORIFICE_DELTA
         coef = to_q(cd * area * math.sqrt(2.0 * self.g) * self.dt)
-        return self._link("orifice", src, dst, delay, coef=coef, orifice_area=area, cd=cd)
+        return self._link("orifice", src, dst, delay, coef=coef, orifice_area=area, cd=cd, viscous=viscous,
+                          delta=ORIFICE_DELTA if delta is None else delta, diameter=math.sqrt(4.0 * area / math.pi),
+                          min_cd=None)
 
     def weir(self, src: str, dst: str, *, shape: str = "rect", width: float = 0.02, angle_deg: float = 90.0,
              cd: float | None = None, delay: float = 0.0) -> dict:
@@ -213,9 +399,31 @@ class Network:
         """[[水位, 流量], ...] の表で決まる流出（特殊形状のスリット）。"""
         return self._link("cam", src, dst, delay, cam=Cam(table), table=[list(map(float, p)) for p in table])
 
-    def pump(self, src: str, dst: str, *, rate: float, until: float | None = None, delay: float = 0.0) -> dict:
+    def pump(self, src: str, dst: str, *, rate: float, start: float = 0.0, until: float | None = None,
+             delay: float = 0.0) -> dict:
+        """一定流量。start から until まで動く。"""
         return self._link("pump", src, dst, delay, amount=qmul(to_q(rate), self.dt_q), rate=rate,
+                          start_step=int(round(start / self.dt)),
                           until_step=None if until is None else int(round(until / self.dt)))
+
+    def valve(self, src: str, dst: str, *, tau: float, opening: float = 1.0, sensor: str | None = None,
+              cam=None, stages: int = 0, link_tau: float = 1.0, delay: float = 0.0) -> dict:
+        """弁つきの出口（MONIAC の弁）。全開の時定数 tau、開き具合は opening（0..1）か、
+        sensor の水位を cam（[[水位, 開き具合], ...]）で読み替えたもの。stages 段の遅れ（各 link_tau）は
+        浮き → ワイヤー → 弁のつながりの遅れ。"""
+        if self.nodes[src]["kind"] != "tank":
+            raise ValueError("valve needs a tank as src")
+        if not 0.0 <= opening <= 1.0:
+            raise ValueError("opening must be within 0..1")
+        if (cam is None) != (sensor is None):
+            raise ValueError("give both sensor and cam, or neither")
+        if sensor is not None and sensor not in self.nodes:
+            raise ValueError(f"unknown sensor node {sensor!r}")
+        h0 = self.head_q(sensor) if sensor else 0
+        return self._link("valve", src, dst, delay, tau=tau, k=lag_gain(self.dt, tau), opening=to_q(opening),
+                          sensor=sensor, cam=None if cam is None else Cam(cam),
+                          table=None if cam is None else [list(map(float, p)) for p in cam],
+                          stages=stages, k_link=lag_gain(self.dt, link_tau), z=[h0] * stages, last_opening=0)
 
     def float_valve(self, src: str, dst: str, *, sensor: str, setpoint: float, gain: float, qmax: float,
                     stages: int = 1, tau: float = 1.0, delay: float = 0.0) -> dict:
@@ -229,17 +437,55 @@ class Network:
                           stages=stages, tau=tau)
 
     # --- 運ばれる物 -------------------------------------------------------
-    def tracer(self, name: str, node: str, release: float = 0.0, stop=()) -> dict:
-        """運ばれる物を node に release 時刻で放す。stop（節点名か、その並び）に入るか、出口のない節点で止まる。"""
+    def tracer(self, name: str, node: str, release: float = 0.0, stop=(), size: float = 0.0, length: float = 0.0,
+               strands: int = 1, density: float = 1100.0, friction: float = 0.3) -> dict:
+        """運ばれる物を node に release 時刻で放す。stop（節点名か、その並び）に入るか、出口のない節点で止まる。
+
+        - size: 太さ [m]。継ぎ目の段（lip）では越流水深がこれより浅いと引っかかって待つ
+        - length: 長さ [m]。頭の後ろに、通ってきた区間を合計 length まで体として引く。体のどこかが
+          越えられない縁に掛かっていれば全体が止まる。曲がりではじき出される判定も体のどのセルでも受ける
+        - strands: 束の本数（一口分）。縁に積もる体積に効く
+        - density・friction: 茹でた麺の密度 [kg/m³] と竹との摩擦係数（どちらも仮定の値）。積もった麺を
+          押し流す力のつり合いに使う
+        """
         stops = (stop,) if isinstance(stop, str) else tuple(stop)
         for nd in (node, *stops):
             if nd not in self.nodes:
                 raise ValueError(f"unknown node {nd!r}")
+        if length < 0 or strands < 1:
+            raise ValueError("length must be >= 0 and strands >= 1")
         tr = {"name": name, "node": node, "release_step": int(round(release / self.dt)), "state": "waiting",
               "credit": 0, "pipe_left": 0, "pipe_dst": None, "pipe_t": None, "pipe_f": 0.0, "path": [],
-              "arrival": None, "stop": stops}
+              "arrival": None, "stop": stops, "size": size, "stuck_steps": 0, "stuck_at": None,
+              "held": False, "held_link": None, "length": length, "strands": strands, "density": density,
+              "friction": friction, "cells": [], "flushed": set(), "until": None, "end": None,
+              "held_since": None}
         self.tracers.append(tr)
         return tr
+
+    def catcher(self, name: str, node: str, *, t_grab: float | None = None, grab=(0.15, 0.6),
+                cooldown: float = 0.0, seed: int = 0) -> dict:
+        """🥢 取り手（箸）。node（区間セル）に入った麺を、入ってから t_grab 秒たったところで取る。
+
+        - 麺がその前にセルを出てしまえば取り逃し（fast）。そのとき手がふさがっていても取り逃し（busy）
+        - t_grab（手を伸ばして挟むまでの時間）は麺ごとに grab = (最短, 最長) の一様乱数（seed で再現）。
+          t_grab を渡すと全部その値。取ったら cooldown 秒は次を取れない（口へ運ぶ時間）
+        - 取った麺は水から外れるだけで、水の量は変えない
+        """
+        if node not in self.nodes:
+            raise ValueError(f"unknown node {node!r}")
+        lo, hi = grab
+        if t_grab is None and not 0 <= lo <= hi:
+            raise ValueError("grab must be (min, max) with 0 <= min <= max")
+        rng = random.Random(seed)
+
+        def draw(tr):
+            return t_grab if t_grab is not None else rng.uniform(lo, hi)
+
+        c = {"name": name, "node": node, "t_grab": t_grab, "grab": (lo, hi), "cooldown": cooldown, "seed": seed,
+             "draw": draw, "free_at": -math.inf, "caught": [], "missed": []}
+        self.catchers.append(c)
+        return c
 
     # --- 状態 -----------------------------------------------------------
     def head_q(self, name: str) -> int:
@@ -266,6 +512,8 @@ class Network:
 
     # --- 1 ステップ -----------------------------------------------------
     def step(self, n: int) -> list[int]:
+        if len(self.last_flow) != len(self.links):
+            self.last_flow = [0] * len(self.links)
         req = [max(LAWS[ln["kind"]](self, ln, n), 0) for ln in self.links]
         # 出す側の水が足りなければ、その節点から出る管で整数のまま按分する
         for src, idx in self._by_src().items():
@@ -279,6 +527,8 @@ class Network:
         for i, ln in enumerate(self.links):
             self.nodes[ln["src"]]["v"] -= req[i]
             ln["flow_sum"] += req[i]
+            if req[i] and ln["first_flow_step"] is None:
+                ln["first_flow_step"] = n
         for i, ln in enumerate(self.links):
             if ln["line"] is None:
                 arrive = req[i]
@@ -290,11 +540,20 @@ class Network:
                 ln["first_arrival_step"] = n
         if self.tracers:
             self._move_tracers(n, req)
+        self.last_flow = req
         return req
 
     def _move_tracers(self, n: int, req: list[int]) -> None:
-        """先入れ先出し。先にいた水（credit）を流出で減らし、0 を切ったステップ内の位置 f まで時刻を補間する。"""
+        """先入れ先出し。先にいた水（credit）を流出で減らし、0 を切ったステップ内の位置 f まで時刻を補間する。
+
+        1. 縁に積もった麺が水に押し流されるか（力のつり合い）を先に見る
+        2. 体のどこかが曲がりの縁の外へはじき出されるか
+        3. 先にいた水が出たら、頭の行き先の管と、体がまたいでいる管を全部越えられるか（越えられなければ待つ）
+        4. 取り手（箸）の区間なら、入ってから t_grab たったところで取れるか
+        """
         by_src = self._by_src()
+        now = (n + 1) * self.dt
+        self._flush_piles(n)
         for tr in self.tracers:
             if tr["state"] == "waiting":
                 if n < tr["release_step"]:
@@ -303,12 +562,15 @@ class Network:
                 tr["state"] = "node"
                 tr["credit"] = self.nodes[tr["node"]]["v"] + sum(req[i] for i in by_src.get(tr["node"], []))
                 tr["path"].append({"node": tr["node"], "t": n * self.dt})
+                self._note_cell(tr, tr["node"], n * self.dt)
             if tr["state"] == "pipe":
                 tr["pipe_left"] -= 1
                 if tr["pipe_left"] <= 0:
                     self._enter(tr, tr["pipe_dst"], tr["pipe_t"], tr["pipe_f"], req)
                 continue
             if tr["state"] != "node":
+                continue
+            if self._eject(tr, now):
                 continue
             outs = by_src.get(tr["node"], [])
             if not outs:
@@ -317,14 +579,134 @@ class Network:
             out_now = sum(req[i] for i in outs)
             tr["credit"] -= out_now
             if tr["credit"] <= 0 and out_now > 0:
-                f = -tr["credit"] / out_now  # このステップのうち、越えた後に残る割合（0 ≤ f < 1）
-                t_cross = (n + 1 - f) * self.dt
                 ln = self.links[max(outs, key=lambda i: req[i])]
+                blocked = self._blocking(tr, ln)
+                if blocked is not None:
+                    tr["stuck_steps"] += 1  # 引っかかり: 先にいた水は出たが、どこかの縁を越えられない
+                    if not tr["held"]:
+                        tr["held_since"] = now
+                    tr["stuck_at"], tr["held"], tr["held_link"] = blocked["src"], True, blocked
+                    continue
+                # このステップのうち、越えた後に残る割合（引っかかりから外れた直後は 0）
+                f = 0.0 if tr["held"] else -tr["credit"] / out_now
+                tr["held"], tr["held_link"] = False, None
+                t_cross = (n + 1 - f) * self.dt
+                if self._catch_on_leave(tr, t_cross):
+                    continue
                 if ln["delay_steps"]:
                     tr.update(state="pipe", pipe_left=ln["delay_steps"], pipe_dst=ln["dst"],
                               pipe_t=t_cross + ln["delay"], pipe_f=f)
                 else:
                     self._enter(tr, ln["dst"], t_cross, f, req)
+            self._catch_waiting(tr, now)
+
+    # --- 体（長さ）・縁・はじき出し・箸 -------------------------------------
+    def _note_cell(self, tr: dict, node: str, t: float) -> None:
+        if self.nodes[node]["kind"] == "reach":
+            tr["cells"].append(node)
+        for c in self.catchers:
+            if c["node"] == node:
+                tr["station"] = {"catcher": c, "t_in": t, "t_grab": c["draw"](tr), "done": False}
+
+    def body(self, tr: dict) -> list[str]:
+        """頭から後ろへ、通ってきた区間を合計 length になるまで（頭の区間も 1 つ分に数える）。"""
+        head = tr["node"]
+        if self.nodes[head]["kind"] != "reach" or not tr["cells"] or tr["cells"][-1] != head:
+            return [head]
+        out, total = [], 0.0
+        for c in reversed(tr["cells"]):
+            out.append(c)
+            total += self.nodes[c]["length"]
+            if total >= tr["length"] - 1e-12:
+                break
+        return out
+
+    def _pair_link(self, src: str, dst: str):
+        for i in self._by_src().get(src, []):
+            if self.links[i]["dst"] == dst and self.links[i]["kind"] in PASSABLE:
+                return self.links[i]
+        return None
+
+    def _blocking(self, tr: dict, head_link: dict):
+        """越えられない管（頭の行き先、または体がまたいでいる縁）。全部越えられれば None。"""
+        candidates = [head_link]
+        body = self.body(tr)
+        for down, up in zip(body, body[1:]):
+            ln = self._pair_link(up, down)
+            if ln is not None:
+                candidates.append(ln)
+        for ln in candidates:
+            ok = PASSABLE.get(ln["kind"])
+            if ok is not None and not ok(self, ln, tr):
+                return ln
+        return None
+
+    def _eject(self, tr: dict, now: float) -> bool:
+        by_src = self._by_src()
+        for cell in self.body(tr):
+            for i in by_src.get(cell, []):
+                ln = self.links[i]
+                rule = EJECT.get(ln["kind"])
+                if rule is not None and rule(self, ln, tr):
+                    tr.update(state="spilled", node=ln["dst"], until=now, end="spilled", held=False, held_link=None)
+                    tr["spilled_at"] = cell
+                    tr["path"].append({"node": ln["dst"], "t": now})
+                    return True
+        return False
+
+    def _flush_piles(self, n: int) -> None:
+        """縁に積もった麺（たまり）を、水の押す力が摩擦を超えたら全部まとめて押し流す。
+
+        押す力 F = ρ·g·w·Δ·(H − lip − Δ/2)（たまりの上流面にかかる静水圧。H はそのセルの水深）
+        支える力 R = Σ μ·(ρ_麺 − ρ)·g·(本数·πd²/4)·L（水中の重さ × 摩擦）。F ≥ R で流れ出す。
+        """
+        for ln in self.links:
+            if ln["kind"] != "lip":
+                continue
+            members = [tr for tr in pile_members(self, ln) if id(ln) not in tr["flushed"]]
+            if not members:
+                continue
+            delta = pile_height(self, ln)
+            h = from_q(self.head_q(ln["src"]))
+            rho = self.fluid.rho
+            push = rho * self.g * ln["width"] * delta * (h - ln["lip"] - delta / 2.0)
+            hold = sum(tr["friction"] * (tr["density"] - rho) * self.g * tr["strands"] * math.pi * tr["size"] ** 2
+                       / 4.0 * tr["length"] for tr in members)
+            if push >= hold:
+                for tr in members:
+                    tr["flushed"].add(id(ln))
+                ln["releases"].append({"t": (n + 1) * self.dt, "members": [tr["name"] for tr in members],
+                                       "depth": h, "pile": delta, "push": push, "hold": hold})
+
+    def _catch_on_leave(self, tr: dict, t_cross: float) -> bool:
+        st = tr.get("station")
+        if not st or st["done"] or st["catcher"]["node"] != tr["node"]:
+            return False
+        if t_cross - st["t_in"] >= st["t_grab"]:
+            return self._try_catch(tr, st)
+        st["done"] = True
+        st["catcher"]["missed"].append({"tracer": tr["name"], "t_in": st["t_in"], "residence": t_cross - st["t_in"],
+                                        "t_grab": st["t_grab"], "why": "fast"})
+        return False
+
+    def _catch_waiting(self, tr: dict, now: float) -> None:
+        st = tr.get("station")
+        if tr["state"] != "node" or not st or st["done"] or st["catcher"]["node"] != tr["node"]:
+            return
+        if now - st["t_in"] >= st["t_grab"]:
+            self._try_catch(tr, st)
+
+    def _try_catch(self, tr: dict, st: dict) -> bool:
+        c, t_c = st["catcher"], st["t_in"] + st["t_grab"]
+        st["done"] = True
+        if c["free_at"] <= t_c + 1e-12:
+            c["free_at"] = t_c + c["cooldown"]
+            c["caught"].append({"tracer": tr["name"], "t_in": st["t_in"], "t_catch": t_c, "t_grab": st["t_grab"]})
+            tr.update(state="caught", until=t_c, end="caught", held=False, held_link=None)
+            return True
+        c["missed"].append({"tracer": tr["name"], "t_in": st["t_in"], "t_grab": st["t_grab"], "why": "busy",
+                            "free_at": c["free_at"]})
+        return False
 
     def _enter(self, tr: dict, node: str, t: float, f: float, req: list[int]) -> None:
         tr["node"], tr["state"] = node, "node"
@@ -332,6 +714,7 @@ class Network:
         # 入った後のステップの残り f の間に、すでに先へ出ていった分を差し引く
         tr["credit"] = self.nodes[node]["v"] - int(f * sum(req[i] for i in outs))
         tr["path"].append({"node": node, "t": t})
+        self._note_cell(tr, node, t)
         if node in tr["stop"] or not outs:
             tr["state"], tr["arrival"] = "done", t
 
@@ -356,45 +739,81 @@ class Network:
                 for prefix, ch in self.channels.items():
                     row[f"h:{prefix}"] = [self.head(c) for c in ch["cells"]]
                 row.update({f"q:{i}": from_q(qdiv(q, self.dt_q)) for i, q in enumerate(last)})
+                bodies = {tr["name"]: self.body(tr) for tr in self.tracers
+                          if tr["length"] > 0 and tr["state"] == "node"}
+                if bodies:
+                    row["bodies"] = bodies
                 series.append(row)
         return {
-            "fluid": self.fluid.key, "dt": self.dt, "steps": steps, "series": series, "trace": traces,
+            "fluid": self.fluid.key, "temp_c": self.fluid.temp_c, "dt": self.dt, "steps": steps, "series": series, "trace": traces,
             "final": series[-1] if series else {}, "total_q": total0, "conservation_error_q": worst,
             "volumes_q": {k: nd["v"] for k, nd in self.nodes.items()},
             "links": [self._link_summary(i, ln) for i, ln in enumerate(self.links)],
             "channels": {p: self._channel_summary(ch) for p, ch in self.channels.items()},
-            "tracers": [{"name": tr["name"], "state": tr["state"], "arrival": tr["arrival"], "path": tr["path"]}
+            "tracers": [{"name": tr["name"], "state": tr["state"], "arrival": tr["arrival"], "path": tr["path"],
+                         "size": tr["size"], "length": tr["length"], "strands": tr["strands"],
+                         "stuck_time": tr["stuck_steps"] * self.dt, "stuck_at": tr["stuck_at"], "until": tr["until"],
+                         "end": tr["end"], "spilled_at": tr.get("spilled_at"), "held_since": tr["held_since"]}
                         for tr in self.tracers],
+            "catchers": [{k: c[k] for k in ("name", "node", "t_grab", "grab", "cooldown", "seed", "caught", "missed")}
+                         for c in self.catchers],
+            "lips": [{"index": i, "src": ln["src"], "dst": ln["dst"], "lip": ln["lip"], "width": ln["width"],
+                      "releases": ln["releases"]} for i, ln in enumerate(self.links) if ln["kind"] == "lip"],
         }
 
     def _link_summary(self, i: int, ln: dict) -> dict:
-        fa = ln["first_arrival_step"]
+        fa, ff = ln["first_arrival_step"], ln["first_flow_step"]
         out = {"index": i, "kind": ln["kind"], "src": ln["src"], "dst": ln["dst"], "delay": ln["delay"],
-               "first_arrival": None if fa is None else fa * self.dt, "volume_moved": from_q(ln["flow_sum"])}
+               "first_flow": None if ff is None else ff * self.dt,
+               "first_arrival": None if fa is None else fa * self.dt, "volume_moved": from_q(ln["flow_sum"]),
+               "volume_moved_q": ln["flow_sum"]}
+        if ln["kind"] == "spill":
+            out["max_outer"] = ln["max_outer"]
         if ln["kind"] == "pipe":
             h = from_q(ln["max_head"])
             v = ln["radius"] ** 2 * self.g * h / (8.0 * self.fluid.nu * ln["length"])
             re = reynolds(self.fluid.nu, v, 2.0 * ln["radius"])
             out.update(tau=ln["tau"], reynolds_max=re, laminar=re < RE_LAMINAR)
+        if ln["kind"] == "orifice":
+            h = from_q(ln["max_head"])
+            if ln["viscous"]:
+                cd, re = viscous_orifice(h, ln["diameter"], self.fluid.nu, ln["cd"], ln["delta"], self.g)
+            else:
+                cd = ln["cd"]
+                re = cd * math.sqrt(2.0 * self.g * h) * ln["diameter"] / self.fluid.nu
+            out.update(reynolds_max=re, viscous=ln["viscous"], cd_at_max_head=cd, min_cd=ln["min_cd"],
+                       viscous_regime=re < ORIFICE_RE_STEADY)
         return out
 
     def _channel_summary(self, ch: dict) -> dict:
         """樋の安定性（Courant 数）とあふれの有無。Courant = c·dt/Δx、c = dQ/dA（表の傾き）。"""
-        rating = [ln for ln in self.links if ln.get("channel") == ch["prefix"]]
-        v_max = max(from_q(ln["max_v"]) for ln in rating)
+        mine = [ln for ln in self.links if ln.get("channel") == ch["prefix"]]
+        v_max = max((from_q(ln["max_v"]) for ln in mine if ln["kind"] == "rating"), default=0.0)
+        spills = [ln for ln in mine if ln["kind"] == "spill"]
         celerity = 0.0
         for (v0, q0), (v1, q1) in zip(ch["table"], ch["table"][1:]):
             if v0 > v_max:
                 break
             celerity = max(celerity, (q1 - q0) / (v1 - v0) * ch["cell_length"])
+        lips = [ln for ln in mine if ln["kind"] == "lip"]
         return {"max_cell_volume": v_max, "overflow": v_max >= ch["volume_cap"], "celerity": celerity,
-                "courant": celerity * self.dt / ch["cell_length"], "depth_cap": ch["depth_cap"]}
+                "pond_max_depth": max((ch_depth(ln, self) for ln in lips), default=None),
+                "courant": celerity * self.dt / ch["cell_length"], "depth_cap": ch["depth_cap"],
+                "spilled": sum(from_q(ln["flow_sum"]) for ln in spills),
+                "leaked": sum(from_q(ln["flow_sum"]) for ln in mine if ln.get("crack")),
+                "max_outer_depth": max((ln["max_outer"] for ln in spills), default=None)}
+
+
+def ch_depth(ln: dict, net: "Network") -> float:
+    """lip の手前のセルにたまった最大の水深。"""
+    nd = net.nodes[ln["src"]]
+    return nd["section"].depth(from_q(ln["max_v"]) / nd["length"])
 
 
 # --- JSON の仕様から組む --------------------------------------------------
 
-LINK_BUILDERS = ("pipe", "orifice", "weir", "cam", "pump", "float_valve")
-SPEC_KEYS = {"dt", "fluid", "tanks", "channels", "links", "tracers", "t_end", "trace", "sample_every"}
+LINK_BUILDERS = ("pipe", "orifice", "weir", "cam", "pump", "valve", "float_valve")
+SPEC_KEYS = {"dt", "fluid", "temp_c", "mu", "mu_scale", "tanks", "channels", "flumes", "links", "tracers", "t_end", "trace", "sample_every"}
 
 
 def build(spec: dict) -> Network:
@@ -407,17 +826,21 @@ def build(spec: dict) -> Network:
      "links": [{"law": "pump", "src": "sea", "dst": "flume:0", "rate": 5e-5}],
      "tracers": [{"name": "somen", "node": "flume:0", "release": 30, "stop": "sea"}]}
 
-    channels は tanks の後、links の前に作る（樋のセルを管の行き先に使えるように）。
+    channels・flumes は tanks の後、links の前に作る（樋のセルを管の行き先に使えるように）。
+    flumes は {"prefix", "dst", "segments": [...], "spill"}（Network.flume を参照）。
     links の law が LINK_BUILDERS 以外なら、register_law で登録した法則として net.link に渡す。
     """
     extra = set(spec) - SPEC_KEYS
     if extra:
         raise ValueError(f"unknown spec keys: {sorted(extra)}")
-    net = Network(spec.get("dt", 0.1), spec.get("fluid", "water"))
+    net = Network(spec.get("dt", 0.1), spec.get("fluid", "water"), temp_c=spec.get("temp_c"), mu=spec.get("mu"),
+                  mu_scale=spec.get("mu_scale"))
     for t in spec.get("tanks", []):
         net.tank(**t)
     for c in spec.get("channels", []):
         net.channel(**c)
+    for fl in spec.get("flumes", []):
+        net.flume(**fl)
     for ln in spec.get("links", []):
         ln = dict(ln)
         law = ln.pop("law")

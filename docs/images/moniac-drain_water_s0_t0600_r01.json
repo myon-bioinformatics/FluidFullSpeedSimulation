@@ -1,0 +1,25 @@
+{
+  "schema": "fluidfullspeedsimulation-pixel-water/1",
+  "files": {
+    "gif": {
+      "name": "moniac-drain_water_s0_t0600_r01.gif",
+      "bytes": 86546,
+      "sha256": "85421467c9d51dc44c26b0f2e7e4e01f6d5b077f78b36adbd6fb24a5660bf17a"
+    }
+  },
+  "frames": 301,
+  "canvas": "256x256",
+  "plan": {
+    "scene": "moniac-drain",
+    "fluid": "water",
+    "ticks": 600,
+    "seed": 0,
+    "scale": 8,
+    "frame_every": 2,
+    "base_rate": 0.5
+  },
+  "pixels": 176,
+  "count_error": 0,
+  "settle_tick": 183,
+  "hash": "360bc5e6bdc488c77fab499da9a8abe68b9f3a890e6ac4a085fae3fa0815a91b"
+}

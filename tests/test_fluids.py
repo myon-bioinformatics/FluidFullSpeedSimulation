@@ -4,8 +4,8 @@ import unittest
 
 from fixedq import random_scales
 from fluids import (
-    FLUIDS, Section, channel_flow, fluid_table, get_fluid, normal_depth, poiseuille_tau, torricelli_empty_time,
-    torricelli_head,
+    FLUIDS, Section, channel_flow, fall_time, fluid_table, get_fluid, lip_flow, lip_head, normal_depth,
+    poiseuille_tau, side_spill, superelevation, torricelli_empty_time, torricelli_head,
 )
 
 
@@ -21,6 +21,19 @@ class Properties(unittest.TestCase):
             self.assertTrue(lo <= f.mu <= hi, f.key)
             self.assertTrue(f.sources)
         self.assertEqual({row["key"] for row in fluid_table()}, set(FLUIDS))
+
+    def test_placeholders_scale_water_and_stay_out_of_experiments(self):
+        from fluids import PLACEHOLDER_MU_SCALE, REAL_FLUIDS
+        w = get_fluid("water")
+        for key, k in PLACEHOLDER_MU_SCALE.items():
+            f = get_fluid(key)
+            self.assertTrue(f.placeholder)
+            self.assertEqual(f.rho, w.rho)
+            self.assertAlmostEqual(f.nu / w.nu, k, places=12)
+            self.assertNotIn(key, REAL_FLUIDS)
+        self.assertLess(get_fluid("namekian-water").nu, w.nu)  # さらさら
+        self.assertGreater(get_fluid("poison-water").nu, w.nu)  # どろっと
+        self.assertEqual(REAL_FLUIDS, ("water", "ethanol", "methanol"))
 
     def test_unknown_fluid(self):
         with self.assertRaises(KeyError):
@@ -75,6 +88,29 @@ class Sections(unittest.TestCase):
             q = item["value"]
             h = normal_depth(sec, q, 0.05, "manning", nu=nu, h_max=0.04)
             self.assertAlmostEqual(channel_flow(sec, h, 0.05, "manning", nu=nu) / q, 1.0, places=9)
+
+
+class JointsAndBends(unittest.TestCase):
+    def test_top_width(self):
+        sec = Section("semicircle", 0.04)
+        self.assertAlmostEqual(sec.top_width(0.04), 0.08)
+        self.assertEqual(sec.top_width(0.0), 0.0)
+        self.assertEqual(Section("rect", 0.05).top_width(0.01), 0.05)
+
+    def test_lip_head_inverts_lip_flow(self):
+        sec = Section("semicircle", 0.04)
+        for item in random_scales(12, 6, n_min=4, n_max=6):
+            q = item["value"]
+            h = lip_head(sec, q, 3e-3)
+            self.assertAlmostEqual(lip_flow(sec, h, 3e-3) / q, 1.0, places=9)
+        self.assertEqual(lip_flow(sec, 2e-3, 3e-3), 0.0)
+
+    def test_fall_superelevation_side_spill(self):
+        self.assertAlmostEqual(fall_time(0.05), math.sqrt(0.1 / 9.80665))
+        self.assertEqual(fall_time(0.0), 0.0)
+        self.assertAlmostEqual(superelevation(1.0, 0.08, 0.2), 0.08 / (9.80665 * 0.2))
+        self.assertEqual(side_spill(0.1, 0.03, 0.04), 0.0)
+        self.assertGreater(side_spill(0.1, 0.041, 0.04), 0.0)
 
 
 if __name__ == "__main__":
