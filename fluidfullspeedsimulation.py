@@ -23,13 +23,14 @@ import sys
 from pathlib import Path
 
 from fixedq import ONE, from_q, lag_step, qmul, shift_lag_step, to_q
-from fluids import FLUIDS, RE_LAMINAR, Section, channel_reynolds, fall_time, fluid_table, get_fluid, lip_head
+from fluids import FLUIDS, REAL_FLUIDS, RE_LAMINAR, Section, channel_reynolds, fall_time, fluid_table, get_fluid, lip_head
 from fluids import normal_depth
 from fluids import poiseuille_head, poiseuille_tau, torricelli_empty_time, torricelli_head, transport_delay
 from network import Network, critical_gain, inverse_table, jsonable, peak_to_peak, settling_time, window
 import pixelwater as pw
 
-FLUID_KEYS = tuple(FLUIDS)
+FLUID_KEYS = REAL_FLUIDS  # 実験で回す流体（仮置きの流体は入れない）
+ALL_FLUID_KEYS = tuple(FLUIDS)  # 描画で選べる流体（仮置きも含む）
 SEA = 1.0  # 外の水（海）。総量を閉じるための大きな水槽 [m³]
 
 
@@ -853,7 +854,8 @@ def render(result: dict, verbose: bool = False) -> str:
 
 
 def render_fluids() -> str:
-    rows = [f"{f['icon']} {f['key']:<9} ρ={f['rho']:g} kg/m³  μ={f['mu'] * 1e3:g} mPa·s  ν={f['nu'] * 1e6:.4g} mm²/s"
+    rows = [f"{f['icon']} {pw.EMOJI.get(f['key'], '🟦')} {f['key']:<15} ρ={f['rho']:g} kg/m³  μ={f['mu'] * 1e3:g} mPa·s"
+            f"  ν={f['nu'] * 1e6:.4g} mm²/s" + ("  🏷️ 仮置き（物性は水）" if f["placeholder"] else "")
             for f in fluid_table()]
     return "\n".join(rows)
 
@@ -929,8 +931,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="場面（試験台・樋の回路・ドット絵）")
     drw.add_argument("--view", choices=("frames", "frame", "files"), default="frames",
                      help="frames = 時刻ごとの断面図 / frame = 最後の 1 枚 / files = GIF・PNG（ドット絵だけ）")
-    drw.add_argument("--fluid", choices=FLUID_KEYS, default="water", help="作動流体")
-    drw.add_argument("--fill", help="水のブロック（色は自由。既定は流体ごとに 🟦 🟪 🟩）")
+    drw.add_argument("--fluid", choices=ALL_FLUID_KEYS, default="water", help="作動流体（🏷️ 仮置きも選べる）")
+    drw.add_argument("--fill", help="水のブロック（色は自由。既定は流体ごと: 🟦 水 🟨 エタノール 🟧 メタノール "
+                                    "🟩 Namekian Water 🟪 Poison Water）")
     drw.add_argument("--frames", type=int, default=6, help="並べる時刻の数")
     drw.add_argument("--rows", type=int, default=pw.SECTION_ROWS, help="断面図の縦の段数（既定 8）")
     drw.add_argument("--cap-mode", choices=pw.CAP_MODES, default="run-max",

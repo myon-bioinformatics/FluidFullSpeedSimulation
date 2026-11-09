@@ -22,6 +22,15 @@ class Properties(unittest.TestCase):
             self.assertTrue(f.sources)
         self.assertEqual({row["key"] for row in fluid_table()}, set(FLUIDS))
 
+    def test_placeholders_copy_water_and_stay_out_of_experiments(self):
+        from fluids import REAL_FLUIDS
+        for key in ("namekian-water", "poison-water"):
+            f = get_fluid(key)
+            self.assertTrue(f.placeholder)
+            self.assertEqual(f.nu, get_fluid("water").nu)
+            self.assertNotIn(key, REAL_FLUIDS)
+        self.assertEqual(REAL_FLUIDS, ("water", "ethanol", "methanol"))
+
     def test_unknown_fluid(self):
         with self.assertRaises(KeyError):
             get_fluid("mercury")

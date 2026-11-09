@@ -136,7 +136,7 @@ class Files(unittest.TestCase):
     def test_summary_is_json_safe(self):
         out = pw.simulate_pixels("moniac-drain", "ethanol", ticks=40)
         json.dumps(out, allow_nan=False)
-        self.assertIn("🟪", out["final"])
+        self.assertIn("🟨", out["final"])
 
 
 class Cli(unittest.TestCase):
@@ -177,6 +177,17 @@ class Cli(unittest.TestCase):
         self.assertIn("🟧", text)
         self.assertEqual(sum(line.startswith("⏱️") for line in text.splitlines()), 2)
 
+
+    def test_placeholder_fluids(self):
+        code, text = self.call("draw", "dam-break", "--fluid", "namekian-water", "--frames", "1")
+        self.assertEqual(code, 0)
+        self.assertIn("🟩", text)
+        code, text = self.call("draw", "flume", "--fluid", "poison-water", "--frames", "2")
+        self.assertEqual(code, 0)
+        self.assertIn("🟪", text)
+        code, text = self.call("fluids")
+        self.assertIn("🏷️", text)
+        self.assertNotIn("namekian-water", ffs.FLUID_KEYS)
 
     def test_draw_rigs(self):
         code, text = self.call("draw", "moniac-rig", "--frames", "2")

@@ -83,7 +83,8 @@ node py_launch.cjs --call simulate -- network.py '{"dt":1,"tanks":[...],"links":
 
 ```bash
 uv run python fluidfullspeedsimulation.py draw flume-hopper --frames 4 --rows 4   # じょうご → 管（遅れ 3 秒）→ 樋
-uv run python fluidfullspeedsimulation.py draw flume --fluid ethanol --fill 🟩      # 色は自由（流体の既定は 🟦 🟪 🟩）
+uv run python fluidfullspeedsimulation.py draw flume --fluid namekian-water         # 🟩 Namekian Water（🏷️ 仮置き）
+uv run python fluidfullspeedsimulation.py draw flume --fluid ethanol --fill 🟥      # 色は自由（--fill で何色でも）
 uv run python fluidfullspeedsimulation.py draw moniac-rig --frames 4               # 🏛️ 試験台の槽が溜まっていく
 uv run python fluidfullspeedsimulation.py draw somen-flume --cap-mode rim          # 🥢 竹の縁を縦いっぱいに
 ```
@@ -99,7 +100,7 @@ uv run python fluidfullspeedsimulation.py draw somen-flume --cap-mode rim       
 - 列: じょうご ｜ 管（🍜 が中にいる間 ⏳）｜ 樋の 20 区間。行: 高さ（上が深い）
 - 📏 段数 = round(水深 / 縦いっぱい × rows)。1 段 = 縦いっぱい / rows なので、段数から水深を ±½ 段で読み戻せる（E09 で確かめる）
 - 縦いっぱいは `--cap-mode run-max`（走らせた中の最大。樋は全区間で共通）か `rim`（樋の縁）。`rows` の既定は 8
-- 🍜 は水面の段に置く。ブロックの色は自由（`--fill`）
+- 🍜 は水面の段に置く。ブロックの色は自由（`--fill`）。既定は 🟦 水・🟨 エタノール・🟧 メタノール・🟩 Namekian Water・🟪 Poison Water
 
 ## 🟦 ドット絵の水
 
@@ -133,7 +134,10 @@ uv run python fluidfullspeedsimulation.py draw moniac-drain --fluid ethanol --sc
 | 🍶 ethanol | 789.45 | 1.20 | 1.52 | Lange（密度）、infobox 1.2 / CRC 1.144（幅 1.144–1.20） |
 | 🧴 methanol | 791.1 | 0.587 | 0.742 | Flottweg の表（ρ = μ/ν） |
 
-`fluids.FLUIDS` に 1 行足せば流体を増やせる（出典と幅も一緒に書く）。
+| 🟢 namekian-water | 998.21 | 1.0016 | 1.003 | 🏷️ 仮置き（名前と 🟩 だけ。物性は水と同じ） |
+| ☠️ poison-water | 998.21 | 1.0016 | 1.003 | 🏷️ 仮置き（名前と 🟪 だけ。物性は水と同じ） |
+
+`fluids.FLUIDS` に 1 行足せば流体を増やせる（出典と幅も一緒に書く）。🏷️ 仮置きの流体は描画では選べるが、実験（E01〜E11）の流体一覧には入れない。
 
 ## ⚠️ 限界
 

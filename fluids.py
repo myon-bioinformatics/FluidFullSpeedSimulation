@@ -29,6 +29,7 @@ class Fluid:
     mu_range: tuple[float, float]  # 文献間の幅 [Pa·s]
     temp_c: float
     sources: tuple[str, ...]
+    placeholder: bool = False  # 仮置き（名前と色だけ。物性はまだ決めていない）
 
     @property
     def nu(self) -> float:
@@ -59,6 +60,14 @@ FLUIDS: dict[str, Fluid] = {
         ("Flottweg viscosity table (0.587 mPa·s, 0.742 mm²/s at 20 °C; ρ = μ/ν)",),
     ),
 }
+
+
+# 🏷️ 仮置きの流体: 名前と色だけ先に置く（物性は水と同じ）。実験の流体一覧（REAL_FLUIDS）には入れない
+_W = FLUIDS["water"]
+for _key, _name, _icon in (("namekian-water", "Namekian Water", "🟢"), ("poison-water", "Poison Water", "☠️")):
+    FLUIDS[_key] = Fluid(_key, _name, _icon, _W.rho, _W.mu, _W.mu_range, _W.temp_c,
+                         ("仮置き: 物性は水と同じ（名前と色だけ。中身は後で決める）",), placeholder=True)
+REAL_FLUIDS = tuple(k for k, f in FLUIDS.items() if not f.placeholder)
 
 
 def get_fluid(key: str) -> Fluid:
@@ -250,7 +259,7 @@ def side_spill(cell_length: float, h_outer: float, rim: float, cd: float = 0.62,
 
 
 __all__ = [
-    "FLUIDS", "Fluid", "G", "RE_LAMINAR", "fluid_table", "get_fluid",
+    "FLUIDS", "Fluid", "G", "REAL_FLUIDS", "RE_LAMINAR", "fluid_table", "get_fluid",
     "pipe_mean_velocity", "poiseuille_head", "poiseuille_tau", "reynolds",
     "torricelli_empty_time", "torricelli_head", "transport_delay",
     "Section", "channel_flow", "channel_reynolds", "hydraulic_radius", "normal_depth",

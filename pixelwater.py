@@ -37,11 +37,14 @@ WALL, WATER, EMPTY = "#", "~", "."
 IRONMATE_BASE = {  # pixel_grid.PALETTE_BASE の一部（main, shadow）
     "C01": ("#5BBD3E", "#418A2D"),  # grass
     "C02": ("#63B3FF", "#3F75CC"),  # water
+    "C03": ("#FF6A00", "#CC3D00"),  # lava
     "C04": ("#A84DFF", "#7520B8"),  # poison
+    "C09": ("#FFD23F", "#C99A17"),  # gold
     "C07": ("#9EA4AB", "#6D737B"),  # stone
 }
-FLUID_COLOR_ID = {"water": "C02", "ethanol": "C04", "methanol": "C01"}
-EMOJI = {"water": "🟦", "ethanol": "🟪", "methanol": "🟩"}
+# 色は自由。🟩 は Namekian Water、🟪 は Poison Water の仮置き（fluids の placeholder）
+FLUID_COLOR_ID = {"water": "C02", "ethanol": "C09", "methanol": "C03", "namekian-water": "C01", "poison-water": "C04"}
+EMOJI = {"water": "🟦", "ethanol": "🟨", "methanol": "🟧", "namekian-water": "🟩", "poison-water": "🟪"}
 
 
 def _rgb(value: str) -> tuple[int, int, int]:
