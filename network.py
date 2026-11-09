@@ -189,12 +189,12 @@ def _law_float_valve(net, ln, n):
 
 
 class Network:
-    def __init__(self, dt: float, fluid: str = "water", g: float = G):
+    def __init__(self, dt: float, fluid: str = "water", g: float = G, temp_c: float | None = None):
         if dt <= 0:
             raise ValueError("dt must be positive")
         self.dt = dt
         self.dt_q = to_q(dt)
-        self.fluid = get_fluid(fluid)
+        self.fluid = get_fluid(fluid, temp_c)  # 🧊 temp_c を渡すと温度表で μ・ρ が動く（省けば 20 °C の値のまま）
         self.g = g
         self.nodes: dict[str, dict] = {}
         self.links: list[dict] = []
@@ -222,7 +222,7 @@ class Network:
                 law: str = "manning", n_manning: float = 0.010, beta: float | None = None,
                 max_depth: float | None = None, table_points: int = 256, delay: float = 0.0,
                 lip: float = 0.0, bend_radius: float | None = None, spill: str | None = None,
-                cd: float = 0.62) -> dict:
+                cd: float = 0.62, cracks: list[dict] | None = None) -> dict:
         """傾いた樋。区間セル <prefix>:0 … <prefix>:cells-1 を作り、末端を dst へつなぐ。
 
         各セルの流出は「セル体積 → 流量」の表（rating カム）で引く。表は等流の式から一度だけ作り、
@@ -232,6 +232,8 @@ class Network:
         - lip > 0: 末端は「次の竹の縁が lip だけ高い」継ぎ目。末端セルに水がたまり、越えた分だけ流れる
         - bend_radius: 曲がり（半径 R）。外側の水面が縁を越えた分は各セルから spill の節点へあふれる
         - delay: 末端の管の遅れ（段差の自由落下などに使う）
+        - cracks: 竹の割れ目 ``[{"cell": i, "area": m², "cd": 0.61}]``。そのセルの水深 h で
+          Torricelli（Cd·a·√(2gh)）だけ spill の節点へ漏れる
         """
         if cells < 1 or length <= 0 or slope <= 0:
             raise ValueError("channel needs cells >= 1, length > 0, slope > 0")
@@ -239,6 +241,8 @@ class Network:
             raise ValueError(f"unknown node {dst!r}")
         if bend_radius is not None and spill is None:
             raise ValueError("a bend needs a spill node")
+        if cracks and spill is None:
+            raise ValueError("cracks need a spill node")
         if spill is not None and spill not in self.nodes:
             raise ValueError(f"unknown spill node {spill!r}")
         sec = section if isinstance(section, Section) else Section(section["shape"], section["size"])
@@ -266,18 +270,28 @@ class Network:
                 # 曲がりの全セルと、縁の手前でたまるセルには縁からあふれる口を付ける
                 self._link("spill", name, spill, 0.0, main=len(self.links) - 1, radius=bend_radius, rim=h_cap,
                            v_cap=to_q(a_max * lc), cd=cd, max_outer=0.0, channel=prefix)
+        for crack in cracks or ():
+            unknown = set(crack) - {"cell", "area", "cd"}
+            if unknown or not 0 <= crack["cell"] < cells:
+                raise ValueError(f"bad crack {crack!r}")
+            ln = self.orifice(names[crack["cell"]], spill, area=crack["area"], cd=crack.get("cd", 0.61))
+            ln.update(channel=prefix, crack=True)
         info = {"prefix": prefix, "cells": names, "length": length, "cell_length": lc, "slope": slope,
                 "section": sec.to_dict(), "law": law, "n_manning": n_manning, "beta": beta, "depth_cap": h_cap,
-                "volume_cap": a_max * lc, "table": table, "lip": lip, "bend_radius": bend_radius}
+                "volume_cap": a_max * lc, "table": table, "lip": lip, "bend_radius": bend_radius,
+                "cracks": [dict(c) for c in cracks or ()]}
         self.channels[prefix] = info
         return info
 
     def flume(self, prefix: str, dst: str, segments: list[dict], spill: str | None = None) -> list[dict]:
         """竹をつないだ流しそうめんの台。segments を上流から順に並べ、<prefix>/<i>:<cell> を作る。
 
-        各 segment は channel() の引数（length・cells・slope・section・law …）に加えて
+        各 segment は channel() の引数（length・cells・slope・section・law・cracks …）に加えて
         ``joint``（次の竹との継ぎ目）を持てる: ``{"drop": 段差 m}``（自由落下の遅れ）か
         ``{"lip": 縁の高さ m}``（たまってから越える）。``bend_radius`` の竹は spill へあふれうる。
+        ``node_remnant``（節の削り残し）``{"at": 0〜1 の位置, "height": m}`` は竹の途中の低い縁で、
+        竹を <prefix>/<i>（節の手前、末端に縁）と <prefix>/<i>b（節の後ろ）の 2 つに分けて作る。
+        cracks の cell は分ける前の竹の通し番号。
         """
         if not segments:
             raise ValueError("flume needs at least one segment")
@@ -286,11 +300,28 @@ class Network:
         for i in range(len(segments) - 1, -1, -1):  # 下流から作る（行き先の節点を先に用意する）
             seg = dict(segments[i])
             joint = seg.pop("joint", None) or {}
+            node = seg.pop("node_remnant", None)
             unknown = set(joint) - {"drop", "lip"}
             if unknown:
                 raise ValueError(f"unknown joint keys: {sorted(unknown)}")
-            infos[i] = self.channel(f"{prefix}/{i}", nxt, delay=fall_time(joint.get("drop", 0.0), self.g),
-                                    lip=joint.get("lip", 0.0), spill=spill, **seg)
+            end = {"delay": fall_time(joint.get("drop", 0.0), self.g), "lip": joint.get("lip", 0.0)}
+            if node is None:
+                infos[i] = self.channel(f"{prefix}/{i}", nxt, spill=spill, **end, **seg)
+            else:
+                if set(node) - {"at", "height"} or not 0 < node["at"] < 1 or node["height"] <= 0:
+                    raise ValueError(f"bad node_remnant {node!r}")
+                cells, length = seg.pop("cells"), seg.pop("length")
+                cracks = seg.pop("cracks", None) or []
+                cut = max(1, min(cells - 1, round(cells * node["at"])))
+                after = self.channel(f"{prefix}/{i}b", nxt, spill=spill, cells=cells - cut,
+                                     length=length * (cells - cut) / cells, **end,
+                                     cracks=[{**c, "cell": c["cell"] - cut} for c in cracks if c["cell"] >= cut],
+                                     **seg)
+                infos[i] = self.channel(f"{prefix}/{i}", after["cells"][0], spill=spill, cells=cut,
+                                        length=length * cut / cells, lip=node["height"],
+                                        cracks=[c for c in cracks if c["cell"] < cut], **seg)
+                infos[i]["node_remnant"] = dict(node)
+                infos[i]["after_node"] = after
             infos[i]["joint"] = joint
             nxt = infos[i]["cells"][0]
         return infos
@@ -694,7 +725,7 @@ class Network:
                     row["bodies"] = bodies
                 series.append(row)
         return {
-            "fluid": self.fluid.key, "dt": self.dt, "steps": steps, "series": series, "trace": traces,
+            "fluid": self.fluid.key, "temp_c": self.fluid.temp_c, "dt": self.dt, "steps": steps, "series": series, "trace": traces,
             "final": series[-1] if series else {}, "total_q": total0, "conservation_error_q": worst,
             "volumes_q": {k: nd["v"] for k, nd in self.nodes.items()},
             "links": [self._link_summary(i, ln) for i, ln in enumerate(self.links)],
@@ -740,6 +771,7 @@ class Network:
                 "pond_max_depth": max((ch_depth(ln, self) for ln in lips), default=None),
                 "courant": celerity * self.dt / ch["cell_length"], "depth_cap": ch["depth_cap"],
                 "spilled": sum(from_q(ln["flow_sum"]) for ln in spills),
+                "leaked": sum(from_q(ln["flow_sum"]) for ln in mine if ln.get("crack")),
                 "max_outer_depth": max((ln["max_outer"] for ln in spills), default=None)}
 
 
@@ -752,7 +784,7 @@ def ch_depth(ln: dict, net: "Network") -> float:
 # --- JSON の仕様から組む --------------------------------------------------
 
 LINK_BUILDERS = ("pipe", "orifice", "weir", "cam", "pump", "valve", "float_valve")
-SPEC_KEYS = {"dt", "fluid", "tanks", "channels", "flumes", "links", "tracers", "t_end", "trace", "sample_every"}
+SPEC_KEYS = {"dt", "fluid", "temp_c", "tanks", "channels", "flumes", "links", "tracers", "t_end", "trace", "sample_every"}
 
 
 def build(spec: dict) -> Network:
@@ -772,7 +804,7 @@ def build(spec: dict) -> Network:
     extra = set(spec) - SPEC_KEYS
     if extra:
         raise ValueError(f"unknown spec keys: {sorted(extra)}")
-    net = Network(spec.get("dt", 0.1), spec.get("fluid", "water"))
+    net = Network(spec.get("dt", 0.1), spec.get("fluid", "water"), temp_c=spec.get("temp_c"))
     for t in spec.get("tanks", []):
         net.tank(**t)
     for c in spec.get("channels", []):

@@ -125,6 +125,8 @@ class Draw(unittest.TestCase):
                 res, cols = ffs.rig_section(scene)
                 self.assertEqual(res["conservation_error_q"], 0)
                 self.assertTrue(all(row["t"] >= 20.0 for row in res["series"]))
+        self.assertEqual(ffs.scene_arg("🍽️"), "chopsticks")
+        self.assertEqual(ffs.scene_arg("🧱"), "noodle-clog")
         res, cols = ffs.rig_section("noodle-length")
         view = ffs.pw.network_frames(res, cols, frames=None)
         widest = max(sum(line.count("🍜") for line in fr["lines"]) for fr in view["frames"])
