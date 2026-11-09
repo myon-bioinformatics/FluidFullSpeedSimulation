@@ -48,5 +48,9 @@ class DrawViscosity(unittest.TestCase):
                 "seed": 0, "scale": 8, "frame_every": 2, "base_rate": 0.5})
             self.assertEqual(receipt["files"]["gif"]["sha256"],
                 "6e7c35b98e1ee9f58fac531ebe62a5496d9d88b7b98e135cf4913301bc0835b4")
-            self.assertEqual(receipt["files"]["png"]["sha256"],
-                "0957eed2eda4fb051cdeae8642a83ceaad24edcd81f4d86b729c4ee731769226")
+            # zlib streams may differ across platforms; pin decoded pixels instead.
+            # The test above also checks exact PNG bytes and receipt replay locally.
+            png = pw.read_png(Path(result["paths"]["png"]).read_bytes())
+            self.assertEqual((png["width"], png["height"]), (256, 192))
+            self.assertEqual(hashlib.sha256(b"".join(png["rows"])).hexdigest(),
+                "1e93b498f0b7b4aae7e0170ee39a876d3883c138805bb3e1ba5e9bfe7eb8871b")
