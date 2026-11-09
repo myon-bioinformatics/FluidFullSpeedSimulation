@@ -24,8 +24,9 @@ import sys
 from pathlib import Path
 
 from fixedq import ONE, from_q, lag_step, qmul, shift_lag_step, to_q
-from fluids import FLUIDS, REAL_FLUIDS, RE_LAMINAR, Section, channel_reynolds, fall_time, fluid_table, get_fluid, lip_head
-from fluids import TEMP_TABLES, lip_flow, normal_depth, superelevation, table_value
+from fluids import FLUIDS, PLACEHOLDER_MU_SCALE, REAL_FLUIDS, RE_LAMINAR, Section, channel_reynolds, fall_time
+from fluids import fluid_table, get_fluid, lip_head
+from fluids import ORIFICE_DELTA, TEMP_TABLES, lip_flow, normal_depth, superelevation, table_value, viscous_orifice
 from fluids import poiseuille_head, poiseuille_tau, torricelli_empty_time, torricelli_head, transport_delay
 from network import Network, critical_gain, inverse_table, jsonable, peak_to_peak, settling_time, window
 import pixelwater as pw
@@ -561,10 +562,11 @@ NOODLES = {"somen": 1.0e-3, "hiyamugi": 1.5e-3, "udon": 2.0e-3}
 
 def somen_layout(q: float, *, law: str = "manning", beta: float | None = None, dt: float = 0.01,
                  drop: float = 0.05, lip: float = 3e-3, bend_radius: float = 0.12, bucket: float = 0.5,
-                 fluid: str = "water", temp_c: float | None = None, tail_cells: int = 10) -> Network:
+                 fluid: str = "water", temp_c: float | None = None, tail_cells: int = 10, mu: float | None = None,
+                 mu_scale: float | None = None) -> Network:
     """桶 → ポンプ → 竹 3 本（直線 → 段差 → 曲がり → 縁の継ぎ目 → 直線）→ 受け皿 → ホースで桶へ戻す。
     曲がりや継ぎ目からあふれた水は床（floor）へ。temp_c で水温を変えられる（🧊 E15）。"""
-    net = Network(dt, fluid, temp_c=temp_c).tank("bucket", 0.05, volume=bucket).tank("basin", 0.05)
+    net = Network(dt, fluid, temp_c=temp_c, mu=mu, mu_scale=mu_scale).tank("bucket", 0.05, volume=bucket).tank("basin", 0.05)
     net.tank("floor", 1.0)
     kw = {"law": law, "beta": beta, "section": BAMBOO}
     net.flume("take", "basin", [
@@ -1101,9 +1103,9 @@ def e15_cold_water(cold: float = 10.0, warm: float = 20.0, q_trickle: float = 3e
     (m_c, r_c), (m_w, r_w) = table_value("water", cold), table_value("water", warm)
     checks.append(close("table:nu-ratio", "🧊", w_c.nu / w_w.nu, (m_c / r_c) / (m_w / r_w), 1e-4,
                         note=f"ν({cold:g} °C)/ν({warm:g} °C) = 表の比（20 °C を FLUIDS の値にそろえた分のずれまで）"))
-    checks.append(check("placeholder", "🏷️", get_fluid("namekian-water", cold).nu == w_c.nu,
-                        value=get_fluid("namekian-water", cold).nu, expected=w_c.nu,
-                        note="仮置きの流体は水と同じ温度表で動く"))
+    nk = PLACEHOLDER_MU_SCALE["namekian-water"]
+    checks.append(close("placeholder", "🏷️", get_fluid("namekian-water", cold).nu, w_c.nu * nk, 1e-12,
+                        note=f"仮置きの流体は水と同じ温度表で動く（粘度は水の {nk:g} 倍のまま）"))
     summary["nu"] = {"cold": w_c.nu, "warm": w_w.nu, "ratio": w_c.nu / w_w.nu}
     summary["ethanol_spread"] = {f"{t:g}C": {"ours": get_fluid("ethanol", t).mu * 1e3, "kaye_laby": v}
                                  for t, v in TEMP_TABLES["ethanol"]["cross"].items()}
@@ -1165,11 +1167,12 @@ WEAR_CRACK = {"cell": 15, "area": 1e-6, "cd": 0.61}  # 割れ目（1 mm²、薄�
 
 def bamboo_layout(q: float, *, law: str = "manning", beta: float | None = None, dt: float = 0.01,
                   node: dict | None = None, crack: dict | None = None, temp_c: float | None = None,
-                  fluid: str = "water") -> Network:
+                  fluid: str = "water", mu: float | None = None, mu_scale: float | None = None) -> Network:
     """桶 → ポンプ → 竹 1 本（途中に節の削り残し、下流に割れ目）→ 受け皿。漏れは床（floor）へ。"""
     node = WEAR_NODE if node is None else node
     crack = WEAR_CRACK if crack is None else crack
-    net = Network(dt, fluid, temp_c=temp_c).tank("bucket", 0.05, volume=0.5).tank("basin", 0.05).tank("floor", 1.0)
+    net = Network(dt, fluid, temp_c=temp_c, mu=mu, mu_scale=mu_scale).tank("bucket", 0.05, volume=0.5).tank(
+        "basin", 0.05).tank("floor", 1.0)
     net.flume("take", "basin", [{"length": 2.0, "cells": 20, "slope": 0.05, "section": BAMBOO, "law": law,
                                  "beta": beta, "node_remnant": node, "cracks": [crack]}], spill="floor")
     net.pump("bucket", "take/0:0", rate=q)
@@ -1229,6 +1232,88 @@ def e16_bamboo_wear(q_flow: float = 5e-5, q_trickle: float = 3e-6) -> dict:
             "summary": summary, "runs": runs, "checks": checks}
 
 
+# --- E17 粘度のつまみ（🍯） ------------------------------------------------------
+
+VISC_SCALES = (0.5, 2.0, 8.0)  # 水の何倍か（さらさら〜どろっと）
+
+
+def e17_viscosity(q_trickle: float = 3e-6, scales=VISC_SCALES, drain_scales=(1.0, 30.0, 1000.0)) -> dict:
+    """粘度を直接変える（mu_scale）。効くところ（層流の樋・細管）だけが動き、効かないところ（Manning・小孔・堰・縁）
+    はビット単位で同じ。粘度が上がって小孔の Re が下がったら、viscous=True の Cd(Re) で抜け方が遅くなる。"""
+    checks, runs, summary = [], {}, {}
+    sec = Section(BAMBOO["shape"], BAMBOO["size"])
+    w = get_fluid("water")
+    base = None
+    for k in (1.0, *scales):
+        fl = get_fluid("water", mu_scale=k)
+        net = somen_layout(q_trickle, law="laminar", beta=3.0, dt=0.05, mu_scale=k)
+        net.tracer("somen", "take/0:0", release=60.0, stop="basin", size=NOODLES["somen"])
+        res = net.run(160.0)
+        hn = normal_depth(sec, q_trickle, 0.05, "laminar", nu=fl.nu, h_max=sec.size, beta=3.0)
+        tr = res["tracers"][0]
+        took = None if tr["arrival"] is None else tr["arrival"] - tr["path"][0]["t"]
+        tag = f"x{k:g}"
+        summary[tag] = {"nu": fl.nu, "depth": net.head("take/0:19"), "depth_exact": hn, "travel": took,
+                        "pond": net.head("take/1:9")}
+        checks += [
+            close(f"{tag}:depth", "📏", net.head("take/0:19"), hn, 2e-3, note="層流の等流水深（ν に効く）"),
+            conserved(f"{tag}:conserve", res),
+        ]
+        if base is None:
+            base = summary[tag]
+        else:
+            checks.append(check(f"{tag}:pond-same", "🫙", abs(summary[tag]["pond"] - base["pond"]) <= 1e-12,
+                                value=summary[tag]["pond"], expected=base["pond"],
+                                note="縁を越える堰の式に粘度は入らない → 継ぎ目のたまりは同じ"))
+            if took is not None and base["travel"]:
+                checks.append(check(f"{tag}:slower", "🐌", (took > base["travel"]) == (k > 1.0), value=took,
+                                    expected=base["travel"], note="粘いほどそうめんが遅く着く（さらさらなら速い）"))
+    # Manning（乱流）の竹は粘度によらない
+    vols = []
+    for k in (1.0, 8.0):
+        res = somen_layout(5e-5, mu_scale=k).run(20.0)
+        vols.append([res["volumes_q"][f"take/0:{i}"] for i in range(20)])
+    checks.append(check("manning-free", "🟰", vols[0] == vols[1], note="Manning の竹は ×8 でも各区間の体積がビット単位で同じ"))
+    # 小孔: Cd 一定なら粘度によらない。viscous=True では Re が下がると Cd が下がって遅くなる
+    a_orf = math.pi * 0.002 ** 2
+    t_drain = {}
+    for k in drain_scales:
+        for viscous in (False, True):
+            net = _sea(Network(0.1, mu_scale=k)).tank("tank", 0.01, head=0.3)
+            net.orifice("tank", "sea", area=a_orf, viscous=viscous)
+            res = net.run(200.0)
+            ln = res["links"][0]
+            tag = f"orifice:x{k:g}:{'visc' if viscous else 'flat'}"
+            t_drain[tag] = res["volumes_q"]["tank"]
+            summary[tag] = {"left": from_q(res["volumes_q"]["tank"]), "re_max": ln["reynolds_max"],
+                            "cd": ln["cd_at_max_head"], "viscous_regime": ln["viscous_regime"]}
+            checks.append(conserved(f"{tag}:conserve", res))
+    flat = [t_drain[f"orifice:x{k:g}:flat"] for k in drain_scales]
+    visc = [t_drain[f"orifice:x{k:g}:visc"] for k in drain_scales]
+    checks += [
+        check("orifice:flat-free", "🕳️", len(set(flat)) == 1, note="Cd 一定の小孔は粘度によらない（残りの体積が同じ）"),
+        check("orifice:visc-slower", "🍯", visc == sorted(visc) and visc[0] < visc[-1], value=[from_q(v) for v in visc],
+              note="viscous=True: 粘いほど 200 s 後に多く残る"),
+        close("orifice:re-scales", "🚩", summary[f"orifice:x{drain_scales[-1]:g}:flat"]["re_max"] * drain_scales[-1],
+              summary[f"orifice:x{drain_scales[0]:g}:flat"]["re_max"] * drain_scales[0], 1e-9,
+              note="Cd 一定なら Re ∝ 1/ν。Re < 1e4 で viscous_regime の印（水でもこの 4 mm の穴は 5.9e3 と境目より下）"),
+        close("orifice:water-unchanged", "💧", summary[f"orifice:x{drain_scales[0]:g}:visc"]["cd"], 0.61, 1e-3,
+              note="水の粘度なら Cd(Re) の補正は効かない（Cd ≈ 0.61 のまま）"),
+    ]
+    cd, re = viscous_orifice(0.3, math.sqrt(4 * a_orf / math.pi), w.nu * 1e5)
+    checks.append(close("orifice:laminar-limit", "📐", cd, ORIFICE_DELTA * math.sqrt(re), 1e-2,
+                        note="Re ≪ 1（粘度 ×1e5）では Cd ≈ δ·√Re（δ = 0.2、Merritt の層流の傾き）"))
+    # 仮置きの流体: Poison Water は水の 5 倍の粘度
+    fl = get_fluid("poison-water")
+    net = somen_layout(q_trickle, law="laminar", beta=3.0, dt=0.05, fluid="poison-water")
+    res = net.run(100.0)
+    hn = normal_depth(sec, q_trickle, 0.05, "laminar", nu=fl.nu, h_max=sec.size, beta=3.0)
+    checks.append(close("poison-water:depth", "☠️", net.head("take/0:19"), hn, 2e-3,
+                        note=f"☠️ Poison Water（粘度 ×{PLACEHOLDER_MU_SCALE['poison-water']:g}）の層流の水深"))
+    return {"params": {"q_trickle": q_trickle, "scales": list(scales), "drain_scales": list(drain_scales)},
+            "summary": summary, "runs": runs, "checks": checks}
+
+
 # --- 登録簿 ---------------------------------------------------------------
 
 EXPERIMENTS = {
@@ -1248,6 +1333,7 @@ EXPERIMENTS = {
     "E14": ("chopsticks", "🍽️", "箸ですくう（遅い麺ほど取れる、手が空くまでは取れない）", e14_chopsticks),
     "E15": ("cold-water", "🧊", "冷たい水（水温で粘度・密度が変わる）", e15_cold_water),
     "E16": ("bamboo-wear", "🪵", "竹の傷み（割れ目からの漏れ・節の削り残し）", e16_bamboo_wear),
+    "E17": ("viscosity", "🍯", "粘度のつまみ（直接・倍率、仮置きの流体、粘い小孔）", e17_viscosity),
 }
 SLUGS = {slug: eid for eid, (slug, *_rest) in EXPERIMENTS.items()}
 
@@ -1378,7 +1464,8 @@ def render(result: dict, verbose: bool = False) -> str:
 
 def render_fluids() -> str:
     rows = [f"{f['icon']} {pw.EMOJI.get(f['key'], '🟦')} {f['key']:<15} ρ={f['rho']:g} kg/m³  μ={f['mu'] * 1e3:g} mPa·s"
-            f"  ν={f['nu'] * 1e6:.4g} mm²/s" + ("  🏷️ 仮置き（物性は水）" if f["placeholder"] else "")
+            f"  ν={f['nu'] * 1e6:.4g} mm²/s" + (f"  🏷️ 仮置き（粘度は水の {PLACEHOLDER_MU_SCALE[f['key']]:g} 倍）"
+                                                if f["placeholder"] else "")
             for f in fluid_table()]
     return "\n".join(rows)
 
@@ -1393,23 +1480,26 @@ def write_jsonl(path: str, results: list[dict]) -> None:
                     fh.write("\n")
 
 
-def rig_section(scene: str, fluid: str = "water", temp_c: float | None = None) -> tuple[dict, list[str]]:
+def rig_section(scene: str, fluid: str = "water", temp_c: float | None = None, mu: float | None = None,
+                mu_scale: float | None = None) -> tuple[dict, list[str]]:
     """断面図で見る試験台（run の結果, 列）。moniac-rig は頭・貯める・戻りの管・横の槽（下の槽は水源なので省く）、
     somen-flume は竹 3 本と受け皿・床、cold-water は 10 °C の細い流れ、bamboo-wear は節と割れ目のある竹。
-    temp_c は水温（somen-flume・cold-water・bamboo-wear。cold-water は省くと 10 °C）。"""
+    temp_c は水温（somen-flume・cold-water・bamboo-wear。cold-water は省くと 10 °C）、mu・mu_scale は粘度（🍯）。
+    moniac-rig の弁は時定数で決めているので、粘度を変えても流れは変わらない。"""
+    visc = {"mu": mu, "mu_scale": mu_scale}
     if scene == "moniac-rig":
         return moniac_rig(fluid=fluid).run(1200.0), ["header", "store", "store>sump", "side"]
     if scene == "somen-flume":
-        net = somen_layout(5e-5, fluid=fluid, temp_c=temp_c)
+        net = somen_layout(5e-5, fluid=fluid, temp_c=temp_c, **visc)
         for i in range(3):
             net.tracer(f"somen-{i + 1}", "take/0:0", release=20.0 + 2 * i, stop="basin", size=NOODLES["somen"])
         return net.run(40.0, sample_every=20), ["take/0", "take/1", "take/2", "basin", "floor"]
     if scene == "noodle-length":
-        net = somen_layout(5e-5, fluid=fluid, temp_c=temp_c)
+        net = somen_layout(5e-5, fluid=fluid, temp_c=temp_c, **visc)
         net.tracer("long", "take/0:0", release=20.0, stop="basin", length=0.3, **STRAND)
         return _from(net.run(32.0, sample_every=10), 20.0), ["take/0", "take/1", "take/2"]
     if scene == "noodle-clog":
-        net = somen_layout(3e-6, law="laminar", beta=3.0, dt=0.05, fluid=fluid, temp_c=temp_c)
+        net = somen_layout(3e-6, law="laminar", beta=3.0, dt=0.05, fluid=fluid, temp_c=temp_c, **visc)
         for i in range(16):
             net.tracer(f"bunch-{i + 1:02d}", "take/0:0", release=80.0 + 5.0 * i, stop="basin", length=0.2,
                        strands=10, **STRAND)
@@ -1417,12 +1507,13 @@ def rig_section(scene: str, fluid: str = "water", temp_c: float | None = None) -
     if scene == "chopsticks":
         return _from(catch_run(5e-5, noodles=10), 24.0), ["take/1", "take/2", "basin"]
     if scene == "cold-water":
-        net = somen_layout(3e-6, law="laminar", beta=3.0, dt=0.05, fluid=fluid, temp_c=10.0 if temp_c is None else temp_c)
+        net = somen_layout(3e-6, law="laminar", beta=3.0, dt=0.05, fluid=fluid,
+                           temp_c=10.0 if temp_c is None else temp_c, **visc)
         net.tracer("hiyamugi", "take/0:0", release=40.0, stop="basin", size=NOODLES["hiyamugi"])
         net.tracer("somen", "take/0:0", release=45.0, stop="basin", size=NOODLES["somen"])
         return net.run(110.0, sample_every=10), ["take/0", "take/1", "take/2", "basin"]
     if scene == "bamboo-wear":
-        net = bamboo_layout(3e-6, law="laminar", beta=3.0, dt=0.05, fluid=fluid, temp_c=temp_c)
+        net = bamboo_layout(3e-6, law="laminar", beta=3.0, dt=0.05, fluid=fluid, temp_c=temp_c, **visc)
         for i, name in enumerate(("udon", "somen")):
             net.tracer(name, "take/0:0", release=40.0 + i, stop="basin", size=NOODLES[name])
         return net.run(100.0, sample_every=10), ["take/0", "take/0b", "basin", "floor"]
@@ -1438,18 +1529,23 @@ RIG_SCENES = ("moniac-rig", "somen-flume", "noodle-length", "noodle-clog", "chop
               "bamboo-wear")
 
 
+def _visc(args) -> dict:
+    """--mu（mPa·s）と --viscosity-scale を Network の mu（Pa·s）・mu_scale へ。"""
+    return {"mu": None if args.mu is None else args.mu * 1e-3, "mu_scale": args.viscosity_scale}
+
+
 def _draw(args) -> int:
     if args.scene in RIG_SCENES:
         if args.view == "files":
             build_parser().error(f"{args.scene} は --view frames だけ")
-        res, cols = rig_section(args.scene, args.fluid, args.temp_c)
+        res, cols = rig_section(args.scene, args.fluid, args.temp_c, **_visc(args))
         print(pw.render_frames(pw.network_frames(res, cols, frames=args.frames, rows=args.rows,
                                                  cap_mode=args.cap_mode, fill=args.fill)))
         return 0 if res["conservation_error_q"] == 0 else 1
     if args.scene in pw.SECTION_CASES:
         if args.view == "files":
             build_parser().error(f"{args.scene} は --view frames だけ")
-        res, cols = pw.section_case(args.scene, args.fluid)
+        res, cols = pw.section_case(args.scene, args.fluid, **_visc(args))
         print(pw.render_frames(pw.network_frames(res, cols, frames=args.frames, rows=args.rows,
                                                  cap_mode=args.cap_mode, fill=args.fill)))
         return 0 if res["conservation_error_q"] == 0 else 1
@@ -1463,10 +1559,21 @@ def _draw(args) -> int:
             print(f"{icons[kind]} {path}")
         print(f"🔢 {out['pixels']} px  🎬 {out['frames']}  📐 {out['canvas']}  ⏱️ {out['settle_tick']}  ⚖️ {out['count_error']}")
         return 0 if out["count_error"] == 0 else 1
-    res = pw.run_pixels(args.scene, args.fluid, ticks=args.ticks, seed=args.seed, frame_every=args.frame_every)
+    res = pw.run_pixels(args.scene, args.fluid, ticks=args.ticks, seed=args.seed, frame_every=args.frame_every,
+                        **_visc(args))
     frames = 1 if args.view == "frame" else args.frames
     print(pw.render_frames(pw.pixel_frames(res, frames=frames, fill=args.fill)))
     return 0 if res["count_error"] == 0 else 1
+
+
+def _positive(text: str) -> float:
+    try:
+        x = float(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("正の数") from exc
+    if not math.isfinite(x) or x <= 0:
+        raise argparse.ArgumentTypeError("正の数")
+    return x
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1495,6 +1602,9 @@ def build_parser() -> argparse.ArgumentParser:
     drw.add_argument("--fill", help="水のブロック（色は自由。既定は流体ごと: 🟦 水 🟨 エタノール 🟧 メタノール "
                                     "🟩 Namekian Water 🟪 Poison Water）")
     drw.add_argument("--temp-c", type=float, help="🧊 水温 °C（🥢 somen-flume・🧊 cold-water・🪵 bamboo-wear。表の範囲内）")
+    visc = drw.add_mutually_exclusive_group()
+    visc.add_argument("--mu", type=_positive, help="🍯 粘度 mPa·s を直接（水は 1.0016、温度より後に効く）")
+    visc.add_argument("--viscosity-scale", type=_positive, help="🍯 粘度を何倍にするか（例 5 でどろっと）")
     drw.add_argument("--frames", type=int, default=6, help="並べる時刻の数")
     drw.add_argument("--rows", type=int, default=pw.SECTION_ROWS, help="断面図の縦の段数（既定 8）")
     drw.add_argument("--cap-mode", choices=pw.CAP_MODES, default="run-max",

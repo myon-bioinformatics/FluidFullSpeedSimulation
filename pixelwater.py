@@ -231,22 +231,23 @@ def spread(g: Grid) -> int:
     return moved
 
 
-def lateral_rate(fluid: str, base_rate: float = 0.5) -> int:
-    """横移動の頻度（Q）。base_rate × ν_water / ν。"""
+def lateral_rate(fluid: str, base_rate: float = 0.5, mu: float | None = None, mu_scale: float | None = None) -> int:
+    """横移動の頻度（Q）。base_rate × ν_water / ν（🍯 mu・mu_scale で粘度を変えた流体にも使える）。"""
     nu_w = get_fluid("water").nu
-    return to_q(base_rate * nu_w / get_fluid(fluid).nu)
+    return to_q(base_rate * nu_w / get_fluid(fluid, mu=mu, mu_scale=mu_scale).nu)
 
 
 # --- 回す --------------------------------------------------------------------
 
 def run_pixels(scene: str = "dam-break", fluid: str = "water", *, ticks: int | None = None, seed: int | None = 0,
-               base_rate: float = 0.5, frame_every: int = 2, map_lines=None) -> dict:
+               base_rate: float = 0.5, frame_every: int = 2, map_lines=None, mu: float | None = None,
+               mu_scale: float | None = None) -> dict:
     """シミュレーション本体。frames（各フレームの水・落下中の行マスク）を含む Python の dict を返す。"""
     if frame_every < 1:
         raise ValueError("frame_every must be >= 1")
     lines = map_lines if map_lines is not None else scene_map(scene)
     g = parse_map(lines, seed)
-    rate = lateral_rate(fluid, base_rate)
+    rate = lateral_rate(fluid, base_rate, mu, mu_scale)
     if ticks is None:
         ticks = {"dam-break": 800, "moniac-drain": 600}.get(scene, 800)
     n0 = g.count()
@@ -793,7 +794,8 @@ def pixel_frames(res: dict, *, frames: int | None = 6, fill: str | None = None) 
     return {"frames": out, "arrivals": pixel_arrivals(res)}
 
 
-def section_case(name: str = "flume", fluid: str = "water", *, dt: float = 0.05) -> tuple[dict, list[str]]:
+def section_case(name: str = "flume", fluid: str = "water", *, dt: float = 0.05, mu: float | None = None,
+                 mu_scale: float | None = None) -> tuple[dict, list[str]]:
     """断面図を試す回路（network の部品だけで組む）。戻り値は (run の結果, 列)。
 
     - flume: 空の樋（長方形、層流、20 区間）へポンプで流し込み、10 秒後にトレーサー 🍜 を放す
@@ -801,7 +803,7 @@ def section_case(name: str = "flume", fluid: str = "water", *, dt: float = 0.05)
     """
     from network import Network  # 遅延 import（pixelwater 単体はセル・オートマトンだけで使える）
 
-    net = Network(dt, fluid).tank("sea", 1.0, volume=1.0)
+    net = Network(dt, fluid, mu=mu, mu_scale=mu_scale).tank("sea", 1.0, volume=1.0)
     net.channel("flume", "sea", length=2.0, cells=20, slope=0.05, section={"shape": "rect", "size": 0.05},
                 law="laminar", max_depth=0.005)
     if name == "flume":

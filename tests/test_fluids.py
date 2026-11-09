@@ -22,13 +22,17 @@ class Properties(unittest.TestCase):
             self.assertTrue(f.sources)
         self.assertEqual({row["key"] for row in fluid_table()}, set(FLUIDS))
 
-    def test_placeholders_copy_water_and_stay_out_of_experiments(self):
-        from fluids import REAL_FLUIDS
-        for key in ("namekian-water", "poison-water"):
+    def test_placeholders_scale_water_and_stay_out_of_experiments(self):
+        from fluids import PLACEHOLDER_MU_SCALE, REAL_FLUIDS
+        w = get_fluid("water")
+        for key, k in PLACEHOLDER_MU_SCALE.items():
             f = get_fluid(key)
             self.assertTrue(f.placeholder)
-            self.assertEqual(f.nu, get_fluid("water").nu)
+            self.assertEqual(f.rho, w.rho)
+            self.assertAlmostEqual(f.nu / w.nu, k, places=12)
             self.assertNotIn(key, REAL_FLUIDS)
+        self.assertLess(get_fluid("namekian-water").nu, w.nu)  # さらさら
+        self.assertGreater(get_fluid("poison-water").nu, w.nu)  # どろっと
         self.assertEqual(REAL_FLUIDS, ("water", "ethanol", "methanol"))
 
     def test_unknown_fluid(self):

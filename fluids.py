@@ -64,11 +64,16 @@ FLUIDS: dict[str, Fluid] = {
 }
 
 
-# 🏷️ 仮置きの流体: 名前と色だけ先に置く（物性は水と同じ）。実験の流体一覧（REAL_FLUIDS）には入れない
+# 🏷️ 仮置きの流体: 名前と色と粘度の倍率だけ先に置く（密度は水と同じ）。実験の流体一覧（REAL_FLUIDS）には入れない
+#    Namekian Water はさらさら（水の 0.8 倍）、Poison Water はどろっと（水の 5 倍）。どちらも架空の値
 _W = FLUIDS["water"]
-for _key, _name, _icon in (("namekian-water", "Namekian Water", "🟢"), ("poison-water", "Poison Water", "☠️")):
-    FLUIDS[_key] = Fluid(_key, _name, _icon, _W.rho, _W.mu, _W.mu_range, _W.temp_c,
-                         ("仮置き: 物性は水と同じ（名前と色だけ。中身は後で決める）",), placeholder=True)
+PLACEHOLDER_MU_SCALE = {"namekian-water": 0.8, "poison-water": 5.0}
+for _key, _name, _icon, _note in (("namekian-water", "Namekian Water", "🟢", "さらさら"),
+                                  ("poison-water", "Poison Water", "☠️", "どろっと")):
+    _k = PLACEHOLDER_MU_SCALE[_key]
+    FLUIDS[_key] = Fluid(_key, _name, _icon, _W.rho, _W.mu * _k, (_W.mu_range[0] * _k, _W.mu_range[1] * _k), _W.temp_c,
+                         (f"仮置き: 密度は水と同じ、粘度は水の {_k:g} 倍（{_note}。架空の値で、中身は後で決める）",),
+                         placeholder=True)
 REAL_FLUIDS = tuple(k for k, f in FLUIDS.items() if not f.placeholder)
 
 
@@ -122,20 +127,36 @@ def temperature_range(key: str) -> tuple[float, float]:
     return pts[0][0], pts[-1][0]
 
 
-def get_fluid(key: str, temp_c: float | None = None) -> Fluid:
-    """流体を引く。temp_c を渡すと、温度表の比で μ・ρ を動かした流体を返す（基準温度なら元のまま）。"""
+def get_fluid(key: str, temp_c: float | None = None, mu: float | None = None,
+              mu_scale: float | None = None) -> Fluid:
+    """流体を引く。
+
+    - temp_c: 温度表の比で μ・ρ を動かす（基準温度なら元のまま）
+    - mu: 粘度 [Pa·s] を直接決める（温度で動くのは密度だけになる）
+    - mu_scale: 粘度を何倍にするか（温度を当てた後に掛ける）
+    mu と mu_scale はどちらか一方だけ。どちらも省けば今までと 1 ビットも変わらない。
+    """
     try:
         base = FLUIDS[key.lower()]
     except KeyError:
         raise KeyError(f"unknown fluid {key!r}; choose from {sorted(FLUIDS)}") from None
-    if temp_c is None or temp_c == base.temp_c:
-        return base
-    mu_t, rho_t = table_value(base.key, temp_c)
-    mu_0, rho_0 = table_value(base.key, base.temp_c)
-    k_mu, k_rho = mu_t / mu_0, rho_t / rho_0
-    return replace(base, rho=base.rho * k_rho, mu=base.mu * k_mu,
-                   mu_range=(base.mu_range[0] * k_mu, base.mu_range[1] * k_mu), temp_c=float(temp_c),
-                   sources=base.sources + _table_for(base)["sources"])
+    if mu is not None and mu_scale is not None:
+        raise ValueError("give mu or mu_scale, not both")
+    fl = base
+    if temp_c is not None and temp_c != base.temp_c:
+        mu_t, rho_t = table_value(base.key, temp_c)
+        mu_0, rho_0 = table_value(base.key, base.temp_c)
+        k_mu, k_rho = mu_t / mu_0, rho_t / rho_0
+        fl = replace(base, rho=base.rho * k_rho, mu=base.mu * k_mu,
+                     mu_range=(base.mu_range[0] * k_mu, base.mu_range[1] * k_mu), temp_c=float(temp_c),
+                     sources=base.sources + _table_for(base)["sources"])
+    if mu is not None or mu_scale is not None:
+        k = (mu / fl.mu) if mu is not None else mu_scale
+        if not (isinstance(k, (int, float)) and math.isfinite(k) and k > 0):
+            raise ValueError("mu and mu_scale must be positive and finite")
+        note = f"μ を {fl.mu * k * 1e3:.6g} mPa·s に直接指定" if mu is not None else f"μ を {k:g} 倍に指定"
+        fl = replace(fl, mu=fl.mu * k, mu_range=(fl.mu_range[0] * k, fl.mu_range[1] * k), sources=fl.sources + (note,))
+    return fl
 
 
 def fluid_table() -> list[dict]:
@@ -316,6 +337,31 @@ def superelevation(velocity: float, top_width: float, radius: float, g: float = 
     return velocity * velocity * top_width / (g * radius)
 
 
+ORIFICE_DELTA = 0.2  # 小孔の層流係数 δ（低い Re で Cd ≈ δ·√Re。Merritt 1967 の鋭いふちの小孔の目安）
+
+
+def orifice_cd(re: float, cd_inf: float = 0.61, delta: float = ORIFICE_DELTA) -> float:
+    """Re で変わる小孔の流量係数。低い Re では δ·√Re、高い Re では Cd∞ に近づく。
+    二つを cd_inf·tanh(δ·√Re / cd_inf) でつなぐ（つなぎ方はこちらの選んだ近似。実測にある山は再現しない）。"""
+    if re <= 0:
+        return 0.0
+    return cd_inf * math.tanh(delta * math.sqrt(re) / cd_inf)
+
+
+def viscous_orifice(h: float, diameter: float, nu: float, cd_inf: float = 0.61, delta: float = ORIFICE_DELTA,
+                    g: float = G) -> tuple[float, float]:
+    """水深 h での (Cd, Re)。Re = v·d/ν、v = Cd·√(2gh) なので Cd = orifice_cd(Re) を二分法で解く。"""
+    if h <= 0:
+        return 0.0, 0.0
+    k = math.sqrt(2.0 * g * h) * diameter / nu
+    lo, hi = 0.0, cd_inf
+    for _ in range(60):
+        mid = 0.5 * (lo + hi)
+        lo, hi = (mid, hi) if orifice_cd(mid * k, cd_inf, delta) > mid else (lo, mid)
+    cd = 0.5 * (lo + hi)
+    return cd, cd * k
+
+
 def side_spill(cell_length: float, h_outer: float, rim: float, cd: float = 0.62, g: float = G) -> float:
     """外側の水面が縁 rim を越えた分が、セルの長さ全体から横へあふれる流量（横越流堰）。"""
     over = h_outer - rim
@@ -331,4 +377,5 @@ __all__ = [
     "torricelli_empty_time", "torricelli_head", "transport_delay",
     "Section", "channel_flow", "channel_reynolds", "hydraulic_radius", "normal_depth",
     "fall_time", "lip_flow", "lip_head", "side_spill", "superelevation",
+    "ORIFICE_DELTA", "PLACEHOLDER_MU_SCALE", "orifice_cd", "viscous_orifice",
 ]

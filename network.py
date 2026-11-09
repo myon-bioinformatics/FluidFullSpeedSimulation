@@ -34,6 +34,7 @@ from typing import Callable
 
 from fixedq import ONE, Cam, DelayLine, clamp, from_q, lag_gain, lag_step, qdiv, qmul, qsqrt, to_q
 from fluids import G, RE_LAMINAR, Section, channel_flow, fall_time, get_fluid, lip_flow, reynolds, side_spill
+from fluids import viscous_orifice
 from fluids import superelevation
 
 LAWS: dict[str, Callable] = {}
@@ -60,10 +61,21 @@ def _law_pipe(net, ln, n):
     return qmul(net.nodes[ln["src"]]["v"], ln["k"])
 
 
+ORIFICE_RE_STEADY = 1.0e4  # これより低い Re では鋭いふちの小孔の Cd が Re で大きく変わる（Sci. Rep. 2023 ほか）
+
+
 @register_law("orifice")
 def _law_orifice(net, ln, n):
     h = net.head_q(ln["src"])
-    return qmul(ln["coef"], qsqrt(h)) if h > 0 else 0
+    if h <= 0:
+        return 0
+    ln["max_head"] = max(ln["max_head"], h)
+    if not ln["viscous"]:
+        return qmul(ln["coef"], qsqrt(h))
+    hf = from_q(h)
+    cd, re = viscous_orifice(hf, ln["diameter"], net.fluid.nu, ln["cd"], ln["delta"], net.g)
+    ln["min_cd"] = cd if ln["min_cd"] is None else min(ln["min_cd"], cd)
+    return qmul(to_q(cd * ln["orifice_area"] * math.sqrt(2.0 * net.g * hf)), net.dt_q)
 
 
 @register_law("weir_rect")
@@ -189,12 +201,14 @@ def _law_float_valve(net, ln, n):
 
 
 class Network:
-    def __init__(self, dt: float, fluid: str = "water", g: float = G, temp_c: float | None = None):
+    def __init__(self, dt: float, fluid: str = "water", g: float = G, temp_c: float | None = None,
+                 mu: float | None = None, mu_scale: float | None = None):
         if dt <= 0:
             raise ValueError("dt must be positive")
         self.dt = dt
         self.dt_q = to_q(dt)
-        self.fluid = get_fluid(fluid, temp_c)  # 🧊 temp_c を渡すと温度表で μ・ρ が動く（省けば 20 °C の値のまま）
+        # 🧊 temp_c を渡すと温度表で μ・ρ が動く。🍯 mu（Pa·s）か mu_scale（倍率）で粘度を直接変えられる
+        self.fluid = get_fluid(fluid, temp_c, mu=mu, mu_scale=mu_scale)
         self.g = g
         self.nodes: dict[str, dict] = {}
         self.links: list[dict] = []
@@ -358,9 +372,15 @@ class Network:
         return self._link("pipe", src, dst, delay, radius=radius, length=length,
                           conductance=c, tau=tau, k=lag_gain(self.dt, tau))
 
-    def orifice(self, src: str, dst: str, *, area: float, cd: float = 0.61, delay: float = 0.0) -> dict:
+    def orifice(self, src: str, dst: str, *, area: float, cd: float = 0.61, delay: float = 0.0,
+                viscous: bool = False, delta: float | None = None) -> dict:
+        """小孔（Torricelli）。viscous=True で、粘度で下がる流量係数（fluids.orifice_cd）を毎ステップ解く。
+        省くと Cd 一定のまま（粘度によらない）。どちらでも結果に Re と、Re の低さの印 viscous_regime を残す。"""
+        from fluids import ORIFICE_DELTA
         coef = to_q(cd * area * math.sqrt(2.0 * self.g) * self.dt)
-        return self._link("orifice", src, dst, delay, coef=coef, orifice_area=area, cd=cd)
+        return self._link("orifice", src, dst, delay, coef=coef, orifice_area=area, cd=cd, viscous=viscous,
+                          delta=ORIFICE_DELTA if delta is None else delta, diameter=math.sqrt(4.0 * area / math.pi),
+                          min_cd=None)
 
     def weir(self, src: str, dst: str, *, shape: str = "rect", width: float = 0.02, angle_deg: float = 90.0,
              cd: float | None = None, delay: float = 0.0) -> dict:
@@ -754,6 +774,15 @@ class Network:
             v = ln["radius"] ** 2 * self.g * h / (8.0 * self.fluid.nu * ln["length"])
             re = reynolds(self.fluid.nu, v, 2.0 * ln["radius"])
             out.update(tau=ln["tau"], reynolds_max=re, laminar=re < RE_LAMINAR)
+        if ln["kind"] == "orifice":
+            h = from_q(ln["max_head"])
+            if ln["viscous"]:
+                cd, re = viscous_orifice(h, ln["diameter"], self.fluid.nu, ln["cd"], ln["delta"], self.g)
+            else:
+                cd = ln["cd"]
+                re = cd * math.sqrt(2.0 * self.g * h) * ln["diameter"] / self.fluid.nu
+            out.update(reynolds_max=re, viscous=ln["viscous"], cd_at_max_head=cd, min_cd=ln["min_cd"],
+                       viscous_regime=re < ORIFICE_RE_STEADY)
         return out
 
     def _channel_summary(self, ch: dict) -> dict:
@@ -784,7 +813,7 @@ def ch_depth(ln: dict, net: "Network") -> float:
 # --- JSON の仕様から組む --------------------------------------------------
 
 LINK_BUILDERS = ("pipe", "orifice", "weir", "cam", "pump", "valve", "float_valve")
-SPEC_KEYS = {"dt", "fluid", "temp_c", "tanks", "channels", "flumes", "links", "tracers", "t_end", "trace", "sample_every"}
+SPEC_KEYS = {"dt", "fluid", "temp_c", "mu", "mu_scale", "tanks", "channels", "flumes", "links", "tracers", "t_end", "trace", "sample_every"}
 
 
 def build(spec: dict) -> Network:
@@ -804,7 +833,8 @@ def build(spec: dict) -> Network:
     extra = set(spec) - SPEC_KEYS
     if extra:
         raise ValueError(f"unknown spec keys: {sorted(extra)}")
-    net = Network(spec.get("dt", 0.1), spec.get("fluid", "water"), temp_c=spec.get("temp_c"))
+    net = Network(spec.get("dt", 0.1), spec.get("fluid", "water"), temp_c=spec.get("temp_c"), mu=spec.get("mu"),
+                  mu_scale=spec.get("mu_scale"))
     for t in spec.get("tanks", []):
         net.tank(**t)
     for c in spec.get("channels", []):
