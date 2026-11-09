@@ -5,14 +5,16 @@
 - Torricelli（小孔・非粘性）: dh/dt = -(Cd·a/A)·√(2gh)。ρ・μ が消えるので流体によらない。
 - Hagen–Poiseuille（細管・層流）: Q = π r⁴ ρ g h / (8 μ L) = (π r⁴ g / (8 ν L))·h。
   h は時定数 τ = 8 ν L A / (π r⁴ g) で指数的に減る。速さは動粘度 ν = μ/ρ だけで決まる。
-- 層流の前提は Re = v·D/ν < 2300 で確かめる。入口・出口損失や温度変化は入れない。
+- 層流の前提は Re = v·D/ν < 2300 で確かめる。入口・出口損失は入れない。
+- 🧊 温度: ``get_fluid(key, temp_c)`` で μ・ρ を温度表から引く（TEMP_TABLES）。温度での変わり方（形）を表から取り、
+  基準温度（20 °C）では FLUIDS の値にそろえる（比を掛ける）ので、温度を指定しない計算は今までと 1 ビットも変わらない。
 - 樋（開水路）: Manning（乱流、粘度によらない）と層流の薄い流れ（ν に効く）。断面は長方形と半円（竹）。
 """
 
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 
 
 G = 9.80665  # 標準重力加速度 [m/s²]
@@ -70,11 +72,70 @@ for _key, _name, _icon in (("namekian-water", "Namekian Water", "🟢"), ("poiso
 REAL_FLUIDS = tuple(k for k, f in FLUIDS.items() if not f.placeholder)
 
 
-def get_fluid(key: str) -> Fluid:
+# 🧊 温度表 (°C, μ [mPa·s], ρ [kg/m³])。μ は対数で、ρ はそのまま線形に補間する。表の外は扱わない
+TEMP_TABLES: dict[str, dict] = {
+    "water": {
+        "points": [(0.0, 1.792, 999.8), (2.0, 1.6735, 999.9), (5.0, 1.5182, 1000.0), (10.0, 1.3059, 999.7),
+                   (15.0, 1.1375, 999.1), (20.0, 1.0016, 998.2), (25.0, 0.8900, 997.0), (30.0, 0.7972, 995.6),
+                   (35.0, 0.7191, 994.0), (40.0, 0.6527, 992.2)],
+        "sources": ("Anton Paar Wiki: Viscosity of Water（IAPWS 2008、2–40 °C、ρ は 4 桁）",
+                    "chem-casts water table（0 °C: 1.792 mPa·s, 999.8 kg/m³）"),
+        # 別の出典（chem-casts）での値。二つの出典の幅を検証で見る
+        "cross": {10.0: 1.308, 30.0: 0.797},
+    },
+    "ethanol": {
+        "points": [(t, mu, (0.8063372 - 8.461834e-4 * t) * 1000.0) for t, mu in (
+            (0.0, 1.720), (5.0, 1.546), (10.0, 1.394), (15.0, 1.261), (20.0, 1.144), (25.0, 1.040),
+            (30.0, 0.949), (40.0, 0.794))],
+        "sources": ("chemeurope Ethanol data page: μ（CHERIC Pure Component Properties）",
+                    "Wikipedia Ethanol data page: ρ = −8.461834e-4·T + 0.8063372 g/cm³（Lange の表からの直線、R² 0.99999）"),
+        # Kaye & Laby（Anton Paar Wiki）は 0 °C 1.873・30 °C 0.983 mPa·s。出典間で 3〜9 % ずれる
+        "cross": {0.0: 1.873, 30.0: 0.983},
+    },
+    "methanol": {
+        "points": [(0.0, 0.797, 810.0), (20.0, 0.594, 792.0), (25.0, 0.543, 787.0)],
+        "sources": ("Anton Paar Wiki: Viscosity of Methanol（Kaye & Laby ほか、0–25 °C）",),
+        "cross": {},
+    },
+}
+
+
+def _table_for(fl: Fluid) -> dict:
+    return TEMP_TABLES["water" if fl.placeholder else fl.key]
+
+
+def table_value(key: str, temp_c: float) -> tuple[float, float]:
+    """温度表そのものの (μ [mPa·s], ρ [kg/m³])。μ は ln μ を、ρ は ρ を、隣り合う点の間で直線にする。"""
+    pts = _table_for(get_fluid(key))["points"]
+    lo, hi = pts[0][0], pts[-1][0]
+    if not lo <= temp_c <= hi:
+        raise ValueError(f"{key}: {temp_c} °C is outside the table ({lo}–{hi} °C)")
+    for (t0, m0, r0), (t1, m1, r1) in zip(pts, pts[1:]):
+        if t0 <= temp_c <= t1:
+            w = (temp_c - t0) / (t1 - t0)
+            return math.exp(math.log(m0) + w * (math.log(m1) - math.log(m0))), r0 + w * (r1 - r0)
+    return pts[-1][1], pts[-1][2]
+
+
+def temperature_range(key: str) -> tuple[float, float]:
+    pts = _table_for(get_fluid(key))["points"]
+    return pts[0][0], pts[-1][0]
+
+
+def get_fluid(key: str, temp_c: float | None = None) -> Fluid:
+    """流体を引く。temp_c を渡すと、温度表の比で μ・ρ を動かした流体を返す（基準温度なら元のまま）。"""
     try:
-        return FLUIDS[key.lower()]
+        base = FLUIDS[key.lower()]
     except KeyError:
         raise KeyError(f"unknown fluid {key!r}; choose from {sorted(FLUIDS)}") from None
+    if temp_c is None or temp_c == base.temp_c:
+        return base
+    mu_t, rho_t = table_value(base.key, temp_c)
+    mu_0, rho_0 = table_value(base.key, base.temp_c)
+    k_mu, k_rho = mu_t / mu_0, rho_t / rho_0
+    return replace(base, rho=base.rho * k_rho, mu=base.mu * k_mu,
+                   mu_range=(base.mu_range[0] * k_mu, base.mu_range[1] * k_mu), temp_c=float(temp_c),
+                   sources=base.sources + _table_for(base)["sources"])
 
 
 def fluid_table() -> list[dict]:
@@ -259,7 +320,8 @@ def side_spill(cell_length: float, h_outer: float, rim: float, cd: float = 0.62,
 
 
 __all__ = [
-    "FLUIDS", "Fluid", "G", "REAL_FLUIDS", "RE_LAMINAR", "fluid_table", "get_fluid",
+    "FLUIDS", "Fluid", "G", "REAL_FLUIDS", "RE_LAMINAR", "TEMP_TABLES", "fluid_table", "get_fluid", "table_value",
+    "temperature_range",
     "pipe_mean_velocity", "poiseuille_head", "poiseuille_tau", "reynolds",
     "torricelli_empty_time", "torricelli_head", "transport_delay",
     "Section", "channel_flow", "channel_reynolds", "hydraulic_radius", "normal_depth",
