@@ -867,11 +867,12 @@ WEAR_CRACK = {"cell": 15, "area": 1e-6, "cd": 0.61}  # 割れ目（1 mm²、薄�
 
 
 def bamboo_layout(q: float, *, law: str = "manning", beta: float | None = None, dt: float = 0.01,
-                  node: dict | None = None, crack: dict | None = None, temp_c: float | None = None) -> Network:
+                  node: dict | None = None, crack: dict | None = None, temp_c: float | None = None,
+                  fluid: str = "water") -> Network:
     """桶 → ポンプ → 竹 1 本（途中に節の削り残し、下流に割れ目）→ 受け皿。漏れは床（floor）へ。"""
     node = WEAR_NODE if node is None else node
     crack = WEAR_CRACK if crack is None else crack
-    net = Network(dt, temp_c=temp_c).tank("bucket", 0.05, volume=0.5).tank("basin", 0.05).tank("floor", 1.0)
+    net = Network(dt, fluid, temp_c=temp_c).tank("bucket", 0.05, volume=0.5).tank("basin", 0.05).tank("floor", 1.0)
     net.flume("take", "basin", [{"length": 2.0, "cells": 20, "slope": 0.05, "section": BAMBOO, "law": law,
                                  "beta": beta, "node_remnant": node, "cracks": [crack]}], spill="floor")
     net.pump("bucket", "take/0:0", rate=q)
@@ -1000,7 +1001,7 @@ def fluid_aliases() -> dict[str, str]:
 
 
 SCENE_ICONS = {"🏛": "moniac-rig", "🥢": "somen-flume", "🎋": "flume", "🫙": "flume-hopper", "🌊": "dam-break",
-               "🕳": "moniac-drain"}
+               "🕳": "moniac-drain", "🧊": "cold-water", "🪵": "bamboo-wear"}
 
 
 def fluid_arg(text: str) -> str:
@@ -1091,23 +1092,24 @@ def write_jsonl(path: str, results: list[dict]) -> None:
                     fh.write("\n")
 
 
-def rig_section(scene: str, fluid: str = "water") -> tuple[dict, list[str]]:
+def rig_section(scene: str, fluid: str = "water", temp_c: float | None = None) -> tuple[dict, list[str]]:
     """断面図で見る試験台（run の結果, 列）。moniac-rig は頭・貯める・戻りの管・横の槽（下の槽は水源なので省く）、
-    somen-flume は竹 3 本と受け皿・床、cold-water は 10 °C の細い流れ、bamboo-wear は節と割れ目のある竹。"""
+    somen-flume は竹 3 本と受け皿・床、cold-water は 10 °C の細い流れ、bamboo-wear は節と割れ目のある竹。
+    temp_c は水温（somen-flume・cold-water・bamboo-wear。cold-water は省くと 10 °C）。"""
     if scene == "moniac-rig":
         return moniac_rig(fluid=fluid).run(1200.0), ["header", "store", "store>sump", "side"]
     if scene == "somen-flume":
-        net = somen_layout(5e-5, fluid=fluid)
+        net = somen_layout(5e-5, fluid=fluid, temp_c=temp_c)
         for i in range(3):
             net.tracer(f"somen-{i + 1}", "take/0:0", release=20.0 + 2 * i, stop="basin", size=NOODLES["somen"])
         return net.run(40.0, sample_every=20), ["take/0", "take/1", "take/2", "basin", "floor"]
     if scene == "cold-water":
-        net = somen_layout(3e-6, law="laminar", beta=3.0, dt=0.05, fluid=fluid, temp_c=10.0)
+        net = somen_layout(3e-6, law="laminar", beta=3.0, dt=0.05, fluid=fluid, temp_c=10.0 if temp_c is None else temp_c)
         net.tracer("hiyamugi", "take/0:0", release=40.0, stop="basin", size=NOODLES["hiyamugi"])
         net.tracer("somen", "take/0:0", release=45.0, stop="basin", size=NOODLES["somen"])
         return net.run(110.0, sample_every=10), ["take/0", "take/1", "take/2", "basin"]
     if scene == "bamboo-wear":
-        net = bamboo_layout(3e-6, law="laminar", beta=3.0, dt=0.05)
+        net = bamboo_layout(3e-6, law="laminar", beta=3.0, dt=0.05, fluid=fluid, temp_c=temp_c)
         for i, name in enumerate(("udon", "somen")):
             net.tracer(name, "take/0:0", release=40.0 + i, stop="basin", size=NOODLES[name])
         return net.run(100.0, sample_every=10), ["take/0", "take/0b", "basin", "floor"]
@@ -1121,7 +1123,7 @@ def _draw(args) -> int:
     if args.scene in RIG_SCENES:
         if args.view == "files":
             build_parser().error(f"{args.scene} は --view frames だけ")
-        res, cols = rig_section(args.scene, args.fluid)
+        res, cols = rig_section(args.scene, args.fluid, args.temp_c)
         print(pw.render_frames(pw.network_frames(res, cols, frames=args.frames, rows=args.rows,
                                                  cap_mode=args.cap_mode, fill=args.fill)))
         return 0 if res["conservation_error_q"] == 0 else 1
@@ -1164,7 +1166,7 @@ def build_parser() -> argparse.ArgumentParser:
                          allow_abbrev=False)
     scenes = RIG_SCENES + pw.SECTION_CASES + pw.SCENES
     drw.add_argument("scene", type=scene_arg, choices=scenes,
-                     help="場面（名前か 🏛️ 🥢 🎋 🫙 🌊 🕳️）")
+                     help="場面（名前か 🏛️ 🥢 🧊 🪵 🎋 🫙 🌊 🕳️）")
     drw.add_argument("block", nargs="?", type=block_arg,
                      help="流体のブロック・アイコン（🟦 🟨 🟧 🟩 🟪 / 💧 🍶 🧴 🟢 ☠️）か、塗りたい好きな絵文字")
     drw.add_argument("--view", choices=("frames", "frame", "files"), default="frames",
@@ -1173,6 +1175,7 @@ def build_parser() -> argparse.ArgumentParser:
                      help="作動流体（キーか絵文字。🏷️ 仮置きも選べる。既定 water）")
     drw.add_argument("--fill", help="水のブロック（色は自由。既定は流体ごと: 🟦 水 🟨 エタノール 🟧 メタノール "
                                     "🟩 Namekian Water 🟪 Poison Water）")
+    drw.add_argument("--temp-c", type=float, help="🧊 水温 °C（🥢 somen-flume・🧊 cold-water・🪵 bamboo-wear。表の範囲内）")
     drw.add_argument("--frames", type=int, default=6, help="並べる時刻の数")
     drw.add_argument("--rows", type=int, default=pw.SECTION_ROWS, help="断面図の縦の段数（既定 8）")
     drw.add_argument("--cap-mode", choices=pw.CAP_MODES, default="run-max",

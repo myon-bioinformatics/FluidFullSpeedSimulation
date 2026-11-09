@@ -45,6 +45,15 @@ class EmojiArguments(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("🟧", text)
 
+    def test_scene_icons_and_temperature(self):
+        code, text = self.call("draw", "🧊", "--frames", "1", "--temp-c", "5")
+        self.assertEqual(code, 0)
+        code, text = self.call("draw", "🪵", "🟪", "--frames", "1")
+        self.assertEqual(code, 0)
+        self.assertIn("🟪", text)
+        for icon, scene in ffs.SCENE_ICONS.items():
+            self.assertIn(scene, ffs.RIG_SCENES + ffs.pw.SECTION_CASES + ffs.pw.SCENES, icon)
+
     def test_any_emoji_paints(self):
         code, text = self.call("draw", "🥢", "🟥", "--frames", "1")
         self.assertEqual(code, 0)

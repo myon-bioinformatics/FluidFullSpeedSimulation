@@ -18,6 +18,7 @@ uv run python fluidfullspeedsimulation.py run flume -v --jsonl plot.jsonl   # �
 uv run python fluidfullspeedsimulation.py run 🥢                             # 実験はアイコンでも選べる
 uv run python fluidfullspeedsimulation.py draw 🏛️ 🟩                         # 場面と流体（ブロック）を絵文字のまま
 uv run python fluidfullspeedsimulation.py draw 🥢 🟥                          # 流体でない絵文字は、その色で塗るだけ
+uv run python fluidfullspeedsimulation.py draw 🧊 --temp-c 5                  # 🧊 水温を変えて細い流れ（場面: 🏛️ 🥢 🧊 🪵 🎋 🫙 🌊 🕳️）
 uv run python -m pytest -q                              # 🧪 テスト（python -S -m unittest discover -s tests でも可）
 ```
 
