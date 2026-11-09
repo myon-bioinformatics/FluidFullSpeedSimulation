@@ -579,13 +579,15 @@ def file_stem(scene: str, fluid: str, seed, ticks: int, out_dir: str | Path = ".
 
 def draw(scene: str = "dam-break", fluid: str = "water", out_dir: str = "build/pixel", *, ticks: int | None = None,
          seed: int | None = 0, scale: int = 8, frame_every: int = 2, formats=("gif", "png"), file_prefix: str = "",
-         file_suffix: str = "", base_rate: float = 0.5) -> dict:
+         file_suffix: str = "", base_rate: float = 0.5, mu: float | None = None,
+         mu_scale: float | None = None) -> dict:
     """GIF（動き）と PNG（最後のフレーム）を書き、隣に受領記録 <name>.json を置く。
 
     受領記録は BrowserTestKit の evidence_gif と同じ考え方: 何をどう描いたか（plan）と、出来たもの（bytes・sha256・
     frames・canvas）を残す。plan の値で draw を呼べば同じバイト列になる。
     """
-    res = run_pixels(scene, fluid, ticks=ticks, seed=seed, frame_every=frame_every, base_rate=base_rate)
+    res = run_pixels(scene, fluid, ticks=ticks, seed=seed, frame_every=frame_every, base_rate=base_rate,
+                     mu=mu, mu_scale=mu_scale)
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     stem = file_stem(scene, fluid, seed, res["ticks"], out_dir, file_prefix, file_suffix)
     paths, files = {}, {}
@@ -607,6 +609,8 @@ def draw(scene: str = "dam-break", fluid: str = "water", out_dir: str = "build/p
         "pixels": res["pixels"], "count_error": res["count_error"], "settle_tick": res["settle_tick"],
         "hash": res["hash"],
     }
+    # Keep legacy default receipts unchanged; retain explicit knobs for replay.
+    receipt["plan"].update({k: v for k, v in {"mu": mu, "mu_scale": mu_scale}.items() if v is not None})
     p = stem.with_name(f"{stem.name}.json")
     p.write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     paths["json"] = str(p)

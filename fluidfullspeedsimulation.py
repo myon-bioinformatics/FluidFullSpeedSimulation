@@ -1553,7 +1553,7 @@ def _draw(args) -> int:
         formats = ("gif", "png") if args.format == "both" else (args.format,)
         out = pw.draw(args.scene, args.fluid, args.out_dir, ticks=args.ticks, seed=args.seed, scale=args.scale,
                       frame_every=args.frame_every, formats=formats, file_prefix=args.file_prefix,
-                      file_suffix=args.file_suffix)
+                      file_suffix=args.file_suffix, **_visc(args))
         icons = {"gif": "🎞️", "png": "🖼️", "json": "🧾"}
         for kind, path in out["paths"].items():
             print(f"{icons[kind]} {path}")
