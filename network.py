@@ -29,6 +29,7 @@ MONIAC は「水が流れ落ちる様子」の手本。部品は物理のまま�
 from __future__ import annotations
 
 import math
+import random
 from typing import Callable
 
 from fixedq import ONE, Cam, DelayLine, clamp, from_q, lag_gain, lag_step, qdiv, qmul, qsqrt, to_q
@@ -37,6 +38,10 @@ from fluids import superelevation
 
 LAWS: dict[str, Callable] = {}
 PASSABLE: dict[str, Callable] = {}  # 運ばれる物がその管を通れるか（net, link, tracer）→ bool。無ければ常に通れる
+EJECT: dict[str, Callable] = {}  # 運ばれる物がその管へはじき出されるか（net, link, tracer）→ bool
+
+# 麺のたまり（縁に積もった麺）の詰め方: 平行な円柱の最密充填 π/(2√3)（六方。いちばん低く積もる側の仮定）
+PACKING = math.pi / (2.0 * math.sqrt(3.0))
 
 
 def register_law(kind: str):
@@ -95,16 +100,35 @@ def _law_pump(net, ln, n):
 
 @register_law("lip")
 def _law_lip(net, ln, n):
-    """継ぎ目の段（次の竹の縁が lip だけ高い）。セルの水深が縁を越えた分だけ流れる。"""
+    """継ぎ目の段（次の竹の縁が lip だけ高い）。セルの水深が縁を越えた分だけ流れる。
+    縁に麺がたまっていれば、そのぶん縁が高くなる（crest = lip + たまりの高さ）。"""
     v = net.nodes[ln["src"]]["v"]
     ln["max_v"] = max(ln["max_v"], v)
     h = from_q(net.head_q(ln["src"]))
-    return qmul(to_q(lip_flow(ln["section"], h, ln["lip"], ln["cd"], net.g)), net.dt_q)
+    return qmul(to_q(lip_flow(ln["section"], h, crest(net, ln), ln["cd"], net.g, width=ln["width"])), net.dt_q)
+
+
+def pile_members(net, ln) -> list[dict]:
+    """その縁に引っかかって積もっている麺（長さのある麺だけ。長さ 0 の点は重さも体積も持たない）。"""
+    return [tr for tr in net.tracers if tr["held"] and tr["held_link"] is ln and tr["length"] > 0]
+
+
+def pile_height(net, ln) -> float:
+    """縁に積もった麺の高さ Δ = Σ(本数·πd²/4) / (PACKING·w)。w は縁の高さでの水面幅（たまりの間は一定とみなす）。"""
+    area = sum(tr["strands"] * math.pi * tr["size"] ** 2 / 4.0 for tr in pile_members(net, ln))
+    return area / (PACKING * ln["width"]) if area else 0.0
+
+
+def crest(net, ln) -> float:
+    return ln["lip"] + pile_height(net, ln)
 
 
 def _lip_passable(net, ln, tr):
-    """越流水深（水深 − 縁）が運ばれる物の太さ以上なら越えられる。"""
-    return from_q(net.head_q(ln["src"])) - ln["lip"] >= tr["size"]
+    """越流水深（水深 − 縁。麺が積もっていればその上）が運ばれる物の太さ以上なら越えられる。
+    押し流された（flushed）麺はその縁をそのまま越える。"""
+    if id(ln) in tr["flushed"]:
+        return True
+    return from_q(net.head_q(ln["src"])) - crest(net, ln) >= tr["size"]
 
 
 PASSABLE["lip"] = _lip_passable
@@ -119,12 +143,23 @@ def _law_spill(net, ln, n):
     h = from_q(net.head_q(ln["src"]))
     a = sec.area(h)
     amount = 0
+    ln["last_outer"] = h
     if a > 0 and ln["radius"] is not None:
         v = from_q(qdiv(net.last_flow[ln["main"]], net.dt_q)) / a  # そのセルの本流（前のステップ）の流速
         h_out = h + superelevation(v, sec.top_width(h), ln["radius"], net.g) / 2.0
         ln["max_outer"] = max(ln["max_outer"], h_out)
+        ln["last_outer"] = h_out
         amount = qmul(to_q(side_spill(nd["length"], h_out, ln["rim"], ln["cd"], net.g)), net.dt_q)
     return max(amount, nd["v"] - ln["v_cap"])
+
+
+def _spill_eject(net, ln, tr):
+    """曲がりの外側の水面に乗った麺は、その上面（水面 + 太さ）が縁に届くと縁の外へはじき出される。
+    （麺は水面に浮いて外側の壁へ寄せられる、とみなす。水そのものがあふれるより太さの分だけ早い）"""
+    return ln["radius"] is not None and ln.get("last_outer", 0.0) + tr["size"] >= ln["rim"]
+
+
+EJECT["spill"] = _spill_eject
 
 
 @register_law("valve")
@@ -165,6 +200,7 @@ class Network:
         self.links: list[dict] = []
         self.channels: dict[str, dict] = {}
         self.tracers: list[dict] = []
+        self.catchers: list[dict] = []
         self._groups: tuple[int, dict] | None = None
         self.last_flow: list[int] = []  # 前のステップに各管で動いた量（Q）
 
@@ -222,7 +258,8 @@ class Network:
         for i, name in enumerate(names):
             nxt = names[i + 1] if i + 1 < cells else dst
             if nxt == dst and lip > 0:
-                self._link("lip", name, nxt, delay, section=sec, lip=lip, cd=cd, max_v=0, channel=prefix)
+                self._link("lip", name, nxt, delay, section=sec, lip=lip, cd=cd, max_v=0, channel=prefix,
+                           width=sec.top_width(lip), releases=[])
             else:
                 self._link("rating", name, nxt, delay if nxt == dst else 0.0, cam=cam, max_v=0, channel=prefix)
             if bend_radius is not None or (spill is not None and nxt == dst and lip > 0):
@@ -349,21 +386,55 @@ class Network:
                           stages=stages, tau=tau)
 
     # --- 運ばれる物 -------------------------------------------------------
-    def tracer(self, name: str, node: str, release: float = 0.0, stop=(), size: float = 0.0) -> dict:
+    def tracer(self, name: str, node: str, release: float = 0.0, stop=(), size: float = 0.0, length: float = 0.0,
+               strands: int = 1, density: float = 1100.0, friction: float = 0.3) -> dict:
         """運ばれる物を node に release 時刻で放す。stop（節点名か、その並び）に入るか、出口のない節点で止まる。
 
-        size は太さ [m]。継ぎ目の段（lip）では越流水深がこれより浅いと引っかかって待つ。
+        - size: 太さ [m]。継ぎ目の段（lip）では越流水深がこれより浅いと引っかかって待つ
+        - length: 長さ [m]。頭の後ろに、通ってきた区間を合計 length まで体として引く。体のどこかが
+          越えられない縁に掛かっていれば全体が止まる。曲がりではじき出される判定も体のどのセルでも受ける
+        - strands: 束の本数（一口分）。縁に積もる体積に効く
+        - density・friction: 茹でた麺の密度 [kg/m³] と竹との摩擦係数（どちらも仮定の値）。積もった麺を
+          押し流す力のつり合いに使う
         """
         stops = (stop,) if isinstance(stop, str) else tuple(stop)
         for nd in (node, *stops):
             if nd not in self.nodes:
                 raise ValueError(f"unknown node {nd!r}")
+        if length < 0 or strands < 1:
+            raise ValueError("length must be >= 0 and strands >= 1")
         tr = {"name": name, "node": node, "release_step": int(round(release / self.dt)), "state": "waiting",
               "credit": 0, "pipe_left": 0, "pipe_dst": None, "pipe_t": None, "pipe_f": 0.0, "path": [],
               "arrival": None, "stop": stops, "size": size, "stuck_steps": 0, "stuck_at": None,
-              "held": False}
+              "held": False, "held_link": None, "length": length, "strands": strands, "density": density,
+              "friction": friction, "cells": [], "flushed": set(), "until": None, "end": None,
+              "held_since": None}
         self.tracers.append(tr)
         return tr
+
+    def catcher(self, name: str, node: str, *, t_grab: float | None = None, grab=(0.15, 0.6),
+                cooldown: float = 0.0, seed: int = 0) -> dict:
+        """🥢 取り手（箸）。node（区間セル）に入った麺を、入ってから t_grab 秒たったところで取る。
+
+        - 麺がその前にセルを出てしまえば取り逃し（fast）。そのとき手がふさがっていても取り逃し（busy）
+        - t_grab（手を伸ばして挟むまでの時間）は麺ごとに grab = (最短, 最長) の一様乱数（seed で再現）。
+          t_grab を渡すと全部その値。取ったら cooldown 秒は次を取れない（口へ運ぶ時間）
+        - 取った麺は水から外れるだけで、水の量は変えない
+        """
+        if node not in self.nodes:
+            raise ValueError(f"unknown node {node!r}")
+        lo, hi = grab
+        if t_grab is None and not 0 <= lo <= hi:
+            raise ValueError("grab must be (min, max) with 0 <= min <= max")
+        rng = random.Random(seed)
+
+        def draw(tr):
+            return t_grab if t_grab is not None else rng.uniform(lo, hi)
+
+        c = {"name": name, "node": node, "t_grab": t_grab, "grab": (lo, hi), "cooldown": cooldown, "seed": seed,
+             "draw": draw, "free_at": -math.inf, "caught": [], "missed": []}
+        self.catchers.append(c)
+        return c
 
     # --- 状態 -----------------------------------------------------------
     def head_q(self, name: str) -> int:
@@ -422,8 +493,16 @@ class Network:
         return req
 
     def _move_tracers(self, n: int, req: list[int]) -> None:
-        """先入れ先出し。先にいた水（credit）を流出で減らし、0 を切ったステップ内の位置 f まで時刻を補間する。"""
+        """先入れ先出し。先にいた水（credit）を流出で減らし、0 を切ったステップ内の位置 f まで時刻を補間する。
+
+        1. 縁に積もった麺が水に押し流されるか（力のつり合い）を先に見る
+        2. 体のどこかが曲がりの縁の外へはじき出されるか
+        3. 先にいた水が出たら、頭の行き先の管と、体がまたいでいる管を全部越えられるか（越えられなければ待つ）
+        4. 取り手（箸）の区間なら、入ってから t_grab たったところで取れるか
+        """
         by_src = self._by_src()
+        now = (n + 1) * self.dt
+        self._flush_piles(n)
         for tr in self.tracers:
             if tr["state"] == "waiting":
                 if n < tr["release_step"]:
@@ -432,12 +511,15 @@ class Network:
                 tr["state"] = "node"
                 tr["credit"] = self.nodes[tr["node"]]["v"] + sum(req[i] for i in by_src.get(tr["node"], []))
                 tr["path"].append({"node": tr["node"], "t": n * self.dt})
+                self._note_cell(tr, tr["node"], n * self.dt)
             if tr["state"] == "pipe":
                 tr["pipe_left"] -= 1
                 if tr["pipe_left"] <= 0:
                     self._enter(tr, tr["pipe_dst"], tr["pipe_t"], tr["pipe_f"], req)
                 continue
             if tr["state"] != "node":
+                continue
+            if self._eject(tr, now):
                 continue
             outs = by_src.get(tr["node"], [])
             if not outs:
@@ -447,20 +529,133 @@ class Network:
             tr["credit"] -= out_now
             if tr["credit"] <= 0 and out_now > 0:
                 ln = self.links[max(outs, key=lambda i: req[i])]
-                ok = PASSABLE.get(ln["kind"])
-                if ok is not None and not ok(self, ln, tr):
-                    tr["stuck_steps"] += 1  # 引っかかり: 先にいた水は出たが、ここは越えられない
-                    tr["stuck_at"], tr["held"] = tr["node"], True
+                blocked = self._blocking(tr, ln)
+                if blocked is not None:
+                    tr["stuck_steps"] += 1  # 引っかかり: 先にいた水は出たが、どこかの縁を越えられない
+                    if not tr["held"]:
+                        tr["held_since"] = now
+                    tr["stuck_at"], tr["held"], tr["held_link"] = blocked["src"], True, blocked
                     continue
                 # このステップのうち、越えた後に残る割合（引っかかりから外れた直後は 0）
                 f = 0.0 if tr["held"] else -tr["credit"] / out_now
-                tr["held"] = False
+                tr["held"], tr["held_link"] = False, None
                 t_cross = (n + 1 - f) * self.dt
+                if self._catch_on_leave(tr, t_cross):
+                    continue
                 if ln["delay_steps"]:
                     tr.update(state="pipe", pipe_left=ln["delay_steps"], pipe_dst=ln["dst"],
                               pipe_t=t_cross + ln["delay"], pipe_f=f)
                 else:
                     self._enter(tr, ln["dst"], t_cross, f, req)
+            self._catch_waiting(tr, now)
+
+    # --- 体（長さ）・縁・はじき出し・箸 -------------------------------------
+    def _note_cell(self, tr: dict, node: str, t: float) -> None:
+        if self.nodes[node]["kind"] == "reach":
+            tr["cells"].append(node)
+        for c in self.catchers:
+            if c["node"] == node:
+                tr["station"] = {"catcher": c, "t_in": t, "t_grab": c["draw"](tr), "done": False}
+
+    def body(self, tr: dict) -> list[str]:
+        """頭から後ろへ、通ってきた区間を合計 length になるまで（頭の区間も 1 つ分に数える）。"""
+        head = tr["node"]
+        if self.nodes[head]["kind"] != "reach" or not tr["cells"] or tr["cells"][-1] != head:
+            return [head]
+        out, total = [], 0.0
+        for c in reversed(tr["cells"]):
+            out.append(c)
+            total += self.nodes[c]["length"]
+            if total >= tr["length"] - 1e-12:
+                break
+        return out
+
+    def _pair_link(self, src: str, dst: str):
+        for i in self._by_src().get(src, []):
+            if self.links[i]["dst"] == dst and self.links[i]["kind"] in PASSABLE:
+                return self.links[i]
+        return None
+
+    def _blocking(self, tr: dict, head_link: dict):
+        """越えられない管（頭の行き先、または体がまたいでいる縁）。全部越えられれば None。"""
+        candidates = [head_link]
+        body = self.body(tr)
+        for down, up in zip(body, body[1:]):
+            ln = self._pair_link(up, down)
+            if ln is not None:
+                candidates.append(ln)
+        for ln in candidates:
+            ok = PASSABLE.get(ln["kind"])
+            if ok is not None and not ok(self, ln, tr):
+                return ln
+        return None
+
+    def _eject(self, tr: dict, now: float) -> bool:
+        by_src = self._by_src()
+        for cell in self.body(tr):
+            for i in by_src.get(cell, []):
+                ln = self.links[i]
+                rule = EJECT.get(ln["kind"])
+                if rule is not None and rule(self, ln, tr):
+                    tr.update(state="spilled", node=ln["dst"], until=now, end="spilled", held=False, held_link=None)
+                    tr["spilled_at"] = cell
+                    tr["path"].append({"node": ln["dst"], "t": now})
+                    return True
+        return False
+
+    def _flush_piles(self, n: int) -> None:
+        """縁に積もった麺（たまり）を、水の押す力が摩擦を超えたら全部まとめて押し流す。
+
+        押す力 F = ρ·g·w·Δ·(H − lip − Δ/2)（たまりの上流面にかかる静水圧。H はそのセルの水深）
+        支える力 R = Σ μ·(ρ_麺 − ρ)·g·(本数·πd²/4)·L（水中の重さ × 摩擦）。F ≥ R で流れ出す。
+        """
+        for ln in self.links:
+            if ln["kind"] != "lip":
+                continue
+            members = [tr for tr in pile_members(self, ln) if id(ln) not in tr["flushed"]]
+            if not members:
+                continue
+            delta = pile_height(self, ln)
+            h = from_q(self.head_q(ln["src"]))
+            rho = self.fluid.rho
+            push = rho * self.g * ln["width"] * delta * (h - ln["lip"] - delta / 2.0)
+            hold = sum(tr["friction"] * (tr["density"] - rho) * self.g * tr["strands"] * math.pi * tr["size"] ** 2
+                       / 4.0 * tr["length"] for tr in members)
+            if push >= hold:
+                for tr in members:
+                    tr["flushed"].add(id(ln))
+                ln["releases"].append({"t": (n + 1) * self.dt, "members": [tr["name"] for tr in members],
+                                       "depth": h, "pile": delta, "push": push, "hold": hold})
+
+    def _catch_on_leave(self, tr: dict, t_cross: float) -> bool:
+        st = tr.get("station")
+        if not st or st["done"] or st["catcher"]["node"] != tr["node"]:
+            return False
+        if t_cross - st["t_in"] >= st["t_grab"]:
+            return self._try_catch(tr, st)
+        st["done"] = True
+        st["catcher"]["missed"].append({"tracer": tr["name"], "t_in": st["t_in"], "residence": t_cross - st["t_in"],
+                                        "t_grab": st["t_grab"], "why": "fast"})
+        return False
+
+    def _catch_waiting(self, tr: dict, now: float) -> None:
+        st = tr.get("station")
+        if tr["state"] != "node" or not st or st["done"] or st["catcher"]["node"] != tr["node"]:
+            return
+        if now - st["t_in"] >= st["t_grab"]:
+            self._try_catch(tr, st)
+
+    def _try_catch(self, tr: dict, st: dict) -> bool:
+        c, t_c = st["catcher"], st["t_in"] + st["t_grab"]
+        st["done"] = True
+        if c["free_at"] <= t_c + 1e-12:
+            c["free_at"] = t_c + c["cooldown"]
+            c["caught"].append({"tracer": tr["name"], "t_in": st["t_in"], "t_catch": t_c, "t_grab": st["t_grab"]})
+            tr.update(state="caught", until=t_c, end="caught", held=False, held_link=None)
+            return True
+        c["missed"].append({"tracer": tr["name"], "t_in": st["t_in"], "t_grab": st["t_grab"], "why": "busy",
+                            "free_at": c["free_at"]})
+        return False
 
     def _enter(self, tr: dict, node: str, t: float, f: float, req: list[int]) -> None:
         tr["node"], tr["state"] = node, "node"
@@ -468,6 +663,7 @@ class Network:
         # 入った後のステップの残り f の間に、すでに先へ出ていった分を差し引く
         tr["credit"] = self.nodes[node]["v"] - int(f * sum(req[i] for i in outs))
         tr["path"].append({"node": node, "t": t})
+        self._note_cell(tr, node, t)
         if node in tr["stop"] or not outs:
             tr["state"], tr["arrival"] = "done", t
 
@@ -492,6 +688,10 @@ class Network:
                 for prefix, ch in self.channels.items():
                     row[f"h:{prefix}"] = [self.head(c) for c in ch["cells"]]
                 row.update({f"q:{i}": from_q(qdiv(q, self.dt_q)) for i, q in enumerate(last)})
+                bodies = {tr["name"]: self.body(tr) for tr in self.tracers
+                          if tr["length"] > 0 and tr["state"] == "node"}
+                if bodies:
+                    row["bodies"] = bodies
                 series.append(row)
         return {
             "fluid": self.fluid.key, "dt": self.dt, "steps": steps, "series": series, "trace": traces,
@@ -500,8 +700,14 @@ class Network:
             "links": [self._link_summary(i, ln) for i, ln in enumerate(self.links)],
             "channels": {p: self._channel_summary(ch) for p, ch in self.channels.items()},
             "tracers": [{"name": tr["name"], "state": tr["state"], "arrival": tr["arrival"], "path": tr["path"],
-                         "size": tr["size"], "stuck_time": tr["stuck_steps"] * self.dt, "stuck_at": tr["stuck_at"]}
+                         "size": tr["size"], "length": tr["length"], "strands": tr["strands"],
+                         "stuck_time": tr["stuck_steps"] * self.dt, "stuck_at": tr["stuck_at"], "until": tr["until"],
+                         "end": tr["end"], "spilled_at": tr.get("spilled_at"), "held_since": tr["held_since"]}
                         for tr in self.tracers],
+            "catchers": [{k: c[k] for k in ("name", "node", "t_grab", "grab", "cooldown", "seed", "caught", "missed")}
+                         for c in self.catchers],
+            "lips": [{"index": i, "src": ln["src"], "dst": ln["dst"], "lip": ln["lip"], "width": ln["width"],
+                      "releases": ln["releases"]} for i, ln in enumerate(self.links) if ln["kind"] == "lip"],
         }
 
     def _link_summary(self, i: int, ln: dict) -> dict:
@@ -510,6 +716,8 @@ class Network:
                "first_flow": None if ff is None else ff * self.dt,
                "first_arrival": None if fa is None else fa * self.dt, "volume_moved": from_q(ln["flow_sum"]),
                "volume_moved_q": ln["flow_sum"]}
+        if ln["kind"] == "spill":
+            out["max_outer"] = ln["max_outer"]
         if ln["kind"] == "pipe":
             h = from_q(ln["max_head"])
             v = ln["radius"] ** 2 * self.g * h / (8.0 * self.fluid.nu * ln["length"])
