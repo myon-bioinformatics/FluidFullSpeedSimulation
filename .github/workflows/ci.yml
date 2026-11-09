@@ -1,0 +1,79 @@
+name: CI
+
+# docs / *.md だけの変更ではテストを走らせない（親の change-detection）。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: Change detection
+    uses: myon-bioinformatics/myon-bioinformatics/.github/workflows/reusable-change-detection.yml@2e450118fde453272de9997608e25c31a984463c
+
+  test:
+    name: pytest (Python ${{ matrix.python-version }})
+    permissions:
+      contents: read
+    needs: changes
+    if: needs.changes.outputs.product_changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
+      UV_LOCKED: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        # failure-identity の expected-reports と揃えること
+        python-version: ["3.11", "3.12", "3.13", "3.14", "3.15"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "latest"
+          python-version: "${{ matrix.python-version }}"
+          activate-environment: true
+          enable-cache: true
+          # Pull requests restore the cache and never write it; only main saves it.
+          save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          prune-cache: true
+      - name: Sync locked development environment
+        run: uv sync --locked
+      - name: Verify every experiment (exit code 0 = all checks pass)
+        run: uv run --locked python fluidfullspeedsimulation.py verify
+      - name: Test with JUnit
+        run: |
+          mkdir -p build/test-results
+          uv run --locked python -m pytest -q --junitxml="build/test-results/pytest-${{ matrix.python-version }}.xml"
+      - name: Preserve raw JUnit
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: junit-py${{ matrix.python-version }}
+          path: build/test-results/pytest-${{ matrix.python-version }}.xml
+          if-no-files-found: warn
+          retention-days: 14
+
+  failure-identity:
+    needs: [changes, test]
+    if: always() && needs.changes.outputs.product_changed == 'true'
+    permissions:
+      contents: read
+      actions: read
+    uses: myon-bioinformatics/myon-bioinformatics/.github/workflows/reusable-junit-identity.yml@2e450118fde453272de9997608e25c31a984463c
+    with:
+      commit-sha: ${{ github.event.pull_request.head.sha || github.sha }}
+      expected-reports: '["junit-py3.11/pytest-3.11.xml","junit-py3.12/pytest-3.12.xml","junit-py3.13/pytest-3.13.xml","junit-py3.14/pytest-3.14.xml","junit-py3.15/pytest-3.15.xml"]'
+      artifact-pattern: "junit-py*"
+      output-artifact: "failure-identity"

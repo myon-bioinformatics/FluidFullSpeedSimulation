@@ -1,0 +1,21 @@
+[project]
+name = "fluid-full-speed-simulation"
+version = "0.1.0"
+description = "Water, ethanol and other working fluids through tanks, pipes, weirs, float valves, delays and flumes, in exact fixed-point integers"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "myon" }]
+# 実行は標準ライブラリだけ。uv は開発・CI の道具（pytest）だけを管理する。
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv]
+package = false
+default-groups = ["dev"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
