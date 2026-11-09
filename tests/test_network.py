@@ -101,6 +101,67 @@ class Building(unittest.TestCase):
             Network(0)
 
 
+class Flumes(unittest.TestCase):
+    BAMBOO = {"shape": "semicircle", "size": 0.04}
+
+    def spec(self):
+        return {
+            "dt": 0.01,
+            "tanks": [{"name": "sea", "area": 1, "volume": 1}, {"name": "floor", "area": 1}],
+            "flumes": [{"prefix": "take", "dst": "sea", "spill": "floor", "segments": [
+                {"length": 1.0, "cells": 5, "slope": 0.05, "section": self.BAMBOO, "joint": {"drop": 0.02}},
+                {"length": 1.0, "cells": 5, "slope": 0.03, "section": self.BAMBOO, "bend_radius": 0.2,
+                 "joint": {"lip": 0.002}},
+                {"length": 0.5, "cells": 5, "slope": 0.05, "section": self.BAMBOO},
+            ]}],
+            "links": [{"law": "pump", "src": "sea", "dst": "take/0:0", "rate": 5e-5}],
+            "t_end": 10.0,
+        }
+
+    def test_spec_flume_matches_hand_built(self):
+        spec = self.spec()
+        net = Network(0.01).tank("sea", 1, volume=1).tank("floor", 1)
+        net.flume("take", "sea", spill="floor", segments=spec["flumes"][0]["segments"])
+        net.pump("sea", "take/0:0", rate=5e-5)
+        self.assertEqual(net.run(10.0)["volumes_q"], build(spec).run(10.0)["volumes_q"])
+        res = simulate(spec)
+        self.assertEqual(res["conservation_error_q"], 0)
+        self.assertEqual(set(res["channels"]), {"take/0", "take/1", "take/2"})
+
+    def test_flume_errors(self):
+        net = Network(0.01).tank("sea", 1, volume=1)
+        with self.assertRaises(ValueError):
+            net.flume("f", "sea", [])
+        with self.assertRaises(ValueError):
+            net.flume("f", "sea", [{"length": 1, "cells": 2, "slope": 0.05, "section": self.BAMBOO,
+                                    "joint": {"gap": 0.01}}])
+        with self.assertRaises(ValueError):
+            net.channel("g", "sea", length=1, cells=2, slope=0.05, section=self.BAMBOO, bend_radius=0.2)
+
+    def test_overtopping_goes_to_spill_node(self):
+        """縁の容量を超えて入れた水は、そのまま spill の節点へ落ちる（総量は保存）。"""
+        net = Network(0.01).tank("sea", 1, volume=1).tank("floor", 1)
+        net.channel("c", "sea", length=0.1, cells=1, slope=0.05, section=self.BAMBOO, lip=0.039, spill="floor")
+        net.pump("sea", "c:0", rate=1e-3)
+        res = net.run(2.0)
+        self.assertGreater(res["volumes_q"]["floor"], 0)
+        self.assertEqual(res["conservation_error_q"], 0)
+
+    def test_thick_tracer_waits_at_lip(self):
+        net = Network(0.05).tank("sea", 1, volume=1)
+        net.channel("c", "sea", length=0.5, cells=5, slope=0.05, section=self.BAMBOO, law="laminar", beta=3.0,
+                    lip=0.003)
+        net.pump("sea", "c:0", rate=3e-6)
+        net.tracer("thin", "c:0", release=20.0, stop="sea", size=1e-3)
+        net.tracer("thick", "c:0", release=20.0, stop="sea", size=2e-3)
+        res = net.run(60.0)
+        tr = {t["name"]: t for t in res["tracers"]}
+        self.assertEqual(tr["thin"]["state"], "done")
+        self.assertEqual(tr["thick"]["state"], "node")
+        self.assertGreater(tr["thick"]["stuck_time"], 0)
+        self.assertEqual(tr["thick"]["stuck_at"], "c:4")
+
+
 class Tracers(unittest.TestCase):
     def test_tank_chain_residence_and_pipe_delay(self):
         """一定流量の水槽 2 つ＋遅延管: 通過時間 = V1/Q + 遅れ + V2/Q（先入れ先出し）。
@@ -141,11 +202,12 @@ class Measures(unittest.TestCase):
         self.assertEqual(settling_time([1.0, 1.0], 1.0, 1.0), 0.0)
         self.assertEqual(settling_time([1.0, 0.0], 1.0, 1.0), math.inf)
 
-    def test_pump_until(self):
+    def test_pump_start_and_until(self):
         net = Network(0.5).tank("a", 1.0, volume=1.0).tank("b", 1.0)
         net.pump("a", "b", rate=0.1, until=2.0)
+        net.pump("a", "b", rate=0.1, start=9.0)
         res = net.run(10.0)
-        self.assertEqual(res["volumes_q"]["b"], 4 * qmul(to_q(0.1), to_q(0.5)))
+        self.assertEqual(res["volumes_q"]["b"], (4 + 2) * qmul(to_q(0.1), to_q(0.5)))
 
 
 if __name__ == "__main__":

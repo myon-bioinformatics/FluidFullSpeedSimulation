@@ -133,18 +133,22 @@ class Cam:
 
 
 def random_scales(seed: int, count: int, n_min: int = 1, n_max: int = 6, digits: int = 3) -> list[dict]:
-    """試す係数を A×10^-N で返す。A（1 ≤ A < 10、有効 digits 桁）と N（n_min..n_max）を乱数で選ぶ。
+    """試す係数を A×10^-N で返す。A（1.00〜9.99 の digits 桁）と N（n_min..n_max）を乱数で選ぶ。
 
     10^-3 刻みのような人間都合の決め打ちを避けるための道具。seed で再現できる。
+    Aoi の ``research/epsilon-generality/eps_generality.py``（draw_coefficients）に合わせ、A は整数で選んで
+    10 進の文字列から float にする（value は float("6.13e-3") と同じ値）。キーは A・N に加えて a・exp も持つ。
     """
     if count < 0 or n_min > n_max or digits < 1:
         raise ValueError("bad random_scales arguments")
     rng = random.Random(seed)
+    lo, hi = 10 ** (digits - 1), 10 ** digits - 1
     out = []
     for _ in range(count):
-        a = round(rng.uniform(1.0, 10.0), digits - 1)
-        if a >= 10.0:
-            a = 9.99
+        a_int = rng.randint(lo, hi)
         n = rng.randint(n_min, n_max)
-        out.append({"A": a, "N": n, "value": a * 10.0 ** -n, "label": f"{a}e-{n}"})
+        a_txt = f"{a_int // lo}.{a_int % lo:0{digits - 1}d}" if digits > 1 else str(a_int)
+        a = float(a_txt)
+        out.append({"A": a, "N": n, "a": a, "exp": -n, "value": float(f"{a_txt}e-{n}"),
+                    "label": f"{a_txt}×10^-{n}"})
     return out

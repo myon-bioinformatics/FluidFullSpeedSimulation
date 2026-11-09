@@ -23,7 +23,8 @@ import sys
 from pathlib import Path
 
 from fixedq import ONE, from_q, lag_step, qmul, shift_lag_step, to_q
-from fluids import FLUIDS, RE_LAMINAR, Section, channel_reynolds, fluid_table, get_fluid, normal_depth
+from fluids import FLUIDS, RE_LAMINAR, Section, channel_reynolds, fall_time, fluid_table, get_fluid, lip_head
+from fluids import normal_depth
 from fluids import poiseuille_head, poiseuille_tau, torricelli_empty_time, torricelli_head, transport_delay
 from network import Network, critical_gain, inverse_table, jsonable, peak_to_peak, settling_time, window
 
@@ -416,6 +417,116 @@ def e08_flume(length: float = 2.0, cells: int = 20, slope: float = 0.05, n_manni
             "summary": summary, "runs": runs, "checks": checks}
 
 
+# --- E10 流しそうめん（竹の継ぎ目・段差・曲がり・引っかかり） ----------------------
+
+BAMBOO = {"shape": "semicircle", "size": 0.04}  # 割った竹（半径 4 cm）
+NOODLES = {"somen": 1.0e-3, "hiyamugi": 1.5e-3}  # 太さの目安。機械製麺の区分はそうめん < 1.3 mm ≤ ひやむぎ < 1.7 mm
+
+
+def somen_layout(q: float, *, law: str = "manning", beta: float | None = None, dt: float = 0.01,
+                 drop: float = 0.05, lip: float = 3e-3, bend_radius: float = 0.12, bucket: float = 0.5,
+                 fluid: str = "water") -> Network:
+    """桶 → ポンプ → 竹 3 本（直線 → 段差 → 曲がり → 縁の継ぎ目 → 直線）→ 受け皿 → ホースで桶へ戻す。
+    曲がりや継ぎ目からあふれた水は床（floor）へ。"""
+    net = Network(dt, fluid).tank("bucket", 0.05, volume=bucket).tank("basin", 0.05).tank("floor", 1.0)
+    kw = {"law": law, "beta": beta, "section": BAMBOO}
+    net.flume("take", "basin", [
+        {"length": 2.0, "cells": 20, "slope": 0.05, "joint": {"drop": drop}, **kw},
+        {"length": 1.0, "cells": 10, "slope": 0.03, "bend_radius": bend_radius, "joint": {"lip": lip}, **kw},
+        {"length": 1.0, "cells": 10, "slope": 0.05, **kw},
+    ], spill="floor")
+    net.pump("bucket", "take/0:0", rate=q)
+    net.pump("basin", "bucket", rate=q, delay=2.0)
+    return net
+
+
+def _into(res: dict, dst: str) -> float:
+    """最後のステップに dst へ流れ込んだ流量の合計。"""
+    return sum(res["final"][f"q:{ln['index']}"] for ln in res["links"] if ln["dst"] == dst and ln["kind"] != "pump")
+
+
+def e10_somen_flume(q_flow: float = 5e-5, q_flood: float = 1.2e-3, q_trickle: float = 3e-6,
+                    q_flush: float = 3e-5) -> dict:
+    sec = Section(BAMBOO["shape"], BAMBOO["size"])
+    rim = sec.size
+    w = get_fluid("water")
+    checks, runs, summary = [], {}, {}
+
+    # 🎋 ふつうに流す: 等流水深・継ぎ目のたまり・段差の落下・あふれなし・追い越しなし
+    net = somen_layout(q_flow)
+    for i in range(3):
+        net.tracer(f"somen-{i + 1}", "take/0:0", release=20.0 + i, stop="basin", size=NOODLES["somen"])
+    res = net.run(40.0)
+    h0 = normal_depth(sec, q_flow, 0.05, "manning", nu=w.nu, h_max=rim)
+    pond = lip_head(sec, q_flow, 3e-3)
+    drop_link = next(ln for ln in res["links"] if ln["src"] == "take/0:19")
+    order = [tr["name"] for tr in sorted(res["tracers"], key=lambda t: t["arrival"] or math.inf)]
+    chs = res["channels"]
+    checks += [
+        close("flow:depth", "📏", net.head("take/0:19"), h0, 2e-3, note="1 本目の竹の等流水深（Manning）"),
+        close("flow:pond", "🫙", net.head("take/1:9"), pond, 2e-3, note="縁の継ぎ目の手前にたまる水深 = 縁 + 越流水深"),
+        check("flow:drop", "🪂", abs(drop_link["delay"] - fall_time(0.05)) <= net.dt / 2 + 1e-12,
+              value=drop_link["delay"], expected=fall_time(0.05), tol=net.dt / 2, note="段差の自由落下 √(2h/g)"),
+        check("flow:no-spill", "🫗", chs["take/1"]["spilled"] == 0 and chs["take/1"]["max_outer_depth"] < rim,
+              value=chs["take/1"]["max_outer_depth"], expected=rim, note="曲がりの外側の水面 < 竹の縁"),
+        check("flow:order", "🍜", order == ["somen-1", "somen-2", "somen-3"] and all(t["state"] == "done"
+                                                                                  for t in res["tracers"]),
+              value=order, note="同じ太さのそうめんは放した順に届く（追い越しなし）"),
+        check("flow:courant", "🧭", max(c["courant"] for c in chs.values()) <= 1.0,
+              value=max(c["courant"] for c in chs.values()), expected=1.0, note="Courant ≤ 1"),
+        conserved("flow:conserve", res),
+    ]
+    runs["flow"] = res["series"]
+    summary["flow"] = {"normal_depth": h0, "pond_depth": pond, "arrivals": {t["name"]: t["arrival"]
+                                                                           for t in res["tracers"]}}
+
+    # 🌊 流しすぎ: 曲がりの外側と継ぎ目のたまりが縁を越えて床へあふれる
+    net = somen_layout(q_flood)
+    res = net.run(40.0)
+    spilled = _into(res, "floor")
+    checks += [
+        check("flood:spill", "💦", spilled > 0, value=spilled, note="曲がり・継ぎ目から床へあふれる"),
+        close("flood:balance", "🔁", _into(res, "basin") + spilled, q_flood, 1e-3, note="受け皿 + 床 = 流した量"),
+        conserved("flood:conserve", res),
+    ]
+    runs["flood"] = res["series"]
+    summary["flood"] = {"to_basin": _into(res, "basin"), "to_floor": spilled,
+                        "max_outer_depth": res["channels"]["take/1"]["max_outer_depth"]}
+
+    # 🥢 ちょろちょろ流す: 継ぎ目の越流水深より太いひやむぎだけ引っかかり、後から来たそうめんに抜かれる。
+    #     途中で水を足すと流れ出す。細い流れなので層流の式（β = 3）で回す
+    dt = 0.05
+    net = somen_layout(q_trickle, law="laminar", beta=3.0, dt=dt)
+    net.pump("bucket", "take/0:0", rate=q_flush, start=200.0)
+    net.tracer("hiyamugi", "take/0:0", release=80.0, stop="basin", size=NOODLES["hiyamugi"])
+    net.tracer("somen", "take/0:0", release=100.0, stop="basin", size=NOODLES["somen"])
+    res = net.run(260.0)
+    head = lip_head(sec, q_trickle, 3e-3) - 3e-3
+    h_t = normal_depth(sec, q_trickle, 0.05, "laminar", nu=w.nu, h_max=rim, beta=3.0)
+    re = channel_reynolds(sec, h_t, q_trickle, w.nu)
+    tr = {t["name"]: t for t in res["tracers"]}
+    checks += [
+        check("trickle:premise", "📐", NOODLES["somen"] <= head < NOODLES["hiyamugi"], value=head,
+              note="越流水深がそうめん以上・ひやむぎ未満になる流し方"),
+        check("trickle:regime", "〰️", re < 500, value=re, expected=500.0, note="細い流れは層流（Re < 500）"),
+        check("trickle:snag", "🪝", tr["hiyamugi"]["stuck_time"] > 0 and tr["hiyamugi"]["stuck_at"] == "take/1:9",
+              value=tr["hiyamugi"]["stuck_time"], note="ひやむぎは縁の継ぎ目で引っかかる"),
+        check("trickle:somen-free", "🍜", tr["somen"]["stuck_time"] == 0, value=tr["somen"]["stuck_time"],
+              expected=0.0, note="そうめんは引っかからない"),
+        check("trickle:overtake", "🏁", (tr["somen"]["arrival"] or math.inf) < (tr["hiyamugi"]["arrival"] or math.inf),
+              value=[tr["somen"]["arrival"], tr["hiyamugi"]["arrival"]], note="後から放したそうめんが先に届く"),
+        check("trickle:flush", "🚿", tr["hiyamugi"]["arrival"] is not None and tr["hiyamugi"]["arrival"] > 200.0,
+              value=tr["hiyamugi"]["arrival"], expected=200.0, note="水を足すとひやむぎも流れ出す"),
+        conserved("trickle:conserve", res),
+    ]
+    runs["trickle"] = res["series"]
+    summary["trickle"] = {"head_over_lip": head, "reynolds": re,
+                          "tracers": {k: {"arrival": v["arrival"], "stuck_time": v["stuck_time"]} for k, v in tr.items()}}
+    return {"params": {"q_flow": q_flow, "q_flood": q_flood, "q_trickle": q_trickle, "q_flush": q_flush,
+                       "bamboo": BAMBOO, "noodles": NOODLES},
+            "summary": summary, "runs": runs, "checks": checks}
+
+
 # --- 登録簿 ---------------------------------------------------------------
 
 EXPERIMENTS = {
@@ -427,6 +538,7 @@ EXPERIMENTS = {
     "E06": ("coupled-loop", "🌐", "2 台連結（遅延つきの環）", e06_coupled_loop),
     "E07": ("fluid-speed", "🏎️", "作動流体で変わる回路の速さ", e07_fluid_speed),
     "E08": ("flume", "🎋", "傾いた樋とトレーサー（流しそうめんの下ごしらえ）", e08_flume),
+    "E10": ("somen-flume", "🥢", "流しそうめん（竹の継ぎ目・段差・曲がり・引っかかり）", e10_somen_flume),
 }
 SLUGS = {slug: eid for eid, (slug, *_rest) in EXPERIMENTS.items()}
 

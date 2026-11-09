@@ -49,13 +49,14 @@ node py_launch.cjs --call simulate -- network.py '{"dt":1,"tanks":[...],"links":
 |---|---|---|
 | 🛢️ | `tank` | 水槽。水位 h = V / A。流入 − 流出を積み上げる積分器 |
 | 🎋 | `channel` | 傾いた樋を区間セルに分けたもの。断面は長方形・半円（竹）。Manning（乱流）/ 層流の薄い流れ |
+| 🥢 | `flume` | 竹を継いだ流しそうめんの台。継ぎ目は段差 `drop`（自由落下）か縁 `lip`（たまってから越える）、`bend_radius` の曲がりは外側が持ち上がって縁からあふれる |
 | 〰️ | `pipe` | 細管（Hagen–Poiseuille）。速さは動粘度 ν で決まる |
 | 🕳️ | `orifice` | 小孔（Torricelli）。流体によらない |
 | 🪜 | `weir` / `cam` | 長方形・三角の堰、水位 → 流量の表（特殊形状のスリット） |
 | ⛽ | `pump` | 一定流量（`until` まで） |
 | 🎈 | `float_valve` | 浮き弁。測った水位が遅れの段を通って弁を開く |
 | ⏳ | `delay` | どの管にも付く輸送の遅れ。管の中の水も総量に数える |
-| 🍜 | `tracer` | 流れに乗って運ばれる物（そうめん・葉っぱ）。先入れ先出しで節点を渡る |
+| 🍜 | `tracer` | 流れに乗って運ばれる物（そうめん・葉っぱ）。先入れ先出しで節点を渡る。太さ `size` があると、縁の越流水深が浅いあいだ引っかかる |
 | 🔌 | `register_law` | 管の法則を足す口。spec の `law` からもそのまま使える |
 
 ## 🧪 実験（ID + 識別子）
@@ -70,6 +71,7 @@ node py_launch.cjs --call simulate -- network.py '{"dt":1,"tanks":[...],"links":
 | E06 🌐 | `coupled-loop` | 2 台を遅延管で環につなぐ: 定常の配分、届く時刻、跳ね返りが戻る時刻 |
 | E07 🏎️ | `fluid-speed` | 同じ回路を流体だけ変える: 流量は同じ、水位と整定時間は ν の比 |
 | E08 🎋 | `flume` | 樋の等流水深、トレーサー（そうめん役）が抜ける時間 L/v、層流は ν に効き Manning は効かない |
+| E10 🥢 | `somen-flume` | 竹 3 本の台: 継ぎ目のたまり・段差の落下・流しすぎで床へあふれる・細い流れでひやむぎだけ引っかかりそうめんに抜かれる・水を足すと流れ出す |
 
 どの実験も ⚖️ 総量の保存（ずれ 0 ulp）と、層流の前提（Re）・Courant 数などの前提条件を一緒に確かめる。
 閉じた式とのずれ（δ）は丸めずにそのまま出す（`run -v`）。
@@ -80,7 +82,7 @@ node py_launch.cjs --call simulate -- network.py '{"dt":1,"tanks":[...],"links":
 - ✂️ `take`: 取り分を切り出して端数は残りへ → 分けた合計が元と完全一致
 - 🔀 1 次遅れ（水槽 1 段）は `k = 2^−s` なら `(x − y) >> s` のシフトだけ
 - √ Torricelli・堰は `math.isqrt` の整数平方根、樋は「セル体積 → 流量」の表を二分探索で引く
-- 🎲 試す値は A×10^−N の A と N を乱数で選ぶ（`fixedq.random_scales`）。10^−3 刻みの決め打ちにしない
+- 🎲 試す値は A×10^−N の A と N を乱数で選ぶ（`fixedq.random_scales`、Aoi の `draw_coefficients` と同じ作り方）。10^−3 刻みの決め打ちにしない
 
 ## 🧪 流体（20 °C）
 
@@ -98,11 +100,13 @@ node py_launch.cjs --call simulate -- network.py '{"dt":1,"tanks":[...],"links":
 - 陽解法（同時更新）。樋は Courant ≤ 1 を確かめる。定常水位には流入をステップ頭に入れる分 δ ≈ dt/2τ が残る
 - 管の遅れは初期水位の流速で決めた栓流。トレーサーは先入れ先出し（水槽では平均滞留時間に当たる）
 - 層流の樋は v = gSR²/(βν)（β: 長方形 3・半円 2）の近似
+- 🥢 継ぎ目のたまりは手前の 1 セルにまとめる（上流へのせき上げは解かない）。曲がりの持ち上がりは Δh = v²B/(gR) の近似
+- 🍜 麺の太さは目安（機械製麺の区分: そうめん < 1.3 mm ≤ ひやむぎ < 1.7 mm）。引っかかりは「越流水深 < 太さ」だけで決める
 
 ## 🗺️ この先
 
 - 🎨 ドット絵の水・図（フォントはメイリオで統一）
-- 🍜 流しそうめん: 竹の継ぎ目・曲がり・段差、そうめん同士の追い越し・引っかかり
+- 🍜 流しそうめん: 麺の長さ・からまり、竹の向きを変える分岐、箸ですくう取り出し
 - 🟩 Node 側の鏡合わせ実装（BigInt で同じ整数列になるか）
 
 ## 📚 出典
@@ -112,3 +116,4 @@ node py_launch.cjs --call simulate -- network.py '{"dt":1,"tanks":[...],"links":
 - [List of viscosities — Wikipedia](https://en.wikipedia.org/wiki/List_of_viscosities)
 - [Flottweg: Dynamic viscosity](https://flottweg.com/wiki/separation-technology/dynamic-viscosity)
 - [chem-casts: Water viscosity table](https://chem-casts.com/data-tables/water-viscosity-data-table)
+- [ふるなび: そうめんとひやむぎの違い（食品表示基準の太さ区分）](https://furunavi.jp/discovery/knowledge_food/202504-somen_hiyamugi/)
