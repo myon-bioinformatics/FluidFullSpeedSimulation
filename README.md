@@ -15,6 +15,9 @@ uv run python fluidfullspeedsimulation.py verify        # ✅ 全実験 → 終�
 uv run python fluidfullspeedsimulation.py list          # 🗂️ 実験の一覧
 uv run python fluidfullspeedsimulation.py fluids        # 🧪 流体の物性
 uv run python fluidfullspeedsimulation.py run flume -v --jsonl plot.jsonl   # 🎋 1 本だけ + 記録
+uv run python fluidfullspeedsimulation.py run 🥢                             # 実験はアイコンでも選べる
+uv run python fluidfullspeedsimulation.py draw 🏛️ 🟩                         # 場面と流体（ブロック）を絵文字のまま
+uv run python fluidfullspeedsimulation.py draw 🥢 🟥                          # 流体でない絵文字は、その色で塗るだけ
 uv run python -m pytest -q                              # 🧪 テスト（python -S -m unittest discover -s tests でも可）
 ```
 
@@ -36,10 +39,19 @@ simulate({"dt": 0.02, "tanks": [{"name": "sea", "area": 1, "volume": 1}],
 ```
 
 ```bash
-# 親リポジトリの py_launch.cjs（Node 26+）
-node py_launch.cjs --call run_experiment -- fluidfullspeedsimulation.py E08
-node py_launch.cjs --call simulate -- network.py '{"dt":1,"tanks":[...],"links":[...],"t_end":10}'
+# vendor/py_launch.cjs（親リポジトリの py_launch.cjs を vendor.lock.json で固定。Node 26+）
+node vendor/py_launch.cjs --call run_experiment -- fluidfullspeedsimulation.py E08
+node vendor/py_launch.cjs --call simulate -- network.py '{"dt":1,"tanks":[...],"links":[...],"t_end":10}'
 ```
+
+### 🔒 vendor
+
+| ファイル | 元 | 使いどころ |
+|---|---|---|
+| `vendor/cli_args.py` | myon-bioinformatics/cli_args | CLI の parser（`make_parser`、省略形を受け付けない、終了コード 0/1/2） |
+| `vendor/py_launch.cjs` | myon-bioinformatics/myon-bioinformatics | Node から関数を名前で呼ぶ |
+
+commit・blob・sha256 は `vendor.lock.json` に固定。更新は親の `vendor_sync.py`（`check` / `update` / `enroll`）で。
 
 戻り値は JSON 越しでも変わらない形（2^53 を超える整数は文字列、∞ は `"inf"`）。
 

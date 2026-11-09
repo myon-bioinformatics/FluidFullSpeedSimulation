@@ -16,6 +16,7 @@ MONIAC（フィリップス・マシン）の物理部品（水槽＝積分器�
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import math
 import random
@@ -797,16 +798,83 @@ EXPERIMENTS = {
 SLUGS = {slug: eid for eid, (slug, *_rest) in EXPERIMENTS.items()}
 
 
+def _plain(token: str) -> str:
+    """絵文字の比較用: 前後の空白と異体字セレクタ（U+FE0F）を落とす（🏛️ と 🏛 を同じに扱う）。"""
+    return token.strip().replace("\ufe0f", "")
+
+
 def resolve(key: str) -> str:
-    """'E02'・'e02'・'fluid-drain'・'E02:fluid-drain' のどれでも ID に直す。"""
-    k = key.strip()
+    """'E02'・'e02'・'fluid-drain'・'E02:fluid-drain'・'💧'（実験のアイコン）のどれでも ID に直す。"""
+    k = _plain(key)
     if ":" in k:
         k = k.split(":", 1)[0]
     if k.upper() in EXPERIMENTS:
         return k.upper()
     if k in SLUGS:
         return SLUGS[k]
+    for eid, (_slug, icon, _t, _f) in EXPERIMENTS.items():
+        if _plain(icon) == k:
+            return eid
     raise KeyError(f"unknown experiment {key!r}")
+
+
+# --- 絵文字をそのままコマンドに -------------------------------------------------
+
+VENDOR = Path(__file__).resolve().parent / "vendor"
+
+
+def vendored(name: str):
+    """vendor/<name>.py（vendor.lock.json で GitHub の commit に固定したファイル）を読み込む。"""
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, VENDOR / f"{name}.py")
+    if spec is None or spec.loader is None:
+        raise ImportError(f"vendor/{name}.py not found")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def fluid_aliases() -> dict[str, str]:
+    """流体のキー・アイコン（💧 🍶 …）・ブロック（🟦 🟨 …）→ キー。"""
+    out = {}
+    for key, f in FLUIDS.items():
+        for token in (key, f.icon, pw.EMOJI.get(key, "")):
+            if token:
+                out[_plain(token)] = key
+    return out
+
+
+SCENE_ICONS = {"🏛": "moniac-rig", "🥢": "somen-flume", "🎋": "flume", "🫙": "flume-hopper", "🌊": "dam-break",
+               "🕳": "moniac-drain"}
+
+
+def fluid_arg(text: str) -> str:
+    """--fluid: キーでも 💧 でも 🟦 でもよい。"""
+    return fluid_aliases().get(_plain(text), text)
+
+
+def scene_arg(text: str) -> str:
+    """draw の場面: 名前でも 🏛️ 🥢 🎋 🫙 🌊 🕳️ でもよい。"""
+    return SCENE_ICONS.get(_plain(text), text)
+
+
+def experiment_arg(text: str) -> str:
+    try:
+        return resolve(text)
+    except KeyError:
+        return text
+
+
+def block_arg(text: str) -> tuple[str, str]:
+    """draw の 2 つ目: 流体のブロック・アイコンなら流体、それ以外の絵文字ならそのまま塗る色。"""
+    key = fluid_aliases().get(_plain(text))
+    if key:
+        return ("fluid", key)
+    if text.strip() and not any(c.isascii() and c.isalnum() for c in text):
+        return ("fill", text.strip())
+    raise argparse.ArgumentTypeError(f"{text!r}: 流体（{', '.join(sorted(FLUIDS))}）か絵文字のブロック")
 
 
 def list_experiments() -> list[dict]:
@@ -918,20 +986,28 @@ def _draw(args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    choices = sorted(EXPERIMENTS) + sorted(SLUGS)
-    p = argparse.ArgumentParser(prog="fluidfullspeedsimulation", description="🌊 流れ・遅れ・検証")
+    """引数は argparse の choices / type で宣言する（vendor/cli_args.py の make_parser。省略形は受け付けない）。
+    実験・場面・流体は名前のほか絵文字をそのまま書ける: ``run 🥢``、``draw 🏛️ 🟩``、``draw 🥢 🟥``。"""
+    cli = vendored("cli_args")
+    p = cli.make_parser(suggest_unknown=True, prog="fluidfullspeedsimulation", description="🌊 流れ・遅れ・検証")
     sub = p.add_subparsers(dest="command", required=True)
-    sub.add_parser("list", help="🗂️ 実験の一覧")
-    sub.add_parser("fluids", help="🧪 流体の物性")
-    run = sub.add_parser("run", help="▶️ 実験を回す")
-    run.add_argument("experiment", choices=choices, help="ID か識別子")
-    ver = sub.add_parser("verify", help="✅ 全実験を回して検証")
-    drw = sub.add_parser("draw", help="🎨 🟦 を積む断面図で溜まる・流れる・遅れるを見る（ドット絵・GIF・PNG も）")
-    drw.add_argument("scene", choices=RIG_SCENES + pw.SECTION_CASES + pw.SCENES,
-                     help="場面（試験台・樋の回路・ドット絵）")
+    sub.add_parser("list", help="🗂️ 実験の一覧", allow_abbrev=False)
+    sub.add_parser("fluids", help="🧪 流体の物性", allow_abbrev=False)
+    run = sub.add_parser("run", help="▶️ 実験を回す", allow_abbrev=False)
+    run.add_argument("experiment", type=experiment_arg, choices=sorted(EXPERIMENTS),
+                     help="ID・識別子・アイコン（例 E10 / somen-flume / 🥢）")
+    ver = sub.add_parser("verify", help="✅ 全実験を回して検証", allow_abbrev=False)
+    drw = sub.add_parser("draw", help="🎨 🟦 を積む断面図で溜まる・流れる・遅れるを見る（ドット絵・GIF・PNG も）",
+                         allow_abbrev=False)
+    scenes = RIG_SCENES + pw.SECTION_CASES + pw.SCENES
+    drw.add_argument("scene", type=scene_arg, choices=scenes,
+                     help="場面（名前か 🏛️ 🥢 🎋 🫙 🌊 🕳️）")
+    drw.add_argument("block", nargs="?", type=block_arg,
+                     help="流体のブロック・アイコン（🟦 🟨 🟧 🟩 🟪 / 💧 🍶 🧴 🟢 ☠️）か、塗りたい好きな絵文字")
     drw.add_argument("--view", choices=("frames", "frame", "files"), default="frames",
                      help="frames = 時刻ごとの断面図 / frame = 最後の 1 枚 / files = GIF・PNG（ドット絵だけ）")
-    drw.add_argument("--fluid", choices=ALL_FLUID_KEYS, default="water", help="作動流体（🏷️ 仮置きも選べる）")
+    drw.add_argument("--fluid", type=fluid_arg, choices=ALL_FLUID_KEYS, default=None,
+                     help="作動流体（キーか絵文字。🏷️ 仮置きも選べる。既定 water）")
     drw.add_argument("--fill", help="水のブロック（色は自由。既定は流体ごと: 🟦 水 🟨 エタノール 🟧 メタノール "
                                     "🟩 Namekian Water 🟪 Poison Water）")
     drw.add_argument("--frames", type=int, default=6, help="並べる時刻の数")
@@ -953,6 +1029,20 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _draw_choices(parser: argparse.ArgumentParser, args) -> None:
+    """2 つ目の絵文字（block）と --fluid / --fill をまとめる。"""
+    kind, value = args.block if args.block else (None, None)
+    if kind == "fluid":
+        if args.fluid not in (None, value):
+            parser.error(f"流体が 2 つ: {value} と --fluid {args.fluid}")
+        args.fluid = value
+    elif kind == "fill":
+        if args.fill not in (None, value):
+            parser.error(f"色が 2 つ: {value} と --fill {args.fill}")
+        args.fill = value
+    args.fluid = args.fluid or "water"
+
+
 def _utf8_stdout() -> None:
     """絵文字を出すので、UTF-8 でない端末（Windows のパイプ等）では stdout を UTF-8 に切り替える。"""
     enc = (getattr(sys.stdout, "encoding", None) or "").lower().replace("-", "")
@@ -961,7 +1051,10 @@ def _utf8_stdout() -> None:
 
 
 def main(argv=None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.command == "draw":
+        _draw_choices(parser, args)
     _utf8_stdout()
     if args.command == "list":
         for e in list_experiments():
