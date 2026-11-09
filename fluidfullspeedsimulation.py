@@ -25,7 +25,7 @@ from pathlib import Path
 
 from fixedq import ONE, from_q, lag_step, qmul, shift_lag_step, to_q
 from fluids import FLUIDS, REAL_FLUIDS, RE_LAMINAR, Section, channel_reynolds, fall_time, fluid_table, get_fluid, lip_head
-from fluids import TEMP_TABLES, lip_flow, normal_depth, table_value
+from fluids import TEMP_TABLES, lip_flow, normal_depth, superelevation, table_value
 from fluids import poiseuille_head, poiseuille_tau, torricelli_empty_time, torricelli_head, transport_delay
 from network import Network, critical_gain, inverse_table, jsonable, peak_to_peak, settling_time, window
 import pixelwater as pw
@@ -561,7 +561,7 @@ NOODLES = {"somen": 1.0e-3, "hiyamugi": 1.5e-3, "udon": 2.0e-3}
 
 def somen_layout(q: float, *, law: str = "manning", beta: float | None = None, dt: float = 0.01,
                  drop: float = 0.05, lip: float = 3e-3, bend_radius: float = 0.12, bucket: float = 0.5,
-                 fluid: str = "water", temp_c: float | None = None) -> Network:
+                 fluid: str = "water", temp_c: float | None = None, tail_cells: int = 10) -> Network:
     """桶 → ポンプ → 竹 3 本（直線 → 段差 → 曲がり → 縁の継ぎ目 → 直線）→ 受け皿 → ホースで桶へ戻す。
     曲がりや継ぎ目からあふれた水は床（floor）へ。temp_c で水温を変えられる（🧊 E15）。"""
     net = Network(dt, fluid, temp_c=temp_c).tank("bucket", 0.05, volume=bucket).tank("basin", 0.05)
@@ -570,7 +570,7 @@ def somen_layout(q: float, *, law: str = "manning", beta: float | None = None, d
     net.flume("take", "basin", [
         {"length": 2.0, "cells": 20, "slope": 0.05, "joint": {"drop": drop}, **kw},
         {"length": 1.0, "cells": 10, "slope": 0.03, "bend_radius": bend_radius, "joint": {"lip": lip}, **kw},
-        {"length": 1.0, "cells": 10, "slope": 0.05, **kw},
+        {"length": 1.0, "cells": tail_cells, "slope": 0.05, **kw},
     ], spill="floor")
     net.pump("bucket", "take/0:0", rate=q)
     net.pump("basin", "bucket", rate=q, delay=2.0)
@@ -782,6 +782,303 @@ def rig_fingerprint(res: dict) -> dict:
     return {k: float(f"{v:.9g}") for k, v in sorted(res["final"].items()) if k.startswith("h:")}
 
 
+# --- E12 長さのある麺（体が区間をまたぐ・縁に掛かる・曲がりで飛び出す） ------------------
+
+STRAND = {"size": 1.5e-3, "density": 1100.0, "friction": 0.3}  # ひやむぎ程度の太さ。密度・摩擦は仮定の値
+
+
+def bend_outer(q: float, slope: float = 0.03, radius: float = 0.12, n_manning: float = 0.010) -> float:
+    """曲がりの等流で、外側の壁の水面 h + Δh/2（Δh = v²B/(gR)）。"""
+    sec = Section(BAMBOO["shape"], BAMBOO["size"])
+    h = normal_depth(sec, q, slope, "manning", nu=get_fluid("water").nu, h_max=sec.size, n_manning=n_manning)
+    v = q / sec.area(h)
+    return h + superelevation(v, sec.top_width(h), radius) / 2.0
+
+
+def eject_flow(size: float, lo: float = 5e-5, hi: float = 2e-3) -> float:
+    """外側の水面が「縁 − 太さ/2」になる流量（水はこぼれず、麺だけが縁に届く窓のまん中）。"""
+    target = BAMBOO["size"] - size / 2.0
+    return _solve(lambda q: bend_outer(q) - target, lo, hi)
+
+
+def drape_flume(q: float = 3e-6, splash: tuple | None = None, dt: float = 0.01) -> Network:
+    """細い流れ（層流 β = 3）の竹 2 本を縁 3 mm の継ぎ目でつなぐ（区間 5 cm）。
+    splash = (始め, 終わり, 流量): 継ぎ目の手前のセルへ手で水をかけ、頭だけ縁を越えさせる。"""
+    net = Network(dt).tank("bucket", 0.05, volume=0.5).tank("basin", 0.05)
+    kw = {"law": "laminar", "beta": 3.0, "section": BAMBOO}
+    net.flume("take", "basin", [
+        {"length": 2.0, "cells": 40, "slope": 0.05, "joint": {"lip": 3e-3}, **kw},
+        {"length": 1.0, "cells": 20, "slope": 0.05, **kw},
+    ])
+    net.pump("bucket", "take/0:0", rate=q)
+    net.pump("basin", "bucket", rate=q, delay=2.0)
+    if splash:
+        t0, t1, rate = splash
+        net.pump("bucket", "take/0:39", rate=rate, start=t0, until=t1)
+    return net
+
+
+def e12_noodle_length(length: float = 0.3, long_drape: float = 0.5) -> dict:
+    """🍜 長さのある麺。体は頭の後ろに通ってきた区間を合計 length まで引く（区間の分解能で）。
+
+    - 体の区間数 = ceil(length / Δx)、長さは速さを変えない（水と一緒に先入れ先出し）、尾は L/v 遅れて通る
+    - 体のどこかが「越流水深 < 太さ」の縁に掛かっていれば全体が止まる（頭が越えた後でも尾で引っかかる）
+    - 曲がりでは外側の水面 + 太さが縁に届くと、麺だけ縁の外へはじき出される（水はまだこぼれない）
+    """
+    checks, runs, summary = [], {}, {}
+    sec = Section(BAMBOO["shape"], BAMBOO["size"])
+    w = get_fluid("water")
+
+    # 🍜 ふつうに流す: 体の区間数・長さで速さが変わらない・尾の遅れ
+    net = somen_layout(5e-5)
+    net.tracer("long", "take/0:0", release=20.0, stop="basin", length=length, **STRAND)
+    net.tracer("point", "take/0:0", release=20.0, stop="basin", size=STRAND["size"])
+    res = net.run(40.0, sample_every=5)
+    tr = {t["name"]: t for t in res["tracers"]}
+    dx = 0.1
+    want_cells = math.ceil(length / dx - 1e-9)
+    spans = [len(r["bodies"]["long"]) for r in res["series"] if "long" in r.get("bodies", {})
+             and all(c.startswith("take/0:") for c in r["bodies"]["long"])]
+    enter = {p["node"]: p["t"] for p in tr["long"]["path"]}
+    h0 = normal_depth(sec, 5e-5, 0.05, "manning", nu=w.nu, h_max=sec.size)
+    v0 = 5e-5 / sec.area(h0)
+    lag = enter["take/0:15"] - enter["take/0:12"]  # 頭が 3 区間（= 0.3 m）進む時間 = 尾がそこを通る遅れ
+    view = pw.network_frames(res, ["take/0"], frames=None)
+    wide = max((sum(line.count(pw.CARRIED) for line in fr["lines"]) for fr in view["frames"]), default=0)
+    checks += [
+        check("span", "📏", bool(spans) and max(spans) == want_cells, value=max(spans) if spans else None,
+              expected=want_cells, note="体の区間数 = ceil(長さ / Δx)"),
+        check("same-speed", "🟰", tr["long"]["arrival"] is not None and
+              abs(tr["long"]["arrival"] - tr["point"]["arrival"]) <= net.dt + 1e-12,
+              value=tr["long"]["arrival"], expected=tr["point"]["arrival"], tol=net.dt,
+              note="長さは速さを変えない（水と一緒に流れる）"),
+        close("tail-lag", "⏱️", lag, length / v0, 2e-2, note="尾は頭から L/v 遅れて同じ所を通る"),
+        check("section-span", "🍜", wide >= want_cells, value=wide, expected=want_cells,
+              note="断面図で 🍜 が体の区間すべてに出る"),
+        conserved("flow:conserve", res),
+    ]
+    runs["flow"] = res["series"]
+    summary["flow"] = {"span_cells": want_cells, "lag": lag, "L_over_v": length / v0}
+
+    # 🪝 尾で引っかかる: 細い流れで頭も尾も縁で待つ → 継ぎ目に 1 秒だけ水をかけて頭を越えさせる → 止めると尾が残る
+    splash = (150.0, 151.0, 1e-6)
+    net = drape_flume(splash=splash, dt=0.02)
+    net.tracer("long", "take/0:0", release=80.0, stop="basin", length=long_drape, **STRAND)
+    net.tracer("point", "take/0:0", release=80.0, stop="basin", size=STRAND["size"])
+    res = net.run(175.0, sample_every=50)
+    tr = {t["name"]: t for t in res["tracers"]}
+    waited = [next((p["t"] for p in t["path"] if p["node"] == "take/0:39"), math.inf) for t in tr.values()]
+    head = tr["long"]["path"][-1]["node"]
+    pond_before = lip_head(sec, 3e-6, 3e-3) - 3e-3
+    pond_splash = lip_head(sec, 3e-6 + splash[2], 3e-3) - 3e-3
+    checks += [
+        check("drape:premise", "📐", pond_before < STRAND["size"] <= pond_splash, value=[pond_before, pond_splash],
+              expected=STRAND["size"], note="ふだんの越流水深 < 太さ ≤ 水をかけている間の越流水深"),
+        check("drape:wait", "⏳", max(waited) < splash[0], value=max(waited), expected=splash[0],
+              note="水をかける前に、どちらも縁の手前まで来ている"),
+        check("drape:point-free", "🍜", tr["point"]["state"] == "done", value=tr["point"]["arrival"],
+              note="点の麺（長さ 0）は水をかけた間に越えて届く"),
+        check("drape:tail-held", "🪝", tr["long"]["state"] == "node" and tr["long"]["stuck_at"] == "take/0:39"
+              and head.startswith("take/1:"), value=[head, tr["long"]["stuck_at"]],
+              note="長い麺は頭が越えた後、縁に掛かった尾で止まる"),
+        conserved("drape:conserve", res),
+    ]
+    runs["drape"] = res["series"]
+    summary["drape"] = {"head_over_rim": pond_before, "head_over_rim_splash": pond_splash, "long_head": head,
+                        "long_stuck_time": tr["long"]["stuck_time"]}
+
+    # 💨 曲がりで飛び出す: 外側の水面が「縁 − 太さ/2」になる流量で、麺だけ外へ（水は曲がりからこぼれない）
+    q_fast = eject_flow(STRAND["size"])
+    outer = bend_outer(q_fast)
+    net = somen_layout(q_fast, bucket=1.0)
+    net.tracer("long", "take/0:0", release=10.0, stop="basin", length=length, **STRAND)
+    res = net.run(20.0, sample_every=20)
+    t_long = res["tracers"][0]
+    bend_spill = sum(ln["volume_moved"] for ln in res["links"] if ln["kind"] == "spill"
+                     and ln["src"].startswith("take/1:") and ln["src"] != "take/1:9")
+    measured = max(ln["max_outer"] for ln in res["links"] if ln["kind"] == "spill"
+                   and ln["src"].startswith("take/1:") and ln["src"] != "take/1:9")
+    checks += [
+        check("eject:premise", "📐", outer < BAMBOO["size"] <= outer + STRAND["size"], value=outer,
+              expected=BAMBOO["size"], note="外側の水面 < 縁 ≤ 外側の水面 + 太さ"),
+        check("eject:out", "💨", t_long["state"] == "spilled" and (t_long["spilled_at"] or "").startswith("take/1:"),
+              value=t_long["spilled_at"], note="麺は曲がりで縁の外（床）へはじき出される"),
+        check("eject:water-stays", "🫗", bend_spill == 0.0, value=bend_spill, expected=0.0,
+              note="曲がりの区間からは水はこぼれていない（麺だけ）"),
+        close("eject:outer", "🌀", measured, outer, 2e-3, note="曲がりの外側の水面（シミュレーションの最大）= 閉じた式"),
+        conserved("eject:conserve", res),
+    ]
+    summary["eject"] = {"q": q_fast, "outer_depth": outer, "measured_outer_max": measured,
+                        "spilled_at": t_long["spilled_at"]}
+    runs["eject"] = res["series"]
+    return {"params": {"length": length, "long_drape": long_drape, "strand": STRAND, "splash": list(splash)},
+            "summary": summary, "runs": runs, "checks": checks}
+
+
+# --- E13 麺のたまり（縁に積もってせき止め、一気に押し流される） ----------------------
+
+def clog_prediction(q: float, strands: int, size: float, length: float, density: float, friction: float,
+                    lip: float = 3e-3, cd: float = 0.62, fluid: str = "water") -> dict:
+    """閉じた式。縁の幅 w = 縁の高さでの水面幅（たまりの間も一定とみなす）。
+
+    - 越流水深 head = (Q/K)^(2/3)、K = Cd·(2/3)·w·√(2g)（頂が上がっても幅は同じなので head は変わらない）
+    - 1 束が積もる高さ Δ₁ = 本数·πd²/4 / (PACKING·w)、k 束で Δ_k = k·Δ₁、たまりの水深 H_k = lip + Δ_k + head
+    - 押し流し: ρ·g·w·Δ·(H − lip − Δ/2) ≥ Σ μ·(ρ_麺 − ρ)·g·a·L ⇔ Δ/2 + head ≥ h* = μ·PACKING·(ρ_麺/ρ − 1)·L
+      → 流れ出す束の数 k* = ceil(2·(h* − head) / Δ₁)
+    """
+    from network import PACKING
+    sec = Section(BAMBOO["shape"], BAMBOO["size"])
+    w = sec.top_width(lip)
+    g = 9.80665
+    k = cd * (2.0 / 3.0) * w * math.sqrt(2.0 * g)
+    head = (q / k) ** (2.0 / 3.0)
+    d1 = strands * math.pi * size ** 2 / 4.0 / (PACKING * w)
+    rho = get_fluid(fluid).rho
+    h_star = friction * PACKING * (density / rho - 1.0) * length
+    k_star = max(1, math.ceil(2.0 * (h_star - head) / d1 - 1e-12))
+    return {"width": w, "head": head, "delta_1": d1, "h_star": h_star, "k_star": k_star,
+            "pond": [lip + i * d1 + head for i in range(k_star + 1)]}
+
+
+def e13_noodle_clog(q: float = 3e-6, every: float = 5.0, bunches: int = 34, strands: int = 10,
+                    length: float = 0.2, first: float = 80.0, dt: float = 0.05,
+                    friction: float = STRAND["friction"], density: float = STRAND["density"]) -> dict:
+    """🧱 一口分の束（ひやむぎ 10 本）を every 秒ごとに流す。越流水深が太さより浅いので縁で引っかかり、
+    積もった分だけ縁が高くなって水が溜まる。たまりが押す力が摩擦を超えると、全部まとめて流れ出す。"""
+    net = somen_layout(q, law="laminar", beta=3.0, dt=dt)
+    for i in range(bunches):
+        net.tracer(f"bunch-{i + 1:02d}", "take/0:0", release=first + i * every, stop="basin", length=length,
+                   strands=strands, size=STRAND["size"], density=density, friction=friction)
+    t_end = first + bunches * every + 60.0
+    res = net.run(t_end, sample_every=20, trace=["take/1:9"])
+    pred = clog_prediction(q, strands, STRAND["size"], length, density, friction)
+    lip = res["lips"][0]
+    rel = lip["releases"]
+    depth = res["trace"]["take/1:9"]
+    tr = {t["name"]: t for t in res["tracers"]}
+    joined = sorted((t["held_since"], name) for name, t in tr.items() if t["held_since"] is not None)
+    checks, summary = [], {"prediction": pred, "releases": rel}
+    # たまりの水深: k 束が積もって落ち着いたところ（次の束が来る直前）= lip + Δ_k + head
+    ladder = []
+    first_release = rel[0]["t"] if rel else math.inf
+    for k in range(1, pred["k_star"]):
+        t_next = joined[k][0]
+        if t_next >= first_release:
+            break
+        ladder.append((k, depth[int(round(t_next / dt)) - 2], pred["pond"][k]))  # 次の束が積もる直前
+    worst = max((rel_err(got, want) for _k, got, want in ladder), default=math.inf)
+    checks += [
+        check("held", "🪝", pred["head"] < STRAND["size"], value=pred["head"], expected=STRAND["size"],
+              note="越流水深 < 太さ（束は縁で引っかかる）"),
+        check("pond-ladder", "🪜", len(ladder) == pred["k_star"] - 1 and worst <= 5e-3, value=worst, tol=5e-3,
+              note="k 束積もったたまりの水深 = 縁 + Δ_k + 越流水深（k = 1 … k*−1。次の束まで 5 秒で落ち着く途中の分を見込む）"),
+        check("release-count", "🧮", bool(rel) and all(len(r["members"]) == pred["k_star"] for r in rel),
+              value=[len(r["members"]) for r in rel], expected=pred["k_star"],
+              note="流れ出すのは k* = ceil(2(h* − head)/Δ₁) 束たまったとき"),
+        check("release-force", "⚖️", bool(rel) and all(r["push"] >= r["hold"] for r in rel),
+              value=[round(r["push"] / r["hold"], 4) for r in rel], expected=1.0,
+              note="流れ出す瞬間: 押す力 ≥ 支える力（記録の値）"),
+        check("sawtooth", "📈", len(rel) >= min(2, bunches // (2 * pred["k_star"] + 4) + 1), value=len(rel),
+              expected=2, note="溜まる → 一気に流れる、を繰り返す（束が足りるだけ）"),
+    ]
+    spreads, drops = [], []
+    for r in rel:
+        arr = [tr[m]["arrival"] for m in r["members"]]
+        spreads.append(max(arr) - min(arr) if None not in arr else math.inf)
+        i0 = int(round(r["t"] / dt)) - 1
+        after = depth[i0: i0 + int(round(every / dt))]
+        drops.append(depth[i0 - 1] - min(after))
+    checks += [
+        check("bunched", "🍜", bool(spreads) and max(spreads) < every / 2, value=max(spreads, default=None),
+              expected=every, note=f"押し流された束は固まって届く（間隔 {every} 秒より詰まる）"),
+        check("drop", "📉", bool(drops) and min(drops) >= 0.5 * pred["k_star"] * pred["delta_1"],
+              value=min(drops, default=None), expected=pred["k_star"] * pred["delta_1"],
+              note="流れ出すとたまりの水深がたまりの高さの半分以上下がる"),
+        check("no-overflow", "🫗", max(depth) < BAMBOO["size"], value=max(depth), expected=BAMBOO["size"],
+              note="たまりは竹の縁を越えない"),
+        conserved("conserve", res),
+    ]
+    swept = sorted(name for name, t in tr.items() if t["state"] == "done" and t["stuck_time"] == 0)
+    summary.update({"ladder": ladder, "spreads": spreads, "drops": drops, "swept_along": swept})
+    return {"params": {"q": q, "every": every, "bunches": bunches, "strands": strands, "length": length,
+                       "first": first, "dt": dt, "size": STRAND["size"], "density": density, "friction": friction},
+            "summary": summary, "runs": {"clog": res["series"]}, "checks": checks}
+
+
+# --- E14 箸ですくう（遅い麺ほど取れる） --------------------------------------------
+
+CATCH_ZONE = "take/2:1"  # 最後の竹（4 区間 × 25 cm）の 2 つ目の区間に手を構える
+GRAB = (0.3, 0.8)  # 手を伸ばして挟むまでの時間 [s] の幅（一様。仮定の値）
+
+
+def catch_run(q: float, *, noodles: int = 30, every: float = 1.0, cooldown: float = 0.0, seed: int = 7,
+              grab=GRAB, dt: float = 0.02) -> dict:
+    net = somen_layout(q, tail_cells=4, dt=dt)
+    for i in range(noodles):
+        net.tracer(f"somen-{i + 1:02d}", "take/0:0", release=20.0 + i * every, stop="basin",
+                   size=NOODLES["somen"])
+    net.catcher("hand", CATCH_ZONE, grab=grab, cooldown=cooldown, seed=seed)
+    return net.run(20.0 + noodles * every + 20.0, sample_every=50)
+
+
+def e14_chopsticks(flows=(2e-5, 5e-5, 1.2e-4, 2e-4), noodles: int = 30, seed: int = 7) -> dict:
+    """🥢 取り手は CATCH_ZONE の区間で、入ってきた麺に t_grab（麺ごとに GRAB の一様乱数、seed で再現）
+    たってから箸を入れる。麺がその前に区間を出れば取り逃し。区間にいる時間 = Δx / v なので、流れが速いほど
+    取れない。取れる割合の目安は P(t_grab ≤ Δx/v) = (Δx/v − 0.3) / 0.5（0..1 に収める）。"""
+    sec = Section(BAMBOO["shape"], BAMBOO["size"])
+    w = get_fluid("water")
+    dx = 0.25
+    checks, runs, summary = [], {}, {}
+    caught_counts = []
+    for q in flows:
+        res = catch_run(q, noodles=noodles, seed=seed)
+        c = res["catchers"][0]
+        h = normal_depth(sec, q, 0.05, "manning", nu=w.nu, h_max=sec.size)
+        stay = dx / (q / sec.area(h))
+        draws = random.Random(seed)
+        expect = sum(draws.uniform(*GRAB) <= stay for _ in range(noodles))
+        exact = all(abs(x["t_catch"] - x["t_in"] - x["t_grab"]) <= 1e-9 for x in c["caught"]) and \
+            all(m["why"] == "fast" and m["residence"] < m["t_grab"] for m in c["missed"])
+        tag = f"q{q:.1e}"
+        re = channel_reynolds(sec, h, q, w.nu)
+        checks += [
+            check(f"{tag}:rule", "📏", exact, value=[len(c["caught"]), len(c["missed"])],
+                  note="取れた麺は入ってちょうど t_grab 後、取り逃した麺は t_grab より先に区間を出ている"),
+            check(f"{tag}:count", "🥢", abs(len(c["caught"]) - expect) <= 1, value=len(c["caught"]), expected=expect,
+                  tol=1, note="取れた数 ≈ #(t_grab ≤ Δx/v)（等流の v で。境目の 1 本は時刻の刻みで入れ替わりうる）"),
+            check(f"{tag}:all-accounted", "🧾", len(c["caught"]) + len(c["missed"]) == noodles,
+                  value=len(c["caught"]) + len(c["missed"]), expected=noodles, note="全部の麺が取れたか取り逃しか"),
+            check(f"{tag}:regime", "〰️", re > 500, value=re, expected=500.0, note="Manning の前提（Re > 500）"),
+            conserved(f"{tag}:conserve", res),
+        ]
+        caught_counts.append(len(c["caught"]))
+        summary[tag] = {"q": q, "stay": stay, "caught": len(c["caught"]), "missed": len(c["missed"]),
+                        "expected": expect, "fraction_model": min(1.0, max(0.0, (stay - GRAB[0]) / (GRAB[1] - GRAB[0])))}
+        runs[tag] = res["series"]
+    checks.append(check("trend", "📉", all(a >= b for a, b in zip(caught_counts, caught_counts[1:]))
+                        and caught_counts[0] > caught_counts[-1], value=caught_counts,
+                        note="流れが速いほど取れる数が減る"))
+    # ✋ 手が空くまで（口へ運ぶ間）は取れない: 1 秒おきに来る麺を、取ったら 1.5 秒休む
+    res = catch_run(flows[0], noodles=noodles, cooldown=1.5, seed=seed)
+    c = res["catchers"][0]
+    busy = [m for m in c["missed"] if m["why"] == "busy"]
+    gaps = [b["t_catch"] - a["t_catch"] for a, b in zip(c["caught"], c["caught"][1:])]
+    checks += [
+        check("busy:missed", "✋", len(busy) > 0 and all(m["free_at"] > m["t_in"] + m["t_grab"] for m in busy),
+              value=len(busy), note="手がふさがっている間に来た麺は取り逃す"),
+        check("busy:spacing", "⏱️", all(g >= 1.5 - 1e-9 for g in gaps), value=min(gaps, default=None), expected=1.5,
+              note="取る間隔は休む時間以上"),
+        check("busy:fewer", "🥢", len(c["caught"]) < caught_counts[0], value=len(c["caught"]),
+              expected=caught_counts[0], note="休む時間があると取れる数が減る"),
+        conserved("busy:conserve", res),
+    ]
+    summary["busy"] = {"caught": len(c["caught"]), "busy_missed": len(busy),
+                       "fast_missed": len(c["missed"]) - len(busy)}
+    return {"params": {"flows": list(flows), "noodles": noodles, "seed": seed, "grab": list(GRAB),
+                       "zone": CATCH_ZONE, "zone_length": dx},
+            "summary": summary, "runs": runs, "checks": checks}
+
+
 # --- E15 冷たい水（🧊 水温で粘度・密度が変わる） ---------------------------------
 
 def _path_time(tr: dict, node: str) -> float | None:
@@ -946,6 +1243,9 @@ EXPERIMENTS = {
     "E09": ("pixel-water", "🟦", "🟦 を積む断面図で溜まる・流れる・遅れる（ドット絵の水も）", e09_pixel_water),
     "E10": ("somen-flume", "🥢", "流しそうめん（竹の継ぎ目・段差・曲がり・引っかかり）", e10_somen_flume),
     "E11": ("moniac-rig", "🏛️", "MONIAC 型の水回り（分流・貯める・浮きで弁・遅れ）を据え置きの試験に", e11_moniac_rig),
+    "E12": ("noodle-length", "🍜", "長さのある麺（体が区間をまたぐ・尾で引っかかる・曲がりで飛び出す）", e12_noodle_length),
+    "E13": ("noodle-clog", "🧱", "麺のたまり（縁に積もってせき止め、一気に押し流される）", e13_noodle_clog),
+    "E14": ("chopsticks", "🍽️", "箸ですくう（遅い麺ほど取れる、手が空くまでは取れない）", e14_chopsticks),
     "E15": ("cold-water", "🧊", "冷たい水（水温で粘度・密度が変わる）", e15_cold_water),
     "E16": ("bamboo-wear", "🪵", "竹の傷み（割れ目からの漏れ・節の削り残し）", e16_bamboo_wear),
 }
@@ -1001,7 +1301,8 @@ def fluid_aliases() -> dict[str, str]:
 
 
 SCENE_ICONS = {"🏛": "moniac-rig", "🥢": "somen-flume", "🎋": "flume", "🫙": "flume-hopper", "🌊": "dam-break",
-               "🕳": "moniac-drain", "🧊": "cold-water", "🪵": "bamboo-wear"}
+               "🕳": "moniac-drain", "🧊": "cold-water", "🪵": "bamboo-wear", "🍜": "noodle-length",
+               "🧱": "noodle-clog", "🍽": "chopsticks"}
 
 
 def fluid_arg(text: str) -> str:
@@ -1010,7 +1311,7 @@ def fluid_arg(text: str) -> str:
 
 
 def scene_arg(text: str) -> str:
-    """draw の場面: 名前でも 🏛️ 🥢 🎋 🫙 🌊 🕳️ でもよい。"""
+    """draw の場面: 名前でも 🏛️ 🥢 🎋 🫙 🌊 🕳️ 🧊 🪵 🍜 🧱 🍽️ でもよい。"""
     return SCENE_ICONS.get(_plain(text), text)
 
 
@@ -1103,6 +1404,18 @@ def rig_section(scene: str, fluid: str = "water", temp_c: float | None = None) -
         for i in range(3):
             net.tracer(f"somen-{i + 1}", "take/0:0", release=20.0 + 2 * i, stop="basin", size=NOODLES["somen"])
         return net.run(40.0, sample_every=20), ["take/0", "take/1", "take/2", "basin", "floor"]
+    if scene == "noodle-length":
+        net = somen_layout(5e-5, fluid=fluid, temp_c=temp_c)
+        net.tracer("long", "take/0:0", release=20.0, stop="basin", length=0.3, **STRAND)
+        return _from(net.run(32.0, sample_every=10), 20.0), ["take/0", "take/1", "take/2"]
+    if scene == "noodle-clog":
+        net = somen_layout(3e-6, law="laminar", beta=3.0, dt=0.05, fluid=fluid, temp_c=temp_c)
+        for i in range(16):
+            net.tracer(f"bunch-{i + 1:02d}", "take/0:0", release=80.0 + 5.0 * i, stop="basin", length=0.2,
+                       strands=10, **STRAND)
+        return _from(net.run(200.0, sample_every=20), 100.0), ["take/1", "take/2", "basin"]
+    if scene == "chopsticks":
+        return _from(catch_run(5e-5, noodles=10), 24.0), ["take/1", "take/2", "basin"]
     if scene == "cold-water":
         net = somen_layout(3e-6, law="laminar", beta=3.0, dt=0.05, fluid=fluid, temp_c=10.0 if temp_c is None else temp_c)
         net.tracer("hiyamugi", "take/0:0", release=40.0, stop="basin", size=NOODLES["hiyamugi"])
@@ -1116,7 +1429,13 @@ def rig_section(scene: str, fluid: str = "water", temp_c: float | None = None) -
     raise KeyError(f"unknown rig scene {scene!r}")
 
 
-RIG_SCENES = ("moniac-rig", "somen-flume", "cold-water", "bamboo-wear")
+def _from(res: dict, t0: float) -> dict:
+    """断面図に出す時刻を t0 から後に絞る（水が行き渡って麺を流し始めてから）。"""
+    return {**res, "series": [row for row in res["series"] if row["t"] >= t0]}
+
+
+RIG_SCENES = ("moniac-rig", "somen-flume", "noodle-length", "noodle-clog", "chopsticks", "cold-water",
+              "bamboo-wear")
 
 
 def _draw(args) -> int:

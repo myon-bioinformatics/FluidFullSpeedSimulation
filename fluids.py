@@ -292,17 +292,22 @@ def fall_time(drop: float, g: float = G) -> float:
     return math.sqrt(2.0 * drop / g) if drop > 0 else 0.0
 
 
-def lip_flow(section: Section, h: float, lip: float, cd: float = 0.62, g: float = G) -> float:
-    """継ぎ目の段（次の竹の縁が lip だけ高い）を越える流量。幅 = 縁の高さでの水面幅の長方形堰。"""
+def lip_flow(section: Section, h: float, lip: float, cd: float = 0.62, g: float = G,
+             width: float | None = None) -> float:
+    """継ぎ目の段（次の竹の縁が lip だけ高い）を越える流量。幅 = 縁の高さでの水面幅の長方形堰。
+    width を渡すとその幅で計算する（縁に麺が積もって堰の頂が上がっても、幅は元の縁のまま、とみなすとき）。"""
     over = h - lip
     if over <= 0:
         return 0.0
-    return cd * (2.0 / 3.0) * section.top_width(lip) * math.sqrt(2.0 * g) * over ** 1.5
+    w = section.top_width(lip) if width is None else width
+    return cd * (2.0 / 3.0) * w * math.sqrt(2.0 * g) * over ** 1.5
 
 
-def lip_head(section: Section, q: float, lip: float, cd: float = 0.62, g: float = G) -> float:
+def lip_head(section: Section, q: float, lip: float, cd: float = 0.62, g: float = G,
+             width: float | None = None) -> float:
     """lip_flow の逆: 流量 q が段を越えるときの水深（縁 + 越流水深）。"""
-    k = cd * (2.0 / 3.0) * section.top_width(lip) * math.sqrt(2.0 * g)
+    w = section.top_width(lip) if width is None else width
+    k = cd * (2.0 / 3.0) * w * math.sqrt(2.0 * g)
     return lip + (q / k) ** (2.0 / 3.0)
 
 

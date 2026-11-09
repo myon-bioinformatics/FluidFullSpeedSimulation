@@ -668,7 +668,9 @@ def tracer_intervals(res: dict) -> list[list[tuple[float, float, str]]]:
             if d:
                 spans.append((b["t"] - d, b["t"], f"{a['node']}>{b['node']}"))
         if path:
-            spans.append((path[-1]["t"], math.inf, path[-1]["node"]))
+            # 取られた（箸）・はじき出された麺はそこで消える
+            end = tr.get("until")
+            spans.append((path[-1]["t"], math.inf if end is None else end, path[-1]["node"]))
         out.append(spans)
     return out
 
@@ -749,11 +751,12 @@ def network_frames(res: dict, columns, *, frames: int | None = 6, rows: int = SE
         for c, n in enumerate(counts[r]):
             for k in range(n):
                 grid[rows - 1 - k][c] = fill
-        for spot in where[r]:
-            if spot is not None:
-                c, piped = spot
-                k = max(counts[r][c], 1) - 1  # 水面の段（空なら底）
-                grid[rows - 1 - k][c] = in_pipe if piped else carried
+        spots = [s_ for s_ in where[r] if s_ is not None]
+        for body in series[r].get("bodies", {}).values():  # 長さのある麺は体の区間すべてに 🍜
+            spots += [(names.index(cell), False) for cell in body if cell in names]
+        for c, piped in spots:
+            k = max(counts[r][c], 1) - 1  # 水面の段（空なら底）
+            grid[rows - 1 - k][c] = in_pipe if piped else carried
         shown.append({"t": times[r], "lines": ["".join(row) for row in grid], "counts": counts[r]})
     return {"columns": names, "caps": cap, "rows": rows, "fill": fill, "times": times, "counts": counts,
             "frames": shown, "arrivals": arrivals, "readback_error": worst,
