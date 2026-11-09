@@ -7,16 +7,20 @@ MONIAC は「水が流れ落ちる様子」の手本。部品は物理のまま�
 
 - ``tank``: 体積を Q 整数で持つ水槽。水位 h = V / A。流入と流出の差を積み上げる積分器そのもの
 - ``channel``: 傾いた樋を ``cells`` 個の区間セル（``<prefix>:0`` …）に分けたもの。断面は長方形・半円（竹）
+- ``flume``: 竹を継いだ流しそうめんの台。継ぎ目は段差（自由落下）か縁（たまってから越える）、曲がりはあふれうる
 
 管（リンク）の法則は ``LAWS`` 登録簿にあり、``register_law`` で増やせる:
 
 - ``pipe``（Hagen–Poiseuille、層流）/ ``orifice``（Torricelli）/ ``weir_rect`` ``weir_v``（堰）
 - ``cam``（水位 → 流量の表）/ ``rating``（セル体積 → 流量の表。樋の区間をつなぐ）
+- ``lip``（継ぎ目の縁を越える堰）/ ``spill``（曲がりの外側から横へあふれる）
 - ``pump``（一定流量）/ ``float_valve``（浮き弁。測った水位が遅れの段を通って弁を開く）
+- ``valve``（弁つきの出口。開き具合は一定か、別の水槽の浮き → カムで決まる。MONIAC の弁）
 - どの管にも ``delay``（輸送の遅れ）を付けられる。管の中の水も総量に数える
 
 運ばれる物 ``tracer``（そうめん・葉っぱ・浮き）: 入った節点に先にいた水が全部出たら、いちばん多く
 流れた管で次へ進む（押し出し流れ・先入れ先出し）。水槽では平均滞留時間 V/Q、樋では L/v に当たる。
+太さ ``size`` を持たせると、継ぎ目の縁の越流水深がそれより浅いあいだ引っかかる（``PASSABLE``）。
 
 1 ステップでは全部の管の流量を同じ状態から求め（同時更新）、出す側の水が足りなければ整数のまま按分する。
 移動は引いた整数をそのまま足すだけなので、総量は 1 ulp も変わらない。``build(spec)`` で JSON から組める。
@@ -27,10 +31,12 @@ from __future__ import annotations
 import math
 from typing import Callable
 
-from fixedq import Cam, DelayLine, clamp, from_q, lag_gain, lag_step, qdiv, qmul, qsqrt, to_q
-from fluids import G, RE_LAMINAR, Section, channel_flow, get_fluid, reynolds
+from fixedq import ONE, Cam, DelayLine, clamp, from_q, lag_gain, lag_step, qdiv, qmul, qsqrt, to_q
+from fluids import G, RE_LAMINAR, Section, channel_flow, fall_time, get_fluid, lip_flow, reynolds, side_spill
+from fluids import superelevation
 
 LAWS: dict[str, Callable] = {}
+PASSABLE: dict[str, Callable] = {}  # 運ばれる物がその管を通れるか（net, link, tracer）→ bool。無ければ常に通れる
 
 
 def register_law(kind: str):
@@ -82,9 +88,59 @@ def _law_rating(net, ln, n):
 
 @register_law("pump")
 def _law_pump(net, ln, n):
-    if ln["until_step"] is not None and n >= ln["until_step"]:
+    if n < ln["start_step"] or (ln["until_step"] is not None and n >= ln["until_step"]):
         return 0
     return ln["amount"]
+
+
+@register_law("lip")
+def _law_lip(net, ln, n):
+    """継ぎ目の段（次の竹の縁が lip だけ高い）。セルの水深が縁を越えた分だけ流れる。"""
+    v = net.nodes[ln["src"]]["v"]
+    ln["max_v"] = max(ln["max_v"], v)
+    h = from_q(net.head_q(ln["src"]))
+    return qmul(to_q(lip_flow(ln["section"], h, ln["lip"], ln["cd"], net.g)), net.dt_q)
+
+
+def _lip_passable(net, ln, tr):
+    """越流水深（水深 − 縁）が運ばれる物の太さ以上なら越えられる。"""
+    return from_q(net.head_q(ln["src"])) - ln["lip"] >= tr["size"]
+
+
+PASSABLE["lip"] = _lip_passable
+
+
+@register_law("spill")
+def _law_spill(net, ln, n):
+    """樋の縁からあふれる。曲がり（radius あり）では外側の水面 h + Δh/2（Δh = v²B/(gR)）が縁を越えた分が
+    横越流堰として流れ、どのセルでも縁の高さの容量を超えた体積はそのまま外へ落ちる。"""
+    nd = net.nodes[ln["src"]]
+    sec = nd["section"]
+    h = from_q(net.head_q(ln["src"]))
+    a = sec.area(h)
+    amount = 0
+    if a > 0 and ln["radius"] is not None:
+        v = from_q(qdiv(net.last_flow[ln["main"]], net.dt_q)) / a  # そのセルの本流（前のステップ）の流速
+        h_out = h + superelevation(v, sec.top_width(h), ln["radius"], net.g) / 2.0
+        ln["max_outer"] = max(ln["max_outer"], h_out)
+        amount = qmul(to_q(side_spill(nd["length"], h_out, ln["rim"], ln["cd"], net.g)), net.dt_q)
+    return max(amount, nd["v"] - ln["v_cap"])
+
+
+@register_law("valve")
+def _law_valve(net, ln, n):
+    """弁つきの出口: 全開で時定数 tau の線形流出に、開き具合（0..1）を掛ける。
+    開き具合は一定か、別の水槽の浮き（sensor の水位）→ カム（表）で決まる。浮きと弁の間に遅れの段も持てる。"""
+    if ln["cam"] is None:
+        o = ln["opening"]
+    else:
+        u = net.head_q(ln["sensor"])
+        for i in range(ln["stages"]):
+            ln["z"][i] = lag_step(ln["z"][i], u, ln["k_link"])
+            u = ln["z"][i]
+        o = clamp(ln["cam"](u), 0, ONE)
+    ln["last_opening"] = o
+    return qmul(qmul(net.nodes[ln["src"]]["v"], ln["k"]), o)
 
 
 @register_law("float_valve")
@@ -110,6 +166,7 @@ class Network:
         self.channels: dict[str, dict] = {}
         self.tracers: list[dict] = []
         self._groups: tuple[int, dict] | None = None
+        self.last_flow: list[int] = []  # 前のステップに各管で動いた量（Q）
 
     # --- 節点 -----------------------------------------------------------
     def _node(self, name: str, **data) -> dict:
@@ -127,17 +184,27 @@ class Network:
 
     def channel(self, prefix: str, dst: str, *, length: float, cells: int, slope: float, section,
                 law: str = "manning", n_manning: float = 0.010, beta: float | None = None,
-                max_depth: float | None = None, table_points: int = 256, delay: float = 0.0) -> dict:
+                max_depth: float | None = None, table_points: int = 256, delay: float = 0.0,
+                lip: float = 0.0, bend_radius: float | None = None, spill: str | None = None,
+                cd: float = 0.62) -> dict:
         """傾いた樋。区間セル <prefix>:0 … <prefix>:cells-1 を作り、末端を dst へつなぐ。
 
         各セルの流出は「セル体積 → 流量」の表（rating カム）で引く。表は等流の式から一度だけ作り、
         水深の浅い側ほど点を密にする（(i/N)² 刻み）。表の上端（半円なら縁、長方形なら max_depth）を
         超えた分は流量が頭打ちになるので、結果の overflow で知らせる。
+
+        - lip > 0: 末端は「次の竹の縁が lip だけ高い」継ぎ目。末端セルに水がたまり、越えた分だけ流れる
+        - bend_radius: 曲がり（半径 R）。外側の水面が縁を越えた分は各セルから spill の節点へあふれる
+        - delay: 末端の管の遅れ（段差の自由落下などに使う）
         """
         if cells < 1 or length <= 0 or slope <= 0:
             raise ValueError("channel needs cells >= 1, length > 0, slope > 0")
         if dst not in self.nodes:
             raise ValueError(f"unknown node {dst!r}")
+        if bend_radius is not None and spill is None:
+            raise ValueError("a bend needs a spill node")
+        if spill is not None and spill not in self.nodes:
+            raise ValueError(f"unknown spill node {spill!r}")
         sec = section if isinstance(section, Section) else Section(section["shape"], section["size"])
         lc = length / cells
         h_cap = sec.size if sec.shape == "semicircle" else (0.05 if max_depth is None else max_depth)
@@ -154,12 +221,42 @@ class Network:
             self._node(name, kind="reach", length=lc, section=sec, v=0, channel=prefix)
         for i, name in enumerate(names):
             nxt = names[i + 1] if i + 1 < cells else dst
-            self._link("rating", name, nxt, delay if nxt == dst else 0.0, cam=cam, max_v=0, channel=prefix)
+            if nxt == dst and lip > 0:
+                self._link("lip", name, nxt, delay, section=sec, lip=lip, cd=cd, max_v=0, channel=prefix)
+            else:
+                self._link("rating", name, nxt, delay if nxt == dst else 0.0, cam=cam, max_v=0, channel=prefix)
+            if bend_radius is not None or (spill is not None and nxt == dst and lip > 0):
+                # 曲がりの全セルと、縁の手前でたまるセルには縁からあふれる口を付ける
+                self._link("spill", name, spill, 0.0, main=len(self.links) - 1, radius=bend_radius, rim=h_cap,
+                           v_cap=to_q(a_max * lc), cd=cd, max_outer=0.0, channel=prefix)
         info = {"prefix": prefix, "cells": names, "length": length, "cell_length": lc, "slope": slope,
                 "section": sec.to_dict(), "law": law, "n_manning": n_manning, "beta": beta, "depth_cap": h_cap,
-                "volume_cap": a_max * lc, "table": table}
+                "volume_cap": a_max * lc, "table": table, "lip": lip, "bend_radius": bend_radius}
         self.channels[prefix] = info
         return info
+
+    def flume(self, prefix: str, dst: str, segments: list[dict], spill: str | None = None) -> list[dict]:
+        """竹をつないだ流しそうめんの台。segments を上流から順に並べ、<prefix>/<i>:<cell> を作る。
+
+        各 segment は channel() の引数（length・cells・slope・section・law …）に加えて
+        ``joint``（次の竹との継ぎ目）を持てる: ``{"drop": 段差 m}``（自由落下の遅れ）か
+        ``{"lip": 縁の高さ m}``（たまってから越える）。``bend_radius`` の竹は spill へあふれうる。
+        """
+        if not segments:
+            raise ValueError("flume needs at least one segment")
+        infos = [None] * len(segments)
+        nxt = dst
+        for i in range(len(segments) - 1, -1, -1):  # 下流から作る（行き先の節点を先に用意する）
+            seg = dict(segments[i])
+            joint = seg.pop("joint", None) or {}
+            unknown = set(joint) - {"drop", "lip"}
+            if unknown:
+                raise ValueError(f"unknown joint keys: {sorted(unknown)}")
+            infos[i] = self.channel(f"{prefix}/{i}", nxt, delay=fall_time(joint.get("drop", 0.0), self.g),
+                                    lip=joint.get("lip", 0.0), spill=spill, **seg)
+            infos[i]["joint"] = joint
+            nxt = infos[i]["cells"][0]
+        return infos
 
     # --- 管 -------------------------------------------------------------
     def _link(self, kind: str, src: str, dst: str, delay: float, **extra) -> dict:
@@ -174,7 +271,8 @@ class Network:
         link = {
             "kind": kind, "src": src, "dst": dst, "delay": steps * self.dt, "delay_steps": steps,
             "line": DelayLine(steps - 1) if steps else None,
-            "pending": 0, "flow_sum": 0, "max_head": 0, "first_arrival_step": None, **extra,
+            "pending": 0, "flow_sum": 0, "max_head": 0, "first_arrival_step": None, "first_flow_step": None,
+            **extra,
         }
         self.links.append(link)
         return link
@@ -213,9 +311,31 @@ class Network:
         """[[水位, 流量], ...] の表で決まる流出（特殊形状のスリット）。"""
         return self._link("cam", src, dst, delay, cam=Cam(table), table=[list(map(float, p)) for p in table])
 
-    def pump(self, src: str, dst: str, *, rate: float, until: float | None = None, delay: float = 0.0) -> dict:
+    def pump(self, src: str, dst: str, *, rate: float, start: float = 0.0, until: float | None = None,
+             delay: float = 0.0) -> dict:
+        """一定流量。start から until まで動く。"""
         return self._link("pump", src, dst, delay, amount=qmul(to_q(rate), self.dt_q), rate=rate,
+                          start_step=int(round(start / self.dt)),
                           until_step=None if until is None else int(round(until / self.dt)))
+
+    def valve(self, src: str, dst: str, *, tau: float, opening: float = 1.0, sensor: str | None = None,
+              cam=None, stages: int = 0, link_tau: float = 1.0, delay: float = 0.0) -> dict:
+        """弁つきの出口（MONIAC の弁）。全開の時定数 tau、開き具合は opening（0..1）か、
+        sensor の水位を cam（[[水位, 開き具合], ...]）で読み替えたもの。stages 段の遅れ（各 link_tau）は
+        浮き → ワイヤー → 弁のつながりの遅れ。"""
+        if self.nodes[src]["kind"] != "tank":
+            raise ValueError("valve needs a tank as src")
+        if not 0.0 <= opening <= 1.0:
+            raise ValueError("opening must be within 0..1")
+        if (cam is None) != (sensor is None):
+            raise ValueError("give both sensor and cam, or neither")
+        if sensor is not None and sensor not in self.nodes:
+            raise ValueError(f"unknown sensor node {sensor!r}")
+        h0 = self.head_q(sensor) if sensor else 0
+        return self._link("valve", src, dst, delay, tau=tau, k=lag_gain(self.dt, tau), opening=to_q(opening),
+                          sensor=sensor, cam=None if cam is None else Cam(cam),
+                          table=None if cam is None else [list(map(float, p)) for p in cam],
+                          stages=stages, k_link=lag_gain(self.dt, link_tau), z=[h0] * stages, last_opening=0)
 
     def float_valve(self, src: str, dst: str, *, sensor: str, setpoint: float, gain: float, qmax: float,
                     stages: int = 1, tau: float = 1.0, delay: float = 0.0) -> dict:
@@ -229,15 +349,19 @@ class Network:
                           stages=stages, tau=tau)
 
     # --- 運ばれる物 -------------------------------------------------------
-    def tracer(self, name: str, node: str, release: float = 0.0, stop=()) -> dict:
-        """運ばれる物を node に release 時刻で放す。stop（節点名か、その並び）に入るか、出口のない節点で止まる。"""
+    def tracer(self, name: str, node: str, release: float = 0.0, stop=(), size: float = 0.0) -> dict:
+        """運ばれる物を node に release 時刻で放す。stop（節点名か、その並び）に入るか、出口のない節点で止まる。
+
+        size は太さ [m]。継ぎ目の段（lip）では越流水深がこれより浅いと引っかかって待つ。
+        """
         stops = (stop,) if isinstance(stop, str) else tuple(stop)
         for nd in (node, *stops):
             if nd not in self.nodes:
                 raise ValueError(f"unknown node {nd!r}")
         tr = {"name": name, "node": node, "release_step": int(round(release / self.dt)), "state": "waiting",
               "credit": 0, "pipe_left": 0, "pipe_dst": None, "pipe_t": None, "pipe_f": 0.0, "path": [],
-              "arrival": None, "stop": stops}
+              "arrival": None, "stop": stops, "size": size, "stuck_steps": 0, "stuck_at": None,
+              "held": False}
         self.tracers.append(tr)
         return tr
 
@@ -266,6 +390,8 @@ class Network:
 
     # --- 1 ステップ -----------------------------------------------------
     def step(self, n: int) -> list[int]:
+        if len(self.last_flow) != len(self.links):
+            self.last_flow = [0] * len(self.links)
         req = [max(LAWS[ln["kind"]](self, ln, n), 0) for ln in self.links]
         # 出す側の水が足りなければ、その節点から出る管で整数のまま按分する
         for src, idx in self._by_src().items():
@@ -279,6 +405,8 @@ class Network:
         for i, ln in enumerate(self.links):
             self.nodes[ln["src"]]["v"] -= req[i]
             ln["flow_sum"] += req[i]
+            if req[i] and ln["first_flow_step"] is None:
+                ln["first_flow_step"] = n
         for i, ln in enumerate(self.links):
             if ln["line"] is None:
                 arrive = req[i]
@@ -290,6 +418,7 @@ class Network:
                 ln["first_arrival_step"] = n
         if self.tracers:
             self._move_tracers(n, req)
+        self.last_flow = req
         return req
 
     def _move_tracers(self, n: int, req: list[int]) -> None:
@@ -317,9 +446,16 @@ class Network:
             out_now = sum(req[i] for i in outs)
             tr["credit"] -= out_now
             if tr["credit"] <= 0 and out_now > 0:
-                f = -tr["credit"] / out_now  # このステップのうち、越えた後に残る割合（0 ≤ f < 1）
-                t_cross = (n + 1 - f) * self.dt
                 ln = self.links[max(outs, key=lambda i: req[i])]
+                ok = PASSABLE.get(ln["kind"])
+                if ok is not None and not ok(self, ln, tr):
+                    tr["stuck_steps"] += 1  # 引っかかり: 先にいた水は出たが、ここは越えられない
+                    tr["stuck_at"], tr["held"] = tr["node"], True
+                    continue
+                # このステップのうち、越えた後に残る割合（引っかかりから外れた直後は 0）
+                f = 0.0 if tr["held"] else -tr["credit"] / out_now
+                tr["held"] = False
+                t_cross = (n + 1 - f) * self.dt
                 if ln["delay_steps"]:
                     tr.update(state="pipe", pipe_left=ln["delay_steps"], pipe_dst=ln["dst"],
                               pipe_t=t_cross + ln["delay"], pipe_f=f)
@@ -363,14 +499,17 @@ class Network:
             "volumes_q": {k: nd["v"] for k, nd in self.nodes.items()},
             "links": [self._link_summary(i, ln) for i, ln in enumerate(self.links)],
             "channels": {p: self._channel_summary(ch) for p, ch in self.channels.items()},
-            "tracers": [{"name": tr["name"], "state": tr["state"], "arrival": tr["arrival"], "path": tr["path"]}
+            "tracers": [{"name": tr["name"], "state": tr["state"], "arrival": tr["arrival"], "path": tr["path"],
+                         "size": tr["size"], "stuck_time": tr["stuck_steps"] * self.dt, "stuck_at": tr["stuck_at"]}
                         for tr in self.tracers],
         }
 
     def _link_summary(self, i: int, ln: dict) -> dict:
-        fa = ln["first_arrival_step"]
+        fa, ff = ln["first_arrival_step"], ln["first_flow_step"]
         out = {"index": i, "kind": ln["kind"], "src": ln["src"], "dst": ln["dst"], "delay": ln["delay"],
-               "first_arrival": None if fa is None else fa * self.dt, "volume_moved": from_q(ln["flow_sum"])}
+               "first_flow": None if ff is None else ff * self.dt,
+               "first_arrival": None if fa is None else fa * self.dt, "volume_moved": from_q(ln["flow_sum"]),
+               "volume_moved_q": ln["flow_sum"]}
         if ln["kind"] == "pipe":
             h = from_q(ln["max_head"])
             v = ln["radius"] ** 2 * self.g * h / (8.0 * self.fluid.nu * ln["length"])
@@ -380,21 +519,32 @@ class Network:
 
     def _channel_summary(self, ch: dict) -> dict:
         """樋の安定性（Courant 数）とあふれの有無。Courant = c·dt/Δx、c = dQ/dA（表の傾き）。"""
-        rating = [ln for ln in self.links if ln.get("channel") == ch["prefix"]]
-        v_max = max(from_q(ln["max_v"]) for ln in rating)
+        mine = [ln for ln in self.links if ln.get("channel") == ch["prefix"]]
+        v_max = max((from_q(ln["max_v"]) for ln in mine if ln["kind"] == "rating"), default=0.0)
+        spills = [ln for ln in mine if ln["kind"] == "spill"]
         celerity = 0.0
         for (v0, q0), (v1, q1) in zip(ch["table"], ch["table"][1:]):
             if v0 > v_max:
                 break
             celerity = max(celerity, (q1 - q0) / (v1 - v0) * ch["cell_length"])
+        lips = [ln for ln in mine if ln["kind"] == "lip"]
         return {"max_cell_volume": v_max, "overflow": v_max >= ch["volume_cap"], "celerity": celerity,
-                "courant": celerity * self.dt / ch["cell_length"], "depth_cap": ch["depth_cap"]}
+                "pond_max_depth": max((ch_depth(ln, self) for ln in lips), default=None),
+                "courant": celerity * self.dt / ch["cell_length"], "depth_cap": ch["depth_cap"],
+                "spilled": sum(from_q(ln["flow_sum"]) for ln in spills),
+                "max_outer_depth": max((ln["max_outer"] for ln in spills), default=None)}
+
+
+def ch_depth(ln: dict, net: "Network") -> float:
+    """lip の手前のセルにたまった最大の水深。"""
+    nd = net.nodes[ln["src"]]
+    return nd["section"].depth(from_q(ln["max_v"]) / nd["length"])
 
 
 # --- JSON の仕様から組む --------------------------------------------------
 
-LINK_BUILDERS = ("pipe", "orifice", "weir", "cam", "pump", "float_valve")
-SPEC_KEYS = {"dt", "fluid", "tanks", "channels", "links", "tracers", "t_end", "trace", "sample_every"}
+LINK_BUILDERS = ("pipe", "orifice", "weir", "cam", "pump", "valve", "float_valve")
+SPEC_KEYS = {"dt", "fluid", "tanks", "channels", "flumes", "links", "tracers", "t_end", "trace", "sample_every"}
 
 
 def build(spec: dict) -> Network:
@@ -407,7 +557,8 @@ def build(spec: dict) -> Network:
      "links": [{"law": "pump", "src": "sea", "dst": "flume:0", "rate": 5e-5}],
      "tracers": [{"name": "somen", "node": "flume:0", "release": 30, "stop": "sea"}]}
 
-    channels は tanks の後、links の前に作る（樋のセルを管の行き先に使えるように）。
+    channels・flumes は tanks の後、links の前に作る（樋のセルを管の行き先に使えるように）。
+    flumes は {"prefix", "dst", "segments": [...], "spill"}（Network.flume を参照）。
     links の law が LINK_BUILDERS 以外なら、register_law で登録した法則として net.link に渡す。
     """
     extra = set(spec) - SPEC_KEYS
@@ -418,6 +569,8 @@ def build(spec: dict) -> Network:
         net.tank(**t)
     for c in spec.get("channels", []):
         net.channel(**c)
+    for fl in spec.get("flumes", []):
+        net.flume(**fl)
     for ln in spec.get("links", []):
         ln = dict(ln)
         law = ln.pop("law")

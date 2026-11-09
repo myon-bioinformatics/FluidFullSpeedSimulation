@@ -139,6 +139,16 @@ class Section:
         r = self.size
         return r * 2.0 * math.acos(1.0 - min(h, r) / r)
 
+    def top_width(self, h: float) -> float:
+        """水面の幅。半円は 2√(h(2r − h))。"""
+        if h <= 0:
+            return 0.0
+        if self.shape == "rect":
+            return self.size
+        r = self.size
+        h = min(h, r)
+        return 2.0 * math.sqrt(h * (2.0 * r - h))
+
     def max_area(self, max_depth: float | None = None) -> float:
         if self.shape == "semicircle":
             return math.pi * self.size ** 2 / 2.0
@@ -205,9 +215,44 @@ def channel_reynolds(section: Section, h: float, q: float, nu: float) -> float:
     return 0.0 if a <= 0 else (q / a) * hydraulic_radius(section, h) / nu
 
 
+# --- 樋の継ぎ目・曲がり（流しそうめん） ------------------------------------------
+
+def fall_time(drop: float, g: float = G) -> float:
+    """段差 drop [m] を自由落下する時間 √(2·drop/g)。"""
+    return math.sqrt(2.0 * drop / g) if drop > 0 else 0.0
+
+
+def lip_flow(section: Section, h: float, lip: float, cd: float = 0.62, g: float = G) -> float:
+    """継ぎ目の段（次の竹の縁が lip だけ高い）を越える流量。幅 = 縁の高さでの水面幅の長方形堰。"""
+    over = h - lip
+    if over <= 0:
+        return 0.0
+    return cd * (2.0 / 3.0) * section.top_width(lip) * math.sqrt(2.0 * g) * over ** 1.5
+
+
+def lip_head(section: Section, q: float, lip: float, cd: float = 0.62, g: float = G) -> float:
+    """lip_flow の逆: 流量 q が段を越えるときの水深（縁 + 越流水深）。"""
+    k = cd * (2.0 / 3.0) * section.top_width(lip) * math.sqrt(2.0 * g)
+    return lip + (q / k) ** (2.0 / 3.0)
+
+
+def superelevation(velocity: float, top_width: float, radius: float, g: float = G) -> float:
+    """曲がりで外側の水面が内側より高くなる量 Δh = v²·B / (g·R)。"""
+    return velocity * velocity * top_width / (g * radius)
+
+
+def side_spill(cell_length: float, h_outer: float, rim: float, cd: float = 0.62, g: float = G) -> float:
+    """外側の水面が縁 rim を越えた分が、セルの長さ全体から横へあふれる流量（横越流堰）。"""
+    over = h_outer - rim
+    if over <= 0:
+        return 0.0
+    return cd * (2.0 / 3.0) * cell_length * math.sqrt(2.0 * g) * over ** 1.5
+
+
 __all__ = [
     "FLUIDS", "Fluid", "G", "RE_LAMINAR", "fluid_table", "get_fluid",
     "pipe_mean_velocity", "poiseuille_head", "poiseuille_tau", "reynolds",
     "torricelli_empty_time", "torricelli_head", "transport_delay",
     "Section", "channel_flow", "channel_reynolds", "hydraulic_radius", "normal_depth",
+    "fall_time", "lip_flow", "lip_head", "side_spill", "superelevation",
 ]

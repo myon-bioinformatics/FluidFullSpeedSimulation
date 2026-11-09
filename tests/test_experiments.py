@@ -71,6 +71,7 @@ class Cli(unittest.TestCase):
         code, text = self.call("list")
         self.assertEqual(code, 0)
         self.assertIn("E08", text)
+        self.assertIn("E10", text)
         code, text = self.call("fluids")
         self.assertEqual(code, 0)
         self.assertIn("ethanol", text)

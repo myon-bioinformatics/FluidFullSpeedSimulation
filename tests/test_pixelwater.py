@@ -178,6 +178,17 @@ class Cli(unittest.TestCase):
         self.assertEqual(sum(line.startswith("⏱️") for line in text.splitlines()), 2)
 
 
+    def test_draw_rigs(self):
+        code, text = self.call("draw", "moniac-rig", "--frames", "2")
+        self.assertEqual(code, 0)
+        rows = [line for line in text.splitlines() if not line.startswith("⏱️")]
+        self.assertEqual(len(rows), 2 * 8)
+        self.assertTrue(all(len(line) == 4 for line in rows))  # 頭・貯める・戻りの管・横
+        code, text = self.call("draw", "somen-flume", "--frames", "2", "--cap-mode", "rim")
+        self.assertEqual(code, 0)
+        self.assertIn("🍜", text)
+
+
 class Sections(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

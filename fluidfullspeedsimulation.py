@@ -23,7 +23,8 @@ import sys
 from pathlib import Path
 
 from fixedq import ONE, from_q, lag_step, qmul, shift_lag_step, to_q
-from fluids import FLUIDS, RE_LAMINAR, Section, channel_reynolds, fluid_table, get_fluid, normal_depth
+from fluids import FLUIDS, RE_LAMINAR, Section, channel_reynolds, fall_time, fluid_table, get_fluid, lip_head
+from fluids import normal_depth
 from fluids import poiseuille_head, poiseuille_tau, torricelli_empty_time, torricelli_head, transport_delay
 from network import Network, critical_gain, inverse_table, jsonable, peak_to_peak, settling_time, window
 import pixelwater as pw
@@ -549,6 +550,234 @@ def e09_pixel_water(seed: int = 0, base_rate: float = 0.5, scale: int = 8, rows:
             "summary": summary, "runs": runs, "checks": checks}
 
 
+# --- E10 流しそうめん（竹の継ぎ目・段差・曲がり・引っかかり） ----------------------
+
+BAMBOO = {"shape": "semicircle", "size": 0.04}  # 割った竹（半径 4 cm）
+NOODLES = {"somen": 1.0e-3, "hiyamugi": 1.5e-3}  # 太さの目安。機械製麺の区分はそうめん < 1.3 mm ≤ ひやむぎ < 1.7 mm
+
+
+def somen_layout(q: float, *, law: str = "manning", beta: float | None = None, dt: float = 0.01,
+                 drop: float = 0.05, lip: float = 3e-3, bend_radius: float = 0.12, bucket: float = 0.5,
+                 fluid: str = "water") -> Network:
+    """桶 → ポンプ → 竹 3 本（直線 → 段差 → 曲がり → 縁の継ぎ目 → 直線）→ 受け皿 → ホースで桶へ戻す。
+    曲がりや継ぎ目からあふれた水は床（floor）へ。"""
+    net = Network(dt, fluid).tank("bucket", 0.05, volume=bucket).tank("basin", 0.05).tank("floor", 1.0)
+    kw = {"law": law, "beta": beta, "section": BAMBOO}
+    net.flume("take", "basin", [
+        {"length": 2.0, "cells": 20, "slope": 0.05, "joint": {"drop": drop}, **kw},
+        {"length": 1.0, "cells": 10, "slope": 0.03, "bend_radius": bend_radius, "joint": {"lip": lip}, **kw},
+        {"length": 1.0, "cells": 10, "slope": 0.05, **kw},
+    ], spill="floor")
+    net.pump("bucket", "take/0:0", rate=q)
+    net.pump("basin", "bucket", rate=q, delay=2.0)
+    return net
+
+
+def _into(res: dict, dst: str) -> float:
+    """最後のステップに dst へ流れ込んだ流量の合計。"""
+    return sum(res["final"][f"q:{ln['index']}"] for ln in res["links"] if ln["dst"] == dst and ln["kind"] != "pump")
+
+
+def e10_somen_flume(q_flow: float = 5e-5, q_flood: float = 1.2e-3, q_trickle: float = 3e-6,
+                    q_flush: float = 3e-5) -> dict:
+    sec = Section(BAMBOO["shape"], BAMBOO["size"])
+    rim = sec.size
+    w = get_fluid("water")
+    checks, runs, summary = [], {}, {}
+
+    # 🎋 ふつうに流す: 等流水深・継ぎ目のたまり・段差の落下・あふれなし・追い越しなし
+    net = somen_layout(q_flow)
+    for i in range(3):
+        net.tracer(f"somen-{i + 1}", "take/0:0", release=20.0 + i, stop="basin", size=NOODLES["somen"])
+    res = net.run(40.0)
+    h0 = normal_depth(sec, q_flow, 0.05, "manning", nu=w.nu, h_max=rim)
+    pond = lip_head(sec, q_flow, 3e-3)
+    drop_link = next(ln for ln in res["links"] if ln["src"] == "take/0:19")
+    order = [tr["name"] for tr in sorted(res["tracers"], key=lambda t: t["arrival"] or math.inf)]
+    chs = res["channels"]
+    checks += [
+        close("flow:depth", "📏", net.head("take/0:19"), h0, 2e-3, note="1 本目の竹の等流水深（Manning）"),
+        close("flow:pond", "🫙", net.head("take/1:9"), pond, 2e-3, note="縁の継ぎ目の手前にたまる水深 = 縁 + 越流水深"),
+        check("flow:drop", "🪂", abs(drop_link["delay"] - fall_time(0.05)) <= net.dt / 2 + 1e-12,
+              value=drop_link["delay"], expected=fall_time(0.05), tol=net.dt / 2, note="段差の自由落下 √(2h/g)"),
+        check("flow:no-spill", "🫗", chs["take/1"]["spilled"] == 0 and chs["take/1"]["max_outer_depth"] < rim,
+              value=chs["take/1"]["max_outer_depth"], expected=rim, note="曲がりの外側の水面 < 竹の縁"),
+        check("flow:order", "🍜", order == ["somen-1", "somen-2", "somen-3"] and all(t["state"] == "done"
+                                                                                  for t in res["tracers"]),
+              value=order, note="同じ太さのそうめんは放した順に届く（追い越しなし）"),
+        check("flow:courant", "🧭", max(c["courant"] for c in chs.values()) <= 1.0,
+              value=max(c["courant"] for c in chs.values()), expected=1.0, note="Courant ≤ 1"),
+        conserved("flow:conserve", res),
+    ]
+    runs["flow"] = res["series"]
+    summary["flow"] = {"normal_depth": h0, "pond_depth": pond, "arrivals": {t["name"]: t["arrival"]
+                                                                           for t in res["tracers"]}}
+
+    # 🌊 流しすぎ: 曲がりの外側と継ぎ目のたまりが縁を越えて床へあふれる
+    net = somen_layout(q_flood)
+    res = net.run(40.0)
+    spilled = _into(res, "floor")
+    checks += [
+        check("flood:spill", "💦", spilled > 0, value=spilled, note="曲がり・継ぎ目から床へあふれる"),
+        close("flood:balance", "🔁", _into(res, "basin") + spilled, q_flood, 1e-3, note="受け皿 + 床 = 流した量"),
+        conserved("flood:conserve", res),
+    ]
+    runs["flood"] = res["series"]
+    summary["flood"] = {"to_basin": _into(res, "basin"), "to_floor": spilled,
+                        "max_outer_depth": res["channels"]["take/1"]["max_outer_depth"]}
+
+    # 🥢 ちょろちょろ流す: 継ぎ目の越流水深より太いひやむぎだけ引っかかり、後から来たそうめんに抜かれる。
+    #     途中で水を足すと流れ出す。細い流れなので層流の式（β = 3）で回す
+    dt = 0.05
+    net = somen_layout(q_trickle, law="laminar", beta=3.0, dt=dt)
+    net.pump("bucket", "take/0:0", rate=q_flush, start=200.0)
+    net.tracer("hiyamugi", "take/0:0", release=80.0, stop="basin", size=NOODLES["hiyamugi"])
+    net.tracer("somen", "take/0:0", release=100.0, stop="basin", size=NOODLES["somen"])
+    res = net.run(260.0)
+    head = lip_head(sec, q_trickle, 3e-3) - 3e-3
+    h_t = normal_depth(sec, q_trickle, 0.05, "laminar", nu=w.nu, h_max=rim, beta=3.0)
+    re = channel_reynolds(sec, h_t, q_trickle, w.nu)
+    tr = {t["name"]: t for t in res["tracers"]}
+    checks += [
+        check("trickle:premise", "📐", NOODLES["somen"] <= head < NOODLES["hiyamugi"], value=head,
+              note="越流水深がそうめん以上・ひやむぎ未満になる流し方"),
+        check("trickle:regime", "〰️", re < 500, value=re, expected=500.0, note="細い流れは層流（Re < 500）"),
+        check("trickle:snag", "🪝", tr["hiyamugi"]["stuck_time"] > 0 and tr["hiyamugi"]["stuck_at"] == "take/1:9",
+              value=tr["hiyamugi"]["stuck_time"], note="ひやむぎは縁の継ぎ目で引っかかる"),
+        check("trickle:somen-free", "🍜", tr["somen"]["stuck_time"] == 0, value=tr["somen"]["stuck_time"],
+              expected=0.0, note="そうめんは引っかからない"),
+        check("trickle:overtake", "🏁", (tr["somen"]["arrival"] or math.inf) < (tr["hiyamugi"]["arrival"] or math.inf),
+              value=[tr["somen"]["arrival"], tr["hiyamugi"]["arrival"]], note="後から放したそうめんが先に届く"),
+        check("trickle:flush", "🚿", tr["hiyamugi"]["arrival"] is not None and tr["hiyamugi"]["arrival"] > 200.0,
+              value=tr["hiyamugi"]["arrival"], expected=200.0, note="水を足すとひやむぎも流れ出す"),
+        conserved("trickle:conserve", res),
+    ]
+    runs["trickle"] = res["series"]
+    summary["trickle"] = {"head_over_lip": head, "reynolds": re,
+                          "tracers": {k: {"arrival": v["arrival"], "stuck_time": v["stuck_time"]} for k, v in tr.items()}}
+    return {"params": {"q_flow": q_flow, "q_flood": q_flood, "q_trickle": q_trickle, "q_flush": q_flush,
+                       "bamboo": BAMBOO, "noodles": NOODLES},
+            "summary": summary, "runs": runs, "checks": checks}
+
+
+# --- E11 MONIAC 型の水回り（据え置きの試験台） ---------------------------------
+
+RIG_OPEN = {"store": 0.5, "side": 0.3, "through": 0.2}  # 頭の水槽から分ける 3 つの弁の開き具合
+RIG_STORE_CAM = [[0.0, 0.0], [0.05, 0.0], [0.25, 1.0]]  # 貯める槽の浮き → 自分の出口の弁（5 cm までは閉じたまま）
+RIG_SIDE_CAM = [[0.0, 0.0], [0.05, 0.0], [0.15, 1.0]]  # 貯める槽の浮き → 横の槽の出口の弁（別の槽を動かす）
+
+
+def moniac_rig(dt: float = 0.05, q1: float = 2e-4, q2: float = 3e-4, t_step: float = 600.0, stages: int = 1,
+               fluid: str = "water") -> Network:
+    """MONIAC の水回りを物理のまま組んだ試験台（経済の読み替えはしない）。
+
+    🛢️ 下の槽 → ⛽ ポンプ → 頭の槽 → 3 つの弁で分流（貯める槽・横の槽・下へ素通り）。
+    貯める槽の浮きがカムを通して、自分の出口の弁（遅れ stages 段）と横の槽の出口の弁を開く。
+    貯める槽からの戻りは 3 秒の管。t_step でポンプの流量を q1 → q2 に上げる。
+    """
+    net = Network(dt, fluid).tank("sump", 1.0, volume=0.2).tank("header", 0.01).tank("store", 0.02).tank("side", 0.01)
+    net.pump("sump", "header", rate=q1, until=t_step)
+    net.pump("sump", "header", rate=q2, start=t_step)
+    for name, o in RIG_OPEN.items():
+        net.valve("header", "sump" if name == "through" else name, tau=10.0, opening=o)
+    net.valve("store", "sump", tau=20.0, sensor="store", cam=RIG_STORE_CAM, stages=stages, link_tau=2.0, delay=3.0)
+    net.valve("side", "sump", tau=15.0, sensor="store", cam=RIG_SIDE_CAM)
+    return net
+
+
+def _solve(f, lo: float, hi: float) -> float:
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        lo, hi = (mid, hi) if f(mid) < 0 else (lo, mid)
+    return 0.5 * (lo + hi)
+
+
+def rig_steady(q: float) -> dict:
+    """試験台の定常（閉じた式）。頭の槽 h = Q·τ/(A·Σo)、分流は開き具合の比、
+    貯める槽は cam(h)·A·h/τ = Q·o_store/Σo を二分法、横の槽は V = q_side·τ / cam_side(h_store)。"""
+    total = sum(RIG_OPEN.values())
+    flows = {k: q * o / total for k, o in RIG_OPEN.items()}
+    store = _solve(lambda h: interp(RIG_STORE_CAM, h) * 0.02 * h / 20.0 - flows["store"], 0.0, 10.0)
+    side = flows["side"] * 15.0 / min(1.0, interp(RIG_SIDE_CAM, store)) / 0.01
+    return {"header": q * 10.0 / (0.01 * total), "store": store, "side": side, "flows": flows}
+
+
+def interp(points, x: float) -> float:
+    pts = sorted((float(a), float(b)) for a, b in points)
+    if x <= pts[0][0]:
+        return pts[0][1]
+    if x >= pts[-1][0]:
+        return pts[-1][1]
+    for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+        if x <= x1:
+            return y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+    return pts[-1][1]
+
+
+def e11_moniac_rig(dt: float = 0.05, q1: float = 2e-4, q2: float = 3e-4, t_step: float = 600.0,
+                   t_end: float = 1200.0) -> dict:
+    checks, runs, summary = [], {}, {}
+    net = moniac_rig(dt, q1, q2, t_step)
+    res = net.run(t_end, trace=["store", "header"])
+    links = res["links"]
+    mid = int(round(t_step / dt)) - 1
+    tr = res["trace"]
+    tol = dt / 10.0  # 流入をステップ頭に入れる離散化の分（≈ dt/2τ、τ ≥ 10 s）を見込む
+    for phase, q, idx in (("q1", q1, mid), ("q2", q2, len(tr["store"]) - 1)):
+        st = rig_steady(q)
+        checks += [
+            close(f"{phase}:header", "🛢️", tr["header"][idx], st["header"], tol, note="頭の槽 h = Q·τ/(A·Σo)"),
+            close(f"{phase}:store", "🫙", tr["store"][idx], st["store"], tol, note="貯める槽: 浮き → 弁のカムで決まる水位"),
+        ]
+        summary[phase] = {"steady": st, "header": tr["header"][idx], "store": tr["store"][idx]}
+    st2 = rig_steady(q2)
+    checks.append(close("q2:side", "🪣", res["final"]["h:side"], st2["side"], tol,
+                        note="横の槽: 別の槽の浮きが出口の弁を開く"))
+    f = res["final"]
+    split = [f["q:2"], f["q:3"], f["q:4"]]
+    want = [RIG_OPEN[k] / sum(RIG_OPEN.values()) for k in ("store", "side", "through")]
+    checks.append(check("split", "🔱", all(rel_err(a / sum(split), b) <= 1e-8 for a, b in zip(split, want)),
+                        value=[a / sum(split) for a in split], expected=want, tol=1e-8,
+                        note="3 つの弁の分流 = 開き具合の比（床の丸め 1 ulp 分のずれまで）"))
+
+    # 溜まる: 貯める槽の弁が開く前（浮きが 5 cm に届く前）は、入った量がそのまま貯まる（整数で一致）
+    probe = moniac_rig(dt, q1, q2, t_step)
+    early = probe.run(10.0)
+    moved_in = early["links"][2]["volume_moved_q"]
+    checks.append(check("fill:exact", "🫙", early["volumes_q"]["store"] == moved_in and
+                        early["links"][5]["volume_moved_q"] == 0,
+                        value=early["volumes_q"]["store"], expected=moved_in, tol=0,
+                        note="弁が閉じている間: 貯める槽の体積 = 入った量（ulp まで）"))
+    # 浮きが別の槽の弁を動かす: 横の槽の出口が開くのは、貯める槽の水位が 5 cm を越えたステップ
+    cross = next(i for i, h in enumerate(tr["store"]) if interp(RIG_SIDE_CAM, h) > 0)
+    opened = links[6]["first_arrival"]
+    checks.append(check("float:cross", "🎈", opened is not None and abs(opened - (cross + 1) * dt) <= dt + 1e-12,
+                        value=opened, expected=(cross + 1) * dt, tol=dt,
+                        note="横の槽の弁は、貯める槽の浮きが 5 cm を越えた次のステップで開く"))
+    # 遅れ: 貯める槽からの戻りは 3 秒の管を通る
+    gap = links[5]["first_arrival"] - links[5]["first_flow"]
+    checks.append(check("delay", "⏳", abs(gap - 3.0) <= dt / 2 + 1e-12, value=gap, expected=3.0, tol=dt / 2,
+                        note="貯める槽の弁が開いてから下の槽に届くまで = 戻りの管の遅れ 3 秒"))
+    late = window(tr["store"], 0.9)
+    checks += [
+        check("still", "🫧", peak_to_peak(late) < 1e-6, value=peak_to_peak(late), tol=1e-6,
+              note="遅れ 1 段の浮き弁は揺れずに落ち着く"),
+        check("step-up", "📈", summary["q2"]["store"] > summary["q1"]["store"], value=summary["q2"]["store"],
+              expected=summary["q1"]["store"], note="ポンプを強めると貯める槽の水位が上がる"),
+        conserved("conserve", res),
+    ]
+    runs["rig"] = res["series"]
+    summary["golden"] = rig_fingerprint(res)
+    return {"params": {"dt": dt, "q1": q1, "q2": q2, "t_step": t_step, "t_end": t_end, "open": RIG_OPEN,
+                       "store_cam": RIG_STORE_CAM, "side_cam": RIG_SIDE_CAM},
+            "summary": summary, "runs": runs, "checks": checks}
+
+
+def rig_fingerprint(res: dict) -> dict:
+    """据え置きの比較用: 各槽の最後の水位を有効 9 桁で（OS の libm の差で末尾が揺れても変わらない桁）。"""
+    return {k: float(f"{v:.9g}") for k, v in sorted(res["final"].items()) if k.startswith("h:")}
+
+
 # --- 登録簿 ---------------------------------------------------------------
 
 EXPERIMENTS = {
@@ -561,6 +790,8 @@ EXPERIMENTS = {
     "E07": ("fluid-speed", "🏎️", "作動流体で変わる回路の速さ", e07_fluid_speed),
     "E08": ("flume", "🎋", "傾いた樋とトレーサー（流しそうめんの下ごしらえ）", e08_flume),
     "E09": ("pixel-water", "🟦", "🟦 を積む断面図で溜まる・流れる・遅れる（ドット絵の水も）", e09_pixel_water),
+    "E10": ("somen-flume", "🥢", "流しそうめん（竹の継ぎ目・段差・曲がり・引っかかり）", e10_somen_flume),
+    "E11": ("moniac-rig", "🏛️", "MONIAC 型の水回り（分流・貯める・浮きで弁・遅れ）を据え置きの試験に", e11_moniac_rig),
 }
 SLUGS = {slug: eid for eid, (slug, *_rest) in EXPERIMENTS.items()}
 
@@ -637,7 +868,30 @@ def write_jsonl(path: str, results: list[dict]) -> None:
                     fh.write("\n")
 
 
+def rig_section(scene: str, fluid: str = "water") -> tuple[dict, list[str]]:
+    """断面図で見る試験台（run の結果, 列）。moniac-rig は頭・貯める・戻りの管・横の槽（下の槽は水源なので省く）、
+    somen-flume は竹 3 本と受け皿・床。"""
+    if scene == "moniac-rig":
+        return moniac_rig(fluid=fluid).run(1200.0), ["header", "store", "store>sump", "side"]
+    if scene == "somen-flume":
+        net = somen_layout(5e-5, fluid=fluid)
+        for i in range(3):
+            net.tracer(f"somen-{i + 1}", "take/0:0", release=20.0 + 2 * i, stop="basin", size=NOODLES["somen"])
+        return net.run(40.0, sample_every=20), ["take/0", "take/1", "take/2", "basin", "floor"]
+    raise KeyError(f"unknown rig scene {scene!r}")
+
+
+RIG_SCENES = ("moniac-rig", "somen-flume")
+
+
 def _draw(args) -> int:
+    if args.scene in RIG_SCENES:
+        if args.view == "files":
+            build_parser().error(f"{args.scene} は --view frames だけ")
+        res, cols = rig_section(args.scene, args.fluid)
+        print(pw.render_frames(pw.network_frames(res, cols, frames=args.frames, rows=args.rows,
+                                                 cap_mode=args.cap_mode, fill=args.fill)))
+        return 0 if res["conservation_error_q"] == 0 else 1
     if args.scene in pw.SECTION_CASES:
         if args.view == "files":
             build_parser().error(f"{args.scene} は --view frames だけ")
@@ -671,7 +925,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("experiment", choices=choices, help="ID か識別子")
     ver = sub.add_parser("verify", help="✅ 全実験を回して検証")
     drw = sub.add_parser("draw", help="🎨 🟦 を積む断面図で溜まる・流れる・遅れるを見る（ドット絵・GIF・PNG も）")
-    drw.add_argument("scene", choices=pw.SECTION_CASES + pw.SCENES, help="場面（樋の回路かドット絵）")
+    drw.add_argument("scene", choices=RIG_SCENES + pw.SECTION_CASES + pw.SCENES,
+                     help="場面（試験台・樋の回路・ドット絵）")
     drw.add_argument("--view", choices=("frames", "frame", "files"), default="frames",
                      help="frames = 時刻ごとの断面図 / frame = 最後の 1 枚 / files = GIF・PNG（ドット絵だけ）")
     drw.add_argument("--fluid", choices=FLUID_KEYS, default="water", help="作動流体")
