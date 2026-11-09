@@ -419,9 +419,67 @@ def e08_flume(length: float = 2.0, cells: int = 20, slope: float = 0.05, n_manni
 
 # --- E09 ドット絵の水（ビット盤） ---------------------------------------------
 
-def e09_pixel_water(seed: int = 0, base_rate: float = 0.5, scale: int = 8) -> dict:
-    """落ちるドット絵の水。数の保存・水面の平ら・流体ごとの広がりの順・再現性・PNG/GIF の読み戻しを確かめる。"""
+def e09_pixel_water(seed: int = 0, base_rate: float = 0.5, scale: int = 8, rows: int = pw.SECTION_ROWS) -> dict:
+    """🟦 を下から積む断面図（行 = 高さ、列 = 区間・水槽）で、溜まる・流れる・遅れるが読めるかを確かめる。
+
+    断面図: 段数 = round(h / 縦いっぱい × rows) で、段数から水深を ±½ 段まで読み戻せる。先端（最初の 1 段）が
+    届く時刻がセルごとに増え、その間隔 ≈ Δx/v。じょうごには水が溜まって段が積み上がり、🍜 は管の遅れの間 ⏳。
+    ドット絵: ドット数の保存・水面の平ら・流体ごとの広がりの順・再現性・PNG/GIF の読み戻し。
+    """
     checks, runs, summary, settle = [], {}, {}, {}
+    spacing = {}
+    for key in ("water", "ethanol"):
+        fl = get_fluid(key)
+        res, cols = pw.section_case("flume", key)
+        view = pw.network_frames(res, cols, rows=rows)
+        arr = view["arrivals"]
+        sec = Section("rect", 0.05)
+        hn = normal_depth(sec, 2e-6, 0.05, "laminar", nu=fl.nu, h_max=0.005)
+        dx_v = 0.1 / (2e-6 / sec.area(hn))
+        gaps = [b - a for a, b in zip(arr[2:], arr[3:])] if None not in arr else []
+        spacing[key] = sum(gaps) / len(gaps) if gaps else math.nan
+        moves = [c for c in (w[0] for w in view["tracer_columns"]) if c is not None]
+        checks += [
+            check(f"section:{key}:readback", fl.icon + "📏", view["readback_error"] <= view["half_block"] + 1e-15,
+                  value=view["readback_error"], expected=0.0, tol=view["half_block"],
+                  note="段数 × 1 段の高さで水深を読み戻せる（±½ 段）"),
+            check(f"section:{key}:front-order", fl.icon + "➡️",
+                  None not in arr and all(a < b for a, b in zip(arr, arr[1:])),
+                  value=arr[-1], note="最初の 1 段が積まれる時刻がセルごとに増える（流れ）"),
+            close(f"section:{key}:front-gap", fl.icon + "⏱️", spacing[key], dx_v, 2e-2,
+                  note="届く時刻の間隔 ≈ Δx/v（遅れ。v は等流の流速）"),
+            check(f"section:{key}:somen-down", fl.icon + "🍜",
+                  bool(moves) and moves == sorted(moves) and moves[-1] == 19,
+                  value=moves[-1] if moves else None, expected=19, note="🍜 の列は下流へ進むだけ（戻らない）"),
+            conserved(f"section:{key}:conserve", res),
+        ]
+        runs[f"section:{key}"] = [{"t": fr["t"], "lines": fr["lines"]} for fr in view["frames"]]
+        summary[f"section:{key}"] = {"dx_over_v": dx_v, "front_gap": spacing[key], "arrivals": arr,
+                                     "caps": view["caps"][:1], "rows": rows}
+    checks.append(close("section:ethanol:slower", "🍶⏱️", spacing["ethanol"] / spacing["water"],
+                        (get_fluid("ethanol").nu / get_fluid("water").nu) ** (1 / 3), 3e-2,
+                        note="層流の樋は 🍶 の先端が遅い（広い流れなら (ν/ν_water)^(1/3)）"))
+    res, cols = pw.section_case("flume-hopper", "water")
+    view = pw.network_frames(res, cols, rows=rows, frames=None)
+    hop = [cnt[0] for cnt in view["counts"]]
+    pipe = next((a, b) for a, b, place in view["tracer_spans"][0] if place == "hopper>flume:0")
+    pipe_col = view["columns"].index("hopper>flume:0")
+    shown = [fr["t"] for fr in view["frames"] if any(line[pipe_col] == pw.IN_PIPE for line in fr["lines"])]
+    first = view["arrivals"][view["columns"].index("flume:0")]
+    checks += [
+        check("section:hopper:fills", "🫙", hop == sorted(hop) and hop[-1] == rows, value=hop[-1], expected=rows,
+              note="じょうごに水が溜まり、段が下から積み上がる（減らない）"),
+        close("section:hopper:pipe-delay", "⏳", pipe[1] - pipe[0], 3.0, 1e-9, note="🍜 が管の中にいる時間 = 管の遅れ"),
+        check("section:hopper:pipe-shown", "⏳", bool(shown) and abs(len(shown) * 0.05 - 3.0) <= 0.1,
+              value=len(shown) * 0.05, expected=3.0, tol=0.1, note="⏳ が出る時刻の長さ ≈ 遅れ"),
+        check("section:hopper:first-water", "🚿", first is not None and first >= 3.0, value=first, expected=3.0,
+              note="樋の最初のセルに水が届くのは管の遅れの後"),
+        check("section:hopper:readback", "📏", view["readback_error"] <= view["half_block"] + 1e-15,
+              value=view["readback_error"], tol=view["half_block"], note="段数から水深を ±½ 段で読み戻せる"),
+        conserved("section:hopper:conserve", res),
+    ]
+    runs["section:hopper"] = [{"t": fr["t"], "lines": fr["lines"]} for fr in view["frames"][:: max(1, len(view["frames"]) // 6)]]
+    summary["section:hopper"] = {"pipe": pipe, "first_water": first, "hopper_blocks_final": hop[-1]}
     for scene in pw.SCENES:
         for key in FLUID_KEYS:
             fl = get_fluid(key)
@@ -434,6 +492,16 @@ def e09_pixel_water(seed: int = 0, base_rate: float = 0.5, scale: int = 8) -> di
                 check(f"{tag}:flat", fl.icon + "🟰", res["settle_tick"] is not None and res["flatness"] <= 1,
                       value=res["flatness"], expected=1, note="静まった水面: 列の高さの最大 − 最小 ≤ 1"),
             ]
+            if scene == "dam-break":
+                # 毎ティック取り直して先端を読む。1 ティックに動ける列は 斜め 1 + 横 ceil(rate) まで
+                fine = pw.run_pixels(scene, key, seed=seed, base_rate=base_rate, frame_every=1)
+                arr = pw.pixel_arrivals(fine)[8:]
+                slack = 1 + math.ceil(fine["lateral_rate"])
+                checks.append(check(f"{tag}:front", fl.icon + "➡️", None not in arr and
+                                    all(a <= b + slack for a, b in zip(arr, arr[1:])),
+                                    value=arr[-1], tol=slack,
+                                    note="水の先端が右の壁へ順に届く（1 ティックで飛び越せる列の分だけ前後を許す）"))
+                settle[f"{tag}:wall"] = arr[-1]
             if scene == "moniac-drain":
                 upper = sum(row.bit_count() for row in res["frames"][-1][0][:14])
                 checks.append(check(f"{tag}:drained", fl.icon + "🕳️", upper == 0, value=upper, expected=0,
@@ -447,6 +515,10 @@ def e09_pixel_water(seed: int = 0, base_rate: float = 0.5, scale: int = 8) -> di
         e, w_, m = (settle[f"{scene}:{k}"] for k in ("ethanol", "water", "methanol"))
         checks.append(check(f"{scene}:order", "⏱️", None not in (e, w_, m) and e > w_ > m,
                             value=[m, w_, e], note="静まるまで: 🧴 < 💧 < 🍶（ν が大きいほど横に広がる回数が減る）"))
+        if scene == "dam-break":
+            walls = [settle[f"dam-break:{k}:wall"] for k in ("methanol", "water", "ethanol")]
+            checks.append(check("dam-break:wall-order", "🧱", None not in walls and walls[0] <= walls[1] <= walls[2],
+                                value=walls, note="先端が右の壁に届く: 🧴 ≤ 💧 ≤ 🍶"))
         if None not in (e, w_, m):
             summary[f"{scene}:ratio"] = {"ethanol/water": e / w_, "methanol/water": m / w_,
                                          "nu ethanol/water": get_fluid("ethanol").nu / nu_w,
@@ -488,7 +560,7 @@ EXPERIMENTS = {
     "E06": ("coupled-loop", "🌐", "2 台連結（遅延つきの環）", e06_coupled_loop),
     "E07": ("fluid-speed", "🏎️", "作動流体で変わる回路の速さ", e07_fluid_speed),
     "E08": ("flume", "🎋", "傾いた樋とトレーサー（流しそうめんの下ごしらえ）", e08_flume),
-    "E09": ("pixel-water", "🟦", "ドット絵の水（ビット盤で落ちて広がる）", e09_pixel_water),
+    "E09": ("pixel-water", "🟦", "🟦 を積む断面図で溜まる・流れる・遅れる（ドット絵の水も）", e09_pixel_water),
 }
 SLUGS = {slug: eid for eid, (slug, *_rest) in EXPERIMENTS.items()}
 
@@ -565,6 +637,30 @@ def write_jsonl(path: str, results: list[dict]) -> None:
                     fh.write("\n")
 
 
+def _draw(args) -> int:
+    if args.scene in pw.SECTION_CASES:
+        if args.view == "files":
+            build_parser().error(f"{args.scene} は --view frames だけ")
+        res, cols = pw.section_case(args.scene, args.fluid)
+        print(pw.render_frames(pw.network_frames(res, cols, frames=args.frames, rows=args.rows,
+                                                 cap_mode=args.cap_mode, fill=args.fill)))
+        return 0 if res["conservation_error_q"] == 0 else 1
+    if args.view == "files":
+        formats = ("gif", "png") if args.format == "both" else (args.format,)
+        out = pw.draw(args.scene, args.fluid, args.out_dir, ticks=args.ticks, seed=args.seed, scale=args.scale,
+                      frame_every=args.frame_every, formats=formats, file_prefix=args.file_prefix,
+                      file_suffix=args.file_suffix)
+        icons = {"gif": "🎞️", "png": "🖼️", "json": "🧾"}
+        for kind, path in out["paths"].items():
+            print(f"{icons[kind]} {path}")
+        print(f"🔢 {out['pixels']} px  🎬 {out['frames']}  📐 {out['canvas']}  ⏱️ {out['settle_tick']}  ⚖️ {out['count_error']}")
+        return 0 if out["count_error"] == 0 else 1
+    res = pw.run_pixels(args.scene, args.fluid, ticks=args.ticks, seed=args.seed, frame_every=args.frame_every)
+    frames = 1 if args.view == "frame" else args.frames
+    print(pw.render_frames(pw.pixel_frames(res, frames=frames, fill=args.fill)))
+    return 0 if res["count_error"] == 0 else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     choices = sorted(EXPERIMENTS) + sorted(SLUGS)
     p = argparse.ArgumentParser(prog="fluidfullspeedsimulation", description="🌊 流れ・遅れ・検証")
@@ -574,18 +670,24 @@ def build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run", help="▶️ 実験を回す")
     run.add_argument("experiment", choices=choices, help="ID か識別子")
     ver = sub.add_parser("verify", help="✅ 全実験を回して検証")
-    drw = sub.add_parser("draw", help="🎨 ドット絵の水を描く（GIF・PNG）")
-    drw.add_argument("scene", choices=pw.SCENES, help="場面")
+    drw = sub.add_parser("draw", help="🎨 🟦 を積む断面図で溜まる・流れる・遅れるを見る（ドット絵・GIF・PNG も）")
+    drw.add_argument("scene", choices=pw.SECTION_CASES + pw.SCENES, help="場面（樋の回路かドット絵）")
+    drw.add_argument("--view", choices=("frames", "frame", "files"), default="frames",
+                     help="frames = 時刻ごとの断面図 / frame = 最後の 1 枚 / files = GIF・PNG（ドット絵だけ）")
     drw.add_argument("--fluid", choices=FLUID_KEYS, default="water", help="作動流体")
-    drw.add_argument("--ticks", type=int, help="ティック数（既定は場面ごと）")
-    drw.add_argument("--seed", type=int, default=0, help="向きの初期値の乱数 seed")
+    drw.add_argument("--fill", help="水のブロック（色は自由。既定は流体ごとに 🟦 🟪 🟩）")
+    drw.add_argument("--frames", type=int, default=6, help="並べる時刻の数")
+    drw.add_argument("--rows", type=int, default=pw.SECTION_ROWS, help="断面図の縦の段数（既定 8）")
+    drw.add_argument("--cap-mode", choices=pw.CAP_MODES, default="run-max",
+                     help="縦いっぱいの水深: run-max = 走らせた中の最大 / rim = 樋の縁")
+    drw.add_argument("--ticks", type=int, help="ドット絵のティック数（既定は場面ごと）")
+    drw.add_argument("--seed", type=int, default=0, help="ドット絵の向きの初期値の乱数 seed")
     drw.add_argument("--scale", type=int, default=8, help="1 マスのピクセル数（既定 8。Ironmate の scale と同じ意味）")
     drw.add_argument("--frame-every", type=int, default=2, help="何ティックごとに 1 フレーム")
-    drw.add_argument("--format", choices=("gif", "png", "both"), default="both", help="書き出す形式")
+    drw.add_argument("--format", choices=("gif", "png", "both"), default="both", help="files で書き出す形式")
     drw.add_argument("--out-dir", default="build/pixel", help="書き出し先")
     drw.add_argument("--file-prefix", default="", help="ファイル名の頭に付ける文字列")
     drw.add_argument("--file-suffix", default="", help="ファイル名の末尾（拡張子の前）に付ける文字列")
-    drw.add_argument("--text", action="store_true", help="最後の盤を絵文字で表示")
     for sp in (run, ver):
         sp.add_argument("--json", action="store_true", help="結果を JSON で出す")
         sp.add_argument("--jsonl", metavar="PATH", help="プロッター記録を JSONL へ")
@@ -611,17 +713,7 @@ def main(argv=None) -> int:
         print(render_fluids())
         return 0
     if args.command == "draw":
-        formats = ("gif", "png") if args.format == "both" else (args.format,)
-        out = pw.draw(args.scene, args.fluid, args.out_dir, ticks=args.ticks, seed=args.seed, scale=args.scale,
-                      frame_every=args.frame_every, formats=formats, file_prefix=args.file_prefix,
-                      file_suffix=args.file_suffix)
-        icons = {"gif": "🎞️", "png": "🖼️", "json": "🧾"}
-        for kind, path in out["paths"].items():
-            print(f"{icons[kind]} {path}")
-        print(f"🔢 {out['pixels']} px  🎬 {out['frames']}  📐 {out['canvas']}  ⏱️ {out['settle_tick']}  ⚖️ {out['count_error']}")
-        if args.text:
-            print(pw.render_text(pw.run_pixels(args.scene, args.fluid, ticks=args.ticks, seed=args.seed), -1))
-        return 0 if out["count_error"] == 0 else 1
+        return _draw(args)
     results = [run_experiment(args.experiment)] if args.command == "run" else verify_all()["results"]
     if args.jsonl:
         write_jsonl(args.jsonl, results)

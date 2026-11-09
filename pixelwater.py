@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import random
 import struct
 import zlib
@@ -273,7 +274,8 @@ def run_pixels(scene: str = "dam-break", fluid: str = "water", *, ticks: int | N
         for row in water:
             digest.update(row.to_bytes((g.width + 7) // 8, "little"))
     return {
-        "scene": scene, "fluid": fluid, "seed": seed, "ticks": ticks, "width": g.width, "height": g.height,
+        "scene": scene, "fluid": fluid, "seed": seed, "ticks": ticks, "frame_every": frame_every,
+        "width": g.width, "height": g.height,
         "pixels": n0, "count_error": counts_worst, "lateral_rate": rate / ONE, "lateral_passes": lateral_passes,
         "settle_tick": settle, "flatness": heights[-1] if heights else 0, "first_floor_tick": first_floor,
         "frames": frames, "wall": tuple(g.wall), "hash": digest.hexdigest(), "grid": g,
@@ -322,11 +324,12 @@ def indices(res: dict, frame: int) -> list[list[int]]:
     return out
 
 
-def render_text(res: dict, frame: int = -1, ascii_only: bool = False) -> str:
+def render_text(res: dict, frame: int = -1, ascii_only: bool = False, fill: str | None = None) -> str:
+    """盤を絵文字で（⬜ 空き / ⬛ 壁 / 流体のブロック）。fill で好きなブロックに替えられる（色は自由）。"""
     if ascii_only:
         chars = [EMPTY, WALL, WATER, "|"]
     else:
-        drop = EMOJI.get(res["fluid"], "🟦")
+        drop = fill or EMOJI.get(res["fluid"], "🟦")
         chars = ["⬜", "⬛", drop, drop]
     return "\n".join("".join(chars[c] for c in row) for row in indices(res, frame))
 
@@ -605,3 +608,213 @@ def draw(scene: str = "dam-break", fluid: str = "water", out_dir: str = "build/p
     paths["json"] = str(p)
     return {"paths": paths, **{k: receipt[k] for k in ("frames", "canvas", "pixels", "count_error", "settle_tick",
                                                        "hash")}}
+
+
+# --- 🟦 を積む断面図（行 = 高さ、列 = 区間・水槽）で、溜まる・流れる・遅れるを見る ---------
+
+SECTION_ROWS = 8  # 縦の段数（8 の倍数を既定に。引数で変えられる）
+EMPTY_BLOCK, WALL_BLOCK = "⬜", "⬛"
+CARRIED, IN_PIPE = "🍜", "⏳"  # 運ばれる物 / 管の中
+SECTION_CASES = ("flume", "flume-hopper")
+CAP_MODES = ("run-max", "rim")
+
+
+def fill_block(fluid: str) -> str:
+    """流体ごとの既定のブロック（色は自由。--fill で好きな絵文字に替えてよい）。"""
+    return EMOJI.get(fluid, "🟦")
+
+
+def blocks(h: float, cap: float, rows: int = SECTION_ROWS) -> int:
+    """水深 h を段数へ: round(h / cap × rows)。0..rows に収める（cap を超えたら rows）。"""
+    if cap <= 0 or h <= 0:
+        return 0
+    return max(0, min(rows, int(h / cap * rows + 0.5)))
+
+
+def readback(n: int, cap: float, rows: int = SECTION_ROWS) -> float:
+    """段数から水深を読み戻す（1 段 = cap / rows。ずれは ±½ 段まで）。"""
+    return n * cap / rows
+
+
+def _columns(res: dict, columns) -> list[tuple[str, str, object]]:
+    """列の指定を展開: 樋の prefix → 各セル、水槽名 → その水位、'src>dst' → 管（水深なし）。"""
+    row0 = res["series"][0] if res["series"] else {}
+    out = []
+    for spec in columns:
+        if ">" in spec:
+            out.append(("pipe", spec, tuple(spec.split(">", 1))))
+        elif f"h:{spec}" in row0 and isinstance(row0[f"h:{spec}"], list):
+            out += [("cell", f"{spec}:{i}", (spec, i)) for i in range(len(row0[f"h:{spec}"]))]
+        elif f"h:{spec}" in row0:
+            out.append(("tank", spec, spec))
+        else:
+            raise ValueError(f"unknown section column {spec!r}")
+    return out
+
+
+def tracer_intervals(res: dict) -> list[list[tuple[float, float, str]]]:
+    """各トレーサーの居場所の区間 [(始まり, 終わり, 場所)]。遅れのある管の中は 'src>dst'。"""
+    delays = {(ln["src"], ln["dst"]): ln["delay"] for ln in res["links"]}
+    out = []
+    for tr in res["tracers"]:
+        spans = []
+        path = tr["path"]
+        for a, b in zip(path, path[1:]):
+            d = delays.get((a["node"], b["node"]), 0.0)
+            spans.append((a["t"], b["t"] - d, a["node"]))
+            if d:
+                spans.append((b["t"] - d, b["t"], f"{a['node']}>{b['node']}"))
+        if path:
+            spans.append((path[-1]["t"], math.inf, path[-1]["node"]))
+        out.append(spans)
+    return out
+
+
+def _caps(res: dict, cols, depths, cap_mode: str, caps: dict | None) -> list[float]:
+    """列ごとの「縦いっぱい」の水深。caps（名前 → 水深）が最優先。run-max は走らせた中の最大
+    （樋はセルどうしを比べられるよう樋全体で 1 つ）、rim は樋の縁（水槽は run-max と同じ）。"""
+    if cap_mode not in CAP_MODES:
+        raise ValueError(f"cap mode must be one of {CAP_MODES}")
+    caps = caps or {}
+    group_max: dict[str, float] = {}
+    for c, (kind, name, ref) in enumerate(cols):
+        key = ref[0] if kind == "cell" else name
+        group_max[key] = max(group_max.get(key, 0.0), max((row[c] or 0.0) for row in depths) if depths else 0.0)
+    out = []
+    for kind, name, ref in cols:
+        key = ref[0] if kind == "cell" else name
+        if key in caps:
+            out.append(float(caps[key]))
+        elif kind == "cell" and cap_mode == "rim":
+            out.append(res["channels"][key]["depth_cap"])
+        else:
+            out.append(group_max.get(key, 0.0))
+    return out
+
+
+def _pick(n: int, count: int | None) -> list[int]:
+    if count is None or count >= n:
+        return list(range(n))
+    if count < 2:
+        return [n - 1]
+    return sorted({round(i * (n - 1) / (count - 1)) for i in range(count)})
+
+
+def network_frames(res: dict, columns, *, frames: int | None = 6, rows: int = SECTION_ROWS,
+                   cap_mode: str = "run-max", caps: dict | None = None, fill: str | None = None,
+                   empty: str = EMPTY_BLOCK, carried: str = CARRIED, in_pipe: str = IN_PIPE) -> dict:
+    """network.Network.run の結果を、時刻ごとの断面図（🟦 を下から積む）にする。
+
+    series の各行を時刻とみなす（細かく見るなら run の sample_every を小さく）。frames は並べる時刻の数。
+    arrivals は列ごとに最初の 1 段が積まれた時刻（水の先端が届いた時刻）、readback_error は全時刻での
+    |段数 × 1 段 − 水深| の最大（縦いっぱいを超えていない分だけ）。
+    """
+    if rows < 1:
+        raise ValueError("rows must be >= 1")
+    fill = fill or fill_block(res.get("fluid", "water"))
+    cols = _columns(res, columns)
+    names = [name for _k, name, _x in cols]
+    series = res["series"]
+    times = [row["t"] for row in series]
+    depths = [[None if kind == "pipe" else row[f"h:{ref[0]}"][ref[1]] if kind == "cell" else row[f"h:{ref}"]
+               for kind, _n, ref in cols] for row in series]
+    cap = _caps(res, cols, depths, cap_mode, caps)
+    counts = [[0 if d is None else blocks(d, cap[c], rows) for c, d in enumerate(line)] for line in depths]
+    worst = 0.0
+    for line, cnt in zip(depths, counts):
+        for c, d in enumerate(line):
+            if d is not None and cap[c] > 0 and d <= cap[c]:
+                worst = max(worst, abs(readback(cnt[c], cap[c], rows) - d))
+    arrivals = [next((t for t, cnt in zip(times, counts) if cnt[c] > 0), None) if cols[c][0] != "pipe" else None
+                for c in range(len(cols))]
+    spans = tracer_intervals(res)
+    where = []
+    for t in times:
+        here = []
+        for tr_spans in spans:
+            loc = next((place for a, b, place in tr_spans if a <= t < b), None)
+            if loc in names:
+                here.append((names.index(loc), ">" in loc))
+            elif loc and ">" in loc and loc.split(">", 1)[1] in names:  # 管の列が無ければ行き先の列の底に ⏳
+                here.append((names.index(loc.split(">", 1)[1]), True))
+            else:
+                here.append(None)
+        where.append(here)
+    shown = []
+    for r in _pick(len(times), frames):
+        grid = [[empty] * len(cols) for _ in range(rows)]
+        for c, n in enumerate(counts[r]):
+            for k in range(n):
+                grid[rows - 1 - k][c] = fill
+        for spot in where[r]:
+            if spot is not None:
+                c, piped = spot
+                k = max(counts[r][c], 1) - 1  # 水面の段（空なら底）
+                grid[rows - 1 - k][c] = in_pipe if piped else carried
+        shown.append({"t": times[r], "lines": ["".join(row) for row in grid], "counts": counts[r]})
+    return {"columns": names, "caps": cap, "rows": rows, "fill": fill, "times": times, "counts": counts,
+            "frames": shown, "arrivals": arrivals, "readback_error": worst,
+            "half_block": max((c / (2 * rows) for c in cap if c > 0), default=0.0),
+            "tracer_columns": [[None if s is None else s[0] for s in here] for here in where],
+            "tracer_spans": [[(a, None if b == math.inf else b, p) for a, b, p in sp] for sp in spans]}
+
+
+def pixel_arrivals(res: dict) -> list[int | None]:
+    """ドット絵の盤で、列ごとに最初の水のドットが来たティック（壁で届かない列は除く）。"""
+    keep = [x for x, ok in enumerate(_reachable_columns(res["grid"])) if ok]
+    every = res["frame_every"]
+    last = len(res["frames"]) - 1
+    out = {}
+    for i, (water, _f) in enumerate(res["frames"]):
+        tick = res["ticks"] if i == last else i * every
+        seen = 0
+        for r in water:
+            seen |= r
+        for x in keep:
+            if x not in out and seen >> x & 1:
+                out[x] = tick
+    return [out.get(x) for x in keep]
+
+
+def pixel_frames(res: dict, *, frames: int | None = 6, fill: str | None = None) -> dict:
+    """ドット絵の水を同じ絵文字で時刻ごとに並べる（盤そのものが断面図）。"""
+    picks = _pick(len(res["frames"]), frames)
+    last = len(res["frames"]) - 1
+    out = []
+    for i in picks:
+        text = render_text(res, i, fill=fill)
+        out.append({"t": float(res["ticks"] if i == last else i * res["frame_every"]), "lines": text.splitlines()})
+    return {"frames": out, "arrivals": pixel_arrivals(res)}
+
+
+def section_case(name: str = "flume", fluid: str = "water", *, dt: float = 0.05) -> tuple[dict, list[str]]:
+    """断面図を試す回路（network の部品だけで組む）。戻り値は (run の結果, 列)。
+
+    - flume: 空の樋（長方形、層流、20 区間）へポンプで流し込み、10 秒後にトレーサー 🍜 を放す
+    - flume-hopper: ポンプ → じょうご（小さな水槽）→ 遅れ 3 秒の細管 → 樋。じょうごに溜まってから流れる
+    """
+    from network import Network  # 遅延 import（pixelwater 単体はセル・オートマトンだけで使える）
+
+    net = Network(dt, fluid).tank("sea", 1.0, volume=1.0)
+    net.channel("flume", "sea", length=2.0, cells=20, slope=0.05, section={"shape": "rect", "size": 0.05},
+                law="laminar", max_depth=0.005)
+    if name == "flume":
+        net.pump("sea", "flume:0", rate=2e-6)
+        net.tracer("somen", "flume:0", release=10.0, stop="sea")
+        return net.run(60.0, sample_every=1), ["flume"]
+    if name == "flume-hopper":
+        net.tank("hopper", 1e-4)
+        net.pump("sea", "hopper", rate=2e-6)
+        net.pipe("hopper", "flume:0", radius=1e-3, length=0.5, delay=3.0)
+        net.tracer("somen", "hopper", release=20.0, stop="sea")
+        return net.run(90.0, sample_every=1), ["hopper", "hopper>flume:0", "flume"]
+    raise KeyError(f"unknown section case {name!r}; choose from {SECTION_CASES}")
+
+
+def render_frames(view: dict) -> str:
+    """断面図を時刻の順に縦へ並べる（各図の頭に ⏱️ 時刻）。"""
+    out = []
+    for fr in view["frames"]:
+        out.append(f"⏱️ {fr['t']:.2f}")
+        out += fr["lines"]
+    return "\n".join(out)
