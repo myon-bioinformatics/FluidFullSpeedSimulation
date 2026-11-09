@@ -70,9 +70,26 @@ node py_launch.cjs --call simulate -- network.py '{"dt":1,"tanks":[...],"links":
 | E06 🌐 | `coupled-loop` | 2 台を遅延管で環につなぐ: 定常の配分、届く時刻、跳ね返りが戻る時刻 |
 | E07 🏎️ | `fluid-speed` | 同じ回路を流体だけ変える: 流量は同じ、水位と整定時間は ν の比 |
 | E08 🎋 | `flume` | 樋の等流水深、トレーサー（そうめん役）が抜ける時間 L/v、層流は ν に効き Manning は効かない |
+| E09 🟦 | `pixel-water` | ドット絵の水: ドット数が毎ティック不変、水面が平ら（高さの差 ≤ 1）、静まる順 🧴 < 💧 < 🍶、seed で再現、PNG/GIF の読み戻し |
 
 どの実験も ⚖️ 総量の保存（ずれ 0 ulp）と、層流の前提（Re）・Courant 数などの前提条件を一緒に確かめる。
 閉じた式とのずれ（δ）は丸めずにそのまま出す（`run -v`）。
+
+## 🟦 ドット絵の水
+
+| 💧 dam-break | 💧 moniac-drain |
+|---|---|
+| ![dam-break](docs/images/dam-break_water_s0_t0800_r01.gif) | ![moniac-drain](docs/images/moniac-drain_water_s0_t0600_r01.gif) |
+
+```bash
+uv run python fluidfullspeedsimulation.py draw moniac-drain --fluid ethanol --scale 8 --out-dir build/pixel \
+    --file-prefix demo- --file-suffix _try   # 🎞️ GIF + 🖼️ PNG + 🧾 受領記録 JSON
+```
+
+- 🧱 `pixelwater.py`: 1 行 = int 1 つのビット盤。落下（真下 → 斜め下）は毎ティック、横の広がりは流体ごとの整数スケジュール（base_rate × ν_water/ν、Bresenham 型の積算）。⚠️ 見た目のたとえで、粘性流れの物理モデルではない
+- 📛 名前: `<prefix><場面>_<流体>_s<seed>_t<ティック>_r<NN><suffix>`。`r<NN>` は同じ条件の何回目か（既存なら次の番号）。隣の `<name>.json` に plan（再現の引数）と bytes・sha256
+- 🎨 色は Ironmate の色 ID（💧 C02・🍶 C04・🧴 C01、壁 C07）と派生規則。`to_ironmate_artifact` で `ironmate-pixel-grid/1` に出せる
+- 🎞️ GIF は標準ライブラリだけ（LZW・前フレームとの差分矩形）。`scale` は 1 マスのピクセル数（既定 8）
 
 ## 🧮 ビット計算
 

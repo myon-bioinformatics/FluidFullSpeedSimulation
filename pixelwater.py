@@ -1,0 +1,607 @@
+"""🟦 pixelwater — ビット盤（bitboard）で落ちるドット絵の水を作り、PNG・GIF・絵文字で描く。
+
+盤の 1 行は Python の int 1 つ。ビット x が列 x。壁（wall）・水（water）・向き（dir、1 = 右へ進む）を
+行ごとのビットマスクで持ち、1 行まとめてビット演算で動かす。標準ライブラリだけ。
+
+1 ティックの動き:
+
+1. 落下: 下のセルが空いていれば 1 行落ちる。落ちられなければ斜め下の空きへ滑る
+   （下の行から順に。1 ティックで 1 行まで。重力なので流体によらず毎ティック）
+2. 横移動: 支えのある水が向き（dir）の方へ 1 マス進む。ふさがれていたら向きを反転する
+   （同じ空きセルを左右から取り合ったら右から来た方を通す）。
+   横移動の回数は流体ごとの整数スケジュール（Bresenham 型の積算）で決める
+
+水のドット数は移動元を消して移動先に立てるだけなので、毎ティック popcount（int.bit_count）で完全に一致する。
+
+⚠️ 流体の違いは「見た目のたとえ」: 横移動の頻度 = base_rate × ν_water / ν（動粘度が大きいほど横に広がる
+回数が減る）。落下は流体によらず毎ティック 1 行。粘性流れの物理モデルではない。
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import random
+import struct
+import zlib
+from pathlib import Path
+
+from fixedq import ONE, to_q
+from fluids import get_fluid
+
+WALL, WATER, EMPTY = "#", "~", "."
+
+# 色は Ironmate（myon-bioinformatics/Ironmate の pixel_grid.py）の色 ID と派生規則に揃える。
+# 色番号: 0 空き（Ironmate では透明）/ 1 壁 / 2 水 / 3 落ちている水
+IRONMATE_BASE = {  # pixel_grid.PALETTE_BASE の一部（main, shadow）
+    "C01": ("#5BBD3E", "#418A2D"),  # grass
+    "C02": ("#63B3FF", "#3F75CC"),  # water
+    "C04": ("#A84DFF", "#7520B8"),  # poison
+    "C07": ("#9EA4AB", "#6D737B"),  # stone
+}
+FLUID_COLOR_ID = {"water": "C02", "ethanol": "C04", "methanol": "C01"}
+EMOJI = {"water": "🟦", "ethanol": "🟪", "methanol": "🟩"}
+
+
+def _rgb(value: str) -> tuple[int, int, int]:
+    return tuple(int(value[i:i + 2], 16) for i in (1, 3, 5))
+
+
+def derive_palette(main: str, shadow: str) -> tuple:
+    """Ironmate の pixel_grid.derive_palette と同じ: (透明, main, shadow, highlight, outline)。
+
+    highlight = round((3·main + 2·255) / 5)、outline = round(shadow / 2)（四捨五入は整数で）。
+    """
+    m, sh = _rgb(main), _rgb(shadow)
+    highlight = tuple((2 * (3 * c + 510) + 5) // 10 for c in m)
+    outline = tuple((c + 1) // 2 for c in sh)
+    return ((0, 0, 0, 0), m + (255,), sh + (255,), highlight + (255,), outline + (255,))
+
+
+def palette(fluid: str) -> list[tuple[int, int, int, int]]:
+    """色番号 0..3 の RGBA。空き = 白（GIF・PNG）、壁 = 石の outline、水 = main、落下中 = highlight。"""
+    body = derive_palette(*IRONMATE_BASE[FLUID_COLOR_ID.get(fluid, "C02")])
+    wall = derive_palette(*IRONMATE_BASE["C07"])[4]
+    return [(255, 255, 255, 255), wall, body[1], body[3]]
+
+
+# --- 場面（テキストの地図） --------------------------------------------------
+
+def _box(width: int, height: int) -> list[list[str]]:
+    g = [[EMPTY] * width for _ in range(height)]
+    for y in range(height):
+        g[y][0] = g[y][width - 1] = WALL
+    g[height - 1] = [WALL] * width
+    return g
+
+
+def scene_map(name: str) -> list[str]:
+    """場面の地図（'#' 壁 / '~' 水 / '.' 空き）。自作の地図は simulate(map_lines=...) に渡せる。"""
+    if name == "dam-break":
+        w, h = 32, 24
+        g = _box(w, h)
+        for y in range(4, h - 1):
+            for x in range(1, 9):
+                g[y][x] = WATER
+    elif name == "moniac-drain":
+        w, h = 32, 32
+        g = _box(w, h)
+        for y in range(2, 15):
+            g[y][7] = g[y][24] = WALL
+        for x in range(7, 25):
+            if x not in (15, 16):  # 穴
+                g[14][x] = WALL
+        for y in range(3, 14):
+            for x in range(8, 24):
+                g[y][x] = WATER
+    else:
+        raise KeyError(f"unknown scene {name!r}; choose from {sorted(SCENES)}")
+    return ["".join(row) for row in g]
+
+
+SCENES = ("dam-break", "moniac-drain")
+
+
+class Grid:
+    """行ごとのビットマスク。y = 0 が上、ビット x が列 x。"""
+
+    def __init__(self, width: int, height: int, wall: list[int], water: list[int], dir_: list[int]):
+        self.width, self.height = width, height
+        self.full = (1 << width) - 1
+        self.wall, self.water, self.dir = wall, water, dir_
+
+    def count(self) -> int:
+        return sum(r.bit_count() for r in self.water)
+
+    def overlap(self) -> int:
+        return sum((w & s).bit_count() for w, s in zip(self.water, self.wall))
+
+    def free(self, y: int) -> int:
+        """y 行の空きセル。盤の下（y = height）は床としてふさがっている。"""
+        if y >= self.height:
+            return 0
+        return self.full & ~(self.water[y] | self.wall[y])
+
+    def falling(self) -> list[int]:
+        return [self.water[y] & self.free(y + 1) for y in range(self.height)]
+
+    def column_counts(self) -> list[int]:
+        """列ごとの水のドット数（立っているビットだけをたどる）。"""
+        cols = [0] * self.width
+        for r in self.water:
+            while r:
+                low = r & -r
+                cols[low.bit_length() - 1] += 1
+                r ^= low
+        return cols
+
+    def snapshot(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        return tuple(self.water), tuple(self.falling())
+
+
+def parse_map(lines, seed: int | None = 0) -> Grid:
+    rows = [ln.rstrip("\n") for ln in lines if ln.strip("\n")]
+    if not rows:
+        raise ValueError("empty map")
+    width = len(rows[0])
+    if any(len(r) != width for r in rows):
+        raise ValueError("map rows must have equal width")
+    bad = set("".join(rows)) - {WALL, WATER, EMPTY}
+    if bad:
+        raise ValueError(f"unknown map characters: {sorted(bad)}")
+    wall = [sum(1 << x for x, c in enumerate(r) if c == WALL) for r in rows]
+    water = [sum(1 << x for x, c in enumerate(r) if c == WATER) for r in rows]
+    if seed is None:  # 交互（偶数列は右、奇数列は左）
+        pattern = sum(1 << x for x in range(0, width, 2))
+        dir_ = [w & pattern for w in water]
+    else:
+        rng = random.Random(seed)
+        dir_ = [w & rng.getrandbits(width) for w in water]
+    return Grid(width, len(rows), wall, water, dir_)
+
+
+# --- 1 ティック --------------------------------------------------------------
+
+def fall(g: Grid) -> int:
+    """下の行から順に、空きの上にある水を 1 行落とす。落ちられない水は斜め下の空きへ滑る（向きの側を先に）。
+
+    向きも一緒に運ぶ。斜めは両側を見るので、すれ違う穴（下の行の空き）と上の水が必ず出会う。
+    動いたドット数を返す。
+    """
+    moved = 0
+    full = g.full
+    for y in range(g.height - 2, -1, -1):
+        below = g.free(y + 1)
+        cand = g.water[y] & below
+        if cand:
+            moved += cand.bit_count()
+            g.water[y] &= ~cand
+            g.water[y + 1] |= cand
+            carried = g.dir[y] & cand
+            g.dir[y] &= ~cand
+            g.dir[y + 1] |= carried
+            below = g.free(y + 1)
+        w = g.water[y]
+        if not w:
+            continue
+        same = full & ~(w | g.wall[y])
+        supported = w & ~below
+        r_ok = (below >> 1) & (same >> 1)  # (x+1, y+1) と (x+1, y) が空き（角をすり抜けない）
+        l_ok = (below << 1) & (same << 1) & full
+        d = g.dir[y]
+        go_r = supported & ((d & r_ok) | (~d & ~l_ok & r_ok))
+        go_l = supported & ((~d & l_ok) | (d & ~r_ok & l_ok)) & full
+        clash = (go_r << 1) & (go_l >> 1)
+        go_l &= ~(clash << 1)
+        if go_r | go_l:
+            moved += go_r.bit_count() + go_l.bit_count()
+            g.water[y] &= ~(go_r | go_l)
+            g.dir[y] &= g.water[y]
+            g.water[y + 1] |= ((go_r << 1) & full) | (go_l >> 1)
+            g.dir[y + 1] |= (go_r << 1) & full
+    return moved
+
+
+def spread(g: Grid) -> int:
+    """支えのある水を向きの方へ 1 マス。ふさがれたら向きを反転。動いたドット数を返す。"""
+    moved = 0
+    full = g.full
+    for y in range(g.height):
+        w = g.water[y]
+        if not w:
+            continue
+        supported = w & ~g.free(y + 1)
+        free = full & ~(w | g.wall[y])
+        right = w & g.dir[y] & supported
+        left = w & ~g.dir[y] & supported
+        go_r = right & (free >> 1)
+        go_l = left & ((free << 1) & full)
+        clash = (go_r << 1) & (go_l >> 1)  # 同じ空きを左右から取り合う → 右から来た方を通す
+        go_l &= ~(clash << 1)
+        stay = w & ~go_r & ~go_l
+        flip_r = right & ~go_r  # 右へ行けなかった → 左向きに
+        flip_l = left & ~go_l  # 左へ行けなかった → 右向きに
+        g.water[y] = stay | ((go_r << 1) & full) | (go_l >> 1)
+        g.dir[y] = ((g.dir[y] & stay & ~flip_r) | flip_l | ((go_r << 1) & full)) & g.water[y]
+        moved += go_r.bit_count() + go_l.bit_count()
+    return moved
+
+
+def lateral_rate(fluid: str, base_rate: float = 0.5) -> int:
+    """横移動の頻度（Q）。base_rate × ν_water / ν。"""
+    nu_w = get_fluid("water").nu
+    return to_q(base_rate * nu_w / get_fluid(fluid).nu)
+
+
+# --- 回す --------------------------------------------------------------------
+
+def run_pixels(scene: str = "dam-break", fluid: str = "water", *, ticks: int | None = None, seed: int | None = 0,
+               base_rate: float = 0.5, frame_every: int = 2, map_lines=None) -> dict:
+    """シミュレーション本体。frames（各フレームの水・落下中の行マスク）を含む Python の dict を返す。"""
+    if frame_every < 1:
+        raise ValueError("frame_every must be >= 1")
+    lines = map_lines if map_lines is not None else scene_map(scene)
+    g = parse_map(lines, seed)
+    rate = lateral_rate(fluid, base_rate)
+    if ticks is None:
+        ticks = {"dam-break": 800, "moniac-drain": 600}.get(scene, 800)
+    n0 = g.count()
+    acc = 0
+    counts_worst = 0
+    lateral_passes = 0
+    frames = [g.snapshot()]
+    heights = []
+    first_floor = None
+    for t in range(1, ticks + 1):
+        fall(g)
+        acc += rate
+        while acc >= ONE:
+            acc -= ONE
+            spread(g)
+            lateral_passes += 1
+        counts_worst = max(counts_worst, abs(g.count() - n0), g.overlap())
+        cols = g.column_counts()
+        inner = [c for c, s in zip(cols, _reachable_columns(g)) if s]
+        heights.append(max(inner) - min(inner) if inner else 0)
+        if first_floor is None and g.water[g.height - 2]:
+            first_floor = t
+        if t % frame_every == 0 or t == ticks:
+            frames.append(g.snapshot())
+    settle = _settle_tick(heights)
+    digest = hashlib.sha256()
+    for water, _f in frames:
+        for row in water:
+            digest.update(row.to_bytes((g.width + 7) // 8, "little"))
+    return {
+        "scene": scene, "fluid": fluid, "seed": seed, "ticks": ticks, "width": g.width, "height": g.height,
+        "pixels": n0, "count_error": counts_worst, "lateral_rate": rate / ONE, "lateral_passes": lateral_passes,
+        "settle_tick": settle, "flatness": heights[-1] if heights else 0, "first_floor_tick": first_floor,
+        "frames": frames, "wall": tuple(g.wall), "hash": digest.hexdigest(), "grid": g,
+    }
+
+
+def _reachable_columns(g: Grid) -> list[bool]:
+    """底の行で壁でない列（水が溜まりうる列）。"""
+    floor_row = g.height - 2
+    return [not (g.wall[floor_row] >> x) & 1 for x in range(g.width)]
+
+
+def _settle_tick(heights: list[int]) -> int | None:
+    """列の高さの差（最大 − 最小）が 1 以下になり、その後ずっと 1 以下のままの最初のティック。"""
+    if not heights or heights[-1] > 1:
+        return None
+    t = len(heights)
+    while t > 0 and heights[t - 1] <= 1:
+        t -= 1
+    return t + 1
+
+
+def simulate_pixels(scene: str = "dam-break", fluid: str = "water", ticks: int | None = None, seed: int | None = 0,
+                    base_rate: float = 0.5) -> dict:
+    """JSON にそのまま出せる要約（Node から ``--call simulate_pixels`` で呼べる）。最後の盤は絵文字の文字列で返す。"""
+    res = run_pixels(scene, fluid, ticks=ticks, seed=seed, base_rate=base_rate)
+    out = {k: v for k, v in res.items() if k not in ("frames", "wall", "grid")}
+    out["frames"] = len(res["frames"])
+    out["final"] = render_text(res, -1)
+    return out
+
+
+# --- 描画 -------------------------------------------------------------------
+
+def indices(res: dict, frame: int) -> list[list[int]]:
+    """フレームを色番号の 2 次元配列へ（0 空き / 1 壁 / 2 水 / 3 落ちている水）。"""
+    water, falling = res["frames"][frame]
+    w = res["width"]
+    out = []
+    for y, wall in enumerate(res["wall"]):
+        row = []
+        for x in range(w):
+            bit = 1 << x
+            row.append(1 if wall & bit else 3 if falling[y] & bit else 2 if water[y] & bit else 0)
+        out.append(row)
+    return out
+
+
+def render_text(res: dict, frame: int = -1, ascii_only: bool = False) -> str:
+    if ascii_only:
+        chars = [EMPTY, WALL, WATER, "|"]
+    else:
+        drop = EMOJI.get(res["fluid"], "🟦")
+        chars = ["⬜", "⬛", drop, drop]
+    return "\n".join("".join(chars[c] for c in row) for row in indices(res, frame))
+
+
+def to_ironmate_artifact(res: dict, frame: int = -1) -> dict:
+    """フレームを Ironmate の ``ironmate-pixel-grid/1`` 形式へ（色番号 0 は透明）。
+
+    Ironmate の grid_tools / grid_png（to_png・encode・emoji など）がそのまま読める。
+    """
+    colors = ["#%02X%02X%02X%02X" % c for c in palette(res["fluid"])]
+    colors[0] = "#00000000"
+    return {"schema": "ironmate-pixel-grid/1", "mask": res["scene"], "palette": FLUID_COLOR_ID.get(res["fluid"], "C02"),
+            "effect": "normal", "width": res["width"], "height": res["height"], "colors": colors,
+            "pixels": indices(res, frame)}
+
+
+def _scale(grid: list[list[int]], scale: int) -> list[bytes]:
+    """最近傍で拡大（1 マス = scale × scale ピクセル）。"""
+    rows = []
+    for row in grid:
+        line = bytes(c for c in row for _ in range(scale))
+        rows.extend([line] * scale)
+    return rows
+
+
+def png_bytes(res: dict, frame: int = -1, scale: int = 8) -> bytes:
+    """パレット PNG（色番号 8 bit、フィルタ 0、zlib 9 で同じ入力なら同じバイト列）。"""
+    if scale < 1:
+        raise ValueError("scale must be >= 1")
+    rows = _scale(indices(res, frame), scale)
+    height, width = len(rows), len(rows[0])
+    raw = b"".join(b"\x00" + r for r in rows)
+    pal = [c[:3] for c in palette(res["fluid"])]
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 3, 0, 0, 0))
+            + chunk(b"PLTE", b"".join(bytes(c) for c in pal))
+            + chunk(b"IDAT", zlib.compress(raw, 9))
+            + chunk(b"IEND", b""))
+
+
+def _lzw(data: bytes, min_size: int) -> bytes:
+    """GIF の LZW 符号化（可変長コード、LSB から詰める、表が満ちたら clear）。"""
+    clear, eoi = 1 << min_size, (1 << min_size) + 1
+    size = min_size + 1
+    table: dict[tuple[int, int], int] = {}
+    nxt = eoi + 1
+    acc = nbits = 0
+    out = bytearray()
+
+    def emit(code: int) -> None:
+        nonlocal acc, nbits
+        acc |= code << nbits
+        nbits += size
+        while nbits >= 8:
+            out.append(acc & 0xFF)
+            acc >>= 8
+            nbits -= 8
+
+    emit(clear)
+    prefix = data[0]
+    for k in data[1:]:
+        key = (prefix, k)
+        code = table.get(key)
+        if code is not None:
+            prefix = code
+            continue
+        emit(prefix)
+        table[key] = nxt
+        nxt += 1
+        if nxt > (1 << size) and size < 12:
+            size += 1
+        if nxt == 4096:
+            emit(clear)
+            table.clear()
+            nxt, size = eoi + 1, min_size + 1
+        prefix = k
+    emit(prefix)
+    emit(eoi)
+    if nbits:
+        out.append(acc & 0xFF)
+    return bytes(out)
+
+
+def _blocks(data: bytes) -> bytes:
+    return b"".join(bytes([len(data[i:i + 255])]) + data[i:i + 255] for i in range(0, len(data), 255)) + b"\x00"
+
+
+def gif_bytes(res: dict, scale: int = 8, delay_cs: int = 4, frames=None) -> bytes:
+    """アニメーション GIF。2 枚目からは前のフレームと違う矩形だけを重ねる（容量を抑える）。"""
+    if scale < 1:
+        raise ValueError("scale must be >= 1")
+    picks = range(len(res["frames"])) if frames is None else frames
+    grids = [indices(res, i) for i in picks]
+    h, w = len(grids[0]) * scale, len(grids[0][0]) * scale
+    pal = [c[:3] for c in palette(res["fluid"])]
+    out = bytearray(b"GIF89a" + struct.pack("<HHBBB", w, h, 0xF1, 0, 0))  # 全体の色表 4 色
+    out += b"".join(bytes(c) for c in pal)
+    out += b"\x21\xff\x0bNETSCAPE2.0\x03\x01\x00\x00\x00"  # 無限ループ
+    prev = None
+    for grid in grids:
+        if prev is None:
+            x0, y0, x1, y1 = 0, 0, len(grid[0]), len(grid)
+        else:
+            diff = [(x, y) for y, (a, b) in enumerate(zip(grid, prev)) for x in range(len(a)) if a[x] != b[x]]
+            if not diff:
+                diff = [(0, 0)]
+            xs, ys = [d[0] for d in diff], [d[1] for d in diff]
+            x0, y0, x1, y1 = min(xs), min(ys), max(xs) + 1, max(ys) + 1
+        sub = [row[x0:x1] for row in grid[y0:y1]]
+        pix = b"".join(_scale(sub, scale))
+        out += b"\x21\xf9\x04" + struct.pack("<BHBB", 0x04, delay_cs, 0, 0)  # 処分しない（重ねる）
+        out += b"\x2c" + struct.pack("<HHHHB", x0 * scale, y0 * scale, (x1 - x0) * scale, (y1 - y0) * scale, 0)
+        out += b"\x02" + _blocks(_lzw(pix, 2))
+        prev = grid
+    out += b"\x3b"
+    return bytes(out)
+
+
+# --- 読み戻し（検証用の最小デコーダ） ----------------------------------------
+
+def read_png(data: bytes) -> dict:
+    """署名・各チャンクの CRC・IHDR・展開後の長さを確かめ、色番号の行を返す。"""
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("bad PNG signature")
+    pos, chunks = 8, []
+    while pos < len(data):
+        n = struct.unpack(">I", data[pos:pos + 4])[0]
+        kind, body = data[pos + 4:pos + 8], data[pos + 8:pos + 8 + n]
+        crc = struct.unpack(">I", data[pos + 8 + n:pos + 12 + n])[0]
+        if zlib.crc32(kind + body) & 0xFFFFFFFF != crc:
+            raise ValueError(f"bad CRC in {kind!r}")
+        chunks.append((kind, body))
+        pos += 12 + n
+    kinds = [k for k, _ in chunks]
+    if kinds[0] != b"IHDR" or kinds[-1] != b"IEND":
+        raise ValueError("PNG must start with IHDR and end with IEND")
+    width, height = struct.unpack(">II", chunks[0][1][:8])
+    raw = zlib.decompress(b"".join(b for k, b in chunks if k == b"IDAT"))
+    if len(raw) != height * (width + 1):
+        raise ValueError("PNG data length mismatch")
+    rows = [raw[y * (width + 1) + 1:(y + 1) * (width + 1)] for y in range(height)]
+    return {"width": width, "height": height, "chunks": [k.decode() for k in kinds], "rows": rows}
+
+
+def _unlzw(data: bytes, min_size: int, count: int) -> bytes:
+    clear, eoi = 1 << min_size, (1 << min_size) + 1
+    size, pos, out = min_size + 1, 0, bytearray()
+    table: list[bytes] = []
+    prev = None
+    bits = int.from_bytes(data, "little")
+    total = len(data) * 8
+
+    def reset():
+        nonlocal table, size, prev
+        table = [bytes([i]) for i in range(clear)] + [b"", b""]
+        size, prev = min_size + 1, None
+
+    reset()
+    while pos + size <= total and len(out) < count:
+        code = (bits >> pos) & ((1 << size) - 1)
+        pos += size
+        if code == clear:
+            reset()
+            continue
+        if code == eoi:
+            break
+        if code < len(table):
+            entry = table[code]
+            if prev is not None:
+                table.append(prev + entry[:1])
+        elif prev is not None and code == len(table):
+            entry = prev + prev[:1]
+            table.append(entry)
+        else:
+            raise ValueError("bad LZW code")
+        out += entry
+        prev = entry
+        if len(table) == (1 << size) and size < 12:
+            size += 1
+    return bytes(out)
+
+
+def read_gif(data: bytes) -> dict:
+    """GIF を読み、各フレームを重ねた後の色番号（全画面）を返す。"""
+    if data[:6] != b"GIF89a":
+        raise ValueError("bad GIF signature")
+    w, h, flags = struct.unpack("<HHB", data[6:11])
+    pos = 13 + (3 * (2 << (flags & 7)) if flags & 0x80 else 0)
+    canvas = bytearray(w * h)
+    frames = []
+    while pos < len(data):
+        b = data[pos]
+        if b == 0x3B:
+            break
+        if b == 0x21:  # 拡張
+            pos += 2
+            while data[pos]:
+                pos += data[pos] + 1
+            pos += 1
+            continue
+        if b != 0x2C:
+            raise ValueError(f"unexpected block 0x{b:02x}")
+        x, y, fw, fh, _ = struct.unpack("<HHHHB", data[pos + 1:pos + 10])
+        min_size = data[pos + 10]
+        pos += 11
+        body = bytearray()
+        while data[pos]:
+            body += data[pos + 1:pos + 1 + data[pos]]
+            pos += data[pos] + 1
+        pos += 1
+        pix = _unlzw(bytes(body), min_size, fw * fh)
+        if len(pix) != fw * fh:
+            raise ValueError("GIF frame size mismatch")
+        for r in range(fh):
+            canvas[(y + r) * w + x:(y + r) * w + x + fw] = pix[r * fw:(r + 1) * fw]
+        frames.append(bytes(canvas))
+    return {"width": w, "height": h, "frames": frames}
+
+
+# --- ファイルへ ---------------------------------------------------------------
+
+RECEIPT_SCHEMA = "fluidfullspeedsimulation-pixel-water/1"
+
+
+def file_stem(scene: str, fluid: str, seed, ticks: int, out_dir: str | Path = ".", file_prefix: str = "",
+              file_suffix: str = "") -> Path:
+    """意味のある名前で採番する: <prefix><場面>_<流体>_s<seed>_t<ティック>_r<NN><suffix>（拡張子なし）。
+
+    並びは Ironmate の ``{mask}_{colorID}_{effect}_{size}`` と同じく条件を ``_`` でつなぐ。
+    r<NN> は同じ条件で何回目の出力か（GIF・PNG・受領記録 JSON のどれかが既にあれば次の番号）。
+    """
+    base = f"{file_prefix}{scene}_{fluid}_s{'alt' if seed is None else seed}_t{ticks:04d}"
+    out = Path(out_dir)
+    n = 1
+    while any((out / f"{base}_r{n:02d}{file_suffix}.{ext}").exists() for ext in ("gif", "png", "json")):
+        n += 1
+    return out / f"{base}_r{n:02d}{file_suffix}"
+
+
+def draw(scene: str = "dam-break", fluid: str = "water", out_dir: str = "build/pixel", *, ticks: int | None = None,
+         seed: int | None = 0, scale: int = 8, frame_every: int = 2, formats=("gif", "png"), file_prefix: str = "",
+         file_suffix: str = "", base_rate: float = 0.5) -> dict:
+    """GIF（動き）と PNG（最後のフレーム）を書き、隣に受領記録 <name>.json を置く。
+
+    受領記録は BrowserTestKit の evidence_gif と同じ考え方: 何をどう描いたか（plan）と、出来たもの（bytes・sha256・
+    frames・canvas）を残す。plan の値で draw を呼べば同じバイト列になる。
+    """
+    res = run_pixels(scene, fluid, ticks=ticks, seed=seed, frame_every=frame_every, base_rate=base_rate)
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    stem = file_stem(scene, fluid, seed, res["ticks"], out_dir, file_prefix, file_suffix)
+    paths, files = {}, {}
+    blobs = {}
+    if "gif" in formats:
+        blobs["gif"] = gif_bytes(res, scale=scale)
+    if "png" in formats:
+        blobs["png"] = png_bytes(res, -1, scale=scale)
+    for kind, data in blobs.items():
+        p = stem.with_name(f"{stem.name}.{kind}")
+        p.write_bytes(data)
+        paths[kind] = str(p)
+        files[kind] = {"name": p.name, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+    receipt = {
+        "schema": RECEIPT_SCHEMA, "files": files, "frames": len(res["frames"]),
+        "canvas": f"{res['width'] * scale}x{res['height'] * scale}",
+        "plan": {"scene": scene, "fluid": fluid, "ticks": res["ticks"], "seed": seed, "scale": scale,
+                 "frame_every": frame_every, "base_rate": base_rate},
+        "pixels": res["pixels"], "count_error": res["count_error"], "settle_tick": res["settle_tick"],
+        "hash": res["hash"],
+    }
+    p = stem.with_name(f"{stem.name}.json")
+    p.write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    paths["json"] = str(p)
+    return {"paths": paths, **{k: receipt[k] for k in ("frames", "canvas", "pixels", "count_error", "settle_tick",
+                                                       "hash")}}

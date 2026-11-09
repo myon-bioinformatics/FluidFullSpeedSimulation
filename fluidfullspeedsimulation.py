@@ -26,6 +26,7 @@ from fixedq import ONE, from_q, lag_step, qmul, shift_lag_step, to_q
 from fluids import FLUIDS, RE_LAMINAR, Section, channel_reynolds, fluid_table, get_fluid, normal_depth
 from fluids import poiseuille_head, poiseuille_tau, torricelli_empty_time, torricelli_head, transport_delay
 from network import Network, critical_gain, inverse_table, jsonable, peak_to_peak, settling_time, window
+import pixelwater as pw
 
 FLUID_KEYS = tuple(FLUIDS)
 SEA = 1.0  # 外の水（海）。総量を閉じるための大きな水槽 [m³]
@@ -416,6 +417,66 @@ def e08_flume(length: float = 2.0, cells: int = 20, slope: float = 0.05, n_manni
             "summary": summary, "runs": runs, "checks": checks}
 
 
+# --- E09 ドット絵の水（ビット盤） ---------------------------------------------
+
+def e09_pixel_water(seed: int = 0, base_rate: float = 0.5, scale: int = 8) -> dict:
+    """落ちるドット絵の水。数の保存・水面の平ら・流体ごとの広がりの順・再現性・PNG/GIF の読み戻しを確かめる。"""
+    checks, runs, summary, settle = [], {}, {}, {}
+    for scene in pw.SCENES:
+        for key in FLUID_KEYS:
+            fl = get_fluid(key)
+            res = pw.run_pixels(scene, key, seed=seed, base_rate=base_rate)
+            tag = f"{scene}:{key}"
+            settle[tag] = res["settle_tick"]
+            checks += [
+                check(f"{tag}:count", fl.icon + "🔢", res["count_error"] == 0, value=res["count_error"], expected=0,
+                      tol=0, note="毎ティックのドット数（popcount）が不変・壁と重ならない"),
+                check(f"{tag}:flat", fl.icon + "🟰", res["settle_tick"] is not None and res["flatness"] <= 1,
+                      value=res["flatness"], expected=1, note="静まった水面: 列の高さの最大 − 最小 ≤ 1"),
+            ]
+            if scene == "moniac-drain":
+                upper = sum(row.bit_count() for row in res["frames"][-1][0][:14])
+                checks.append(check(f"{tag}:drained", fl.icon + "🕳️", upper == 0, value=upper, expected=0,
+                                    note="上の槽は穴から全部落ちきる"))
+            runs[tag] = [{"t": res["ticks"], "final": pw.render_text(res, -1, ascii_only=True)}]
+            summary[tag] = {"pixels": res["pixels"], "settle_tick": res["settle_tick"],
+                            "lateral_rate": res["lateral_rate"], "lateral_passes": res["lateral_passes"],
+                            "first_floor_tick": res["first_floor_tick"], "hash": res["hash"]}
+    nu_w = get_fluid("water").nu
+    for scene in pw.SCENES:
+        e, w_, m = (settle[f"{scene}:{k}"] for k in ("ethanol", "water", "methanol"))
+        checks.append(check(f"{scene}:order", "⏱️", None not in (e, w_, m) and e > w_ > m,
+                            value=[m, w_, e], note="静まるまで: 🧴 < 💧 < 🍶（ν が大きいほど横に広がる回数が減る）"))
+        if None not in (e, w_, m):
+            summary[f"{scene}:ratio"] = {"ethanol/water": e / w_, "methanol/water": m / w_,
+                                         "nu ethanol/water": get_fluid("ethanol").nu / nu_w,
+                                         "nu methanol/water": get_fluid("methanol").nu / nu_w}
+    a = pw.run_pixels("dam-break", "water", seed=seed, base_rate=base_rate)
+    b = pw.run_pixels("dam-break", "water", seed=seed, base_rate=base_rate)
+    c = pw.run_pixels("dam-break", "water", seed=seed + 1, base_rate=base_rate)
+    checks += [
+        check("same-seed", "🎲", a["hash"] == b["hash"], value=a["hash"][:12], expected=b["hash"][:12],
+              note="同じ seed → 全フレームが同じ"),
+        check("other-seed", "🎲", a["hash"] != c["hash"], value=c["hash"][:12], note="seed を変えると動きが変わる"),
+    ]
+    short = pw.run_pixels("moniac-drain", "water", ticks=40, seed=seed, base_rate=base_rate)
+    gif = pw.read_gif(pw.gif_bytes(short, scale=scale))
+    gif_ok = len(gif["frames"]) == len(short["frames"]) and all(
+        frame[(y * scale) * gif["width"] + x * scale] == row[x]
+        for frame, i in zip(gif["frames"], range(len(short["frames"])))
+        for y, row in enumerate(pw.indices(short, i)) for x in range(len(row)))
+    png = pw.read_png(pw.png_bytes(short, -1, scale=scale))
+    png_ok = (png["width"], png["height"]) == (short["width"] * scale, short["height"] * scale) and all(
+        png["rows"][y * scale][x * scale] == row[x] for y, row in enumerate(pw.indices(short, -1)) for x in range(len(row)))
+    checks += [
+        check("gif-roundtrip", "🎞️", gif_ok, value=len(gif["frames"]), expected=len(short["frames"]),
+              note="GIF89a を読み戻すと全フレームの色番号が一致（LZW・差分矩形）"),
+        check("png-roundtrip", "🖼️", png_ok, value=png["chunks"], note="PNG の CRC・大きさ・色番号が一致"),
+    ]
+    return {"params": {"seed": seed, "base_rate": base_rate, "scale": scale, "scenes": list(pw.SCENES)},
+            "summary": summary, "runs": runs, "checks": checks}
+
+
 # --- 登録簿 ---------------------------------------------------------------
 
 EXPERIMENTS = {
@@ -427,6 +488,7 @@ EXPERIMENTS = {
     "E06": ("coupled-loop", "🌐", "2 台連結（遅延つきの環）", e06_coupled_loop),
     "E07": ("fluid-speed", "🏎️", "作動流体で変わる回路の速さ", e07_fluid_speed),
     "E08": ("flume", "🎋", "傾いた樋とトレーサー（流しそうめんの下ごしらえ）", e08_flume),
+    "E09": ("pixel-water", "🟦", "ドット絵の水（ビット盤で落ちて広がる）", e09_pixel_water),
 }
 SLUGS = {slug: eid for eid, (slug, *_rest) in EXPERIMENTS.items()}
 
@@ -512,6 +574,18 @@ def build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run", help="▶️ 実験を回す")
     run.add_argument("experiment", choices=choices, help="ID か識別子")
     ver = sub.add_parser("verify", help="✅ 全実験を回して検証")
+    drw = sub.add_parser("draw", help="🎨 ドット絵の水を描く（GIF・PNG）")
+    drw.add_argument("scene", choices=pw.SCENES, help="場面")
+    drw.add_argument("--fluid", choices=FLUID_KEYS, default="water", help="作動流体")
+    drw.add_argument("--ticks", type=int, help="ティック数（既定は場面ごと）")
+    drw.add_argument("--seed", type=int, default=0, help="向きの初期値の乱数 seed")
+    drw.add_argument("--scale", type=int, default=8, help="1 マスのピクセル数（既定 8。Ironmate の scale と同じ意味）")
+    drw.add_argument("--frame-every", type=int, default=2, help="何ティックごとに 1 フレーム")
+    drw.add_argument("--format", choices=("gif", "png", "both"), default="both", help="書き出す形式")
+    drw.add_argument("--out-dir", default="build/pixel", help="書き出し先")
+    drw.add_argument("--file-prefix", default="", help="ファイル名の頭に付ける文字列")
+    drw.add_argument("--file-suffix", default="", help="ファイル名の末尾（拡張子の前）に付ける文字列")
+    drw.add_argument("--text", action="store_true", help="最後の盤を絵文字で表示")
     for sp in (run, ver):
         sp.add_argument("--json", action="store_true", help="結果を JSON で出す")
         sp.add_argument("--jsonl", metavar="PATH", help="プロッター記録を JSONL へ")
@@ -536,6 +610,18 @@ def main(argv=None) -> int:
     if args.command == "fluids":
         print(render_fluids())
         return 0
+    if args.command == "draw":
+        formats = ("gif", "png") if args.format == "both" else (args.format,)
+        out = pw.draw(args.scene, args.fluid, args.out_dir, ticks=args.ticks, seed=args.seed, scale=args.scale,
+                      frame_every=args.frame_every, formats=formats, file_prefix=args.file_prefix,
+                      file_suffix=args.file_suffix)
+        icons = {"gif": "🎞️", "png": "🖼️", "json": "🧾"}
+        for kind, path in out["paths"].items():
+            print(f"{icons[kind]} {path}")
+        print(f"🔢 {out['pixels']} px  🎬 {out['frames']}  📐 {out['canvas']}  ⏱️ {out['settle_tick']}  ⚖️ {out['count_error']}")
+        if args.text:
+            print(pw.render_text(pw.run_pixels(args.scene, args.fluid, ticks=args.ticks, seed=args.seed), -1))
+        return 0 if out["count_error"] == 0 else 1
     results = [run_experiment(args.experiment)] if args.command == "run" else verify_all()["results"]
     if args.jsonl:
         write_jsonl(args.jsonl, results)
