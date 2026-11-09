@@ -527,6 +527,124 @@ def e10_somen_flume(q_flow: float = 5e-5, q_flood: float = 1.2e-3, q_trickle: fl
             "summary": summary, "runs": runs, "checks": checks}
 
 
+# --- E11 MONIAC 型の水回り（据え置きの試験台） ---------------------------------
+
+RIG_OPEN = {"store": 0.5, "side": 0.3, "through": 0.2}  # 頭の水槽から分ける 3 つの弁の開き具合
+RIG_STORE_CAM = [[0.0, 0.0], [0.05, 0.0], [0.25, 1.0]]  # 貯める槽の浮き → 自分の出口の弁（5 cm までは閉じたまま）
+RIG_SIDE_CAM = [[0.0, 0.0], [0.05, 0.0], [0.15, 1.0]]  # 貯める槽の浮き → 横の槽の出口の弁（別の槽を動かす）
+
+
+def moniac_rig(dt: float = 0.05, q1: float = 2e-4, q2: float = 3e-4, t_step: float = 600.0, stages: int = 1,
+               fluid: str = "water") -> Network:
+    """MONIAC の水回りを物理のまま組んだ試験台（経済の読み替えはしない）。
+
+    🛢️ 下の槽 → ⛽ ポンプ → 頭の槽 → 3 つの弁で分流（貯める槽・横の槽・下へ素通り）。
+    貯める槽の浮きがカムを通して、自分の出口の弁（遅れ stages 段）と横の槽の出口の弁を開く。
+    貯める槽からの戻りは 3 秒の管。t_step でポンプの流量を q1 → q2 に上げる。
+    """
+    net = Network(dt, fluid).tank("sump", 1.0, volume=0.2).tank("header", 0.01).tank("store", 0.02).tank("side", 0.01)
+    net.pump("sump", "header", rate=q1, until=t_step)
+    net.pump("sump", "header", rate=q2, start=t_step)
+    for name, o in RIG_OPEN.items():
+        net.valve("header", "sump" if name == "through" else name, tau=10.0, opening=o)
+    net.valve("store", "sump", tau=20.0, sensor="store", cam=RIG_STORE_CAM, stages=stages, link_tau=2.0, delay=3.0)
+    net.valve("side", "sump", tau=15.0, sensor="store", cam=RIG_SIDE_CAM)
+    return net
+
+
+def _solve(f, lo: float, hi: float) -> float:
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        lo, hi = (mid, hi) if f(mid) < 0 else (lo, mid)
+    return 0.5 * (lo + hi)
+
+
+def rig_steady(q: float) -> dict:
+    """試験台の定常（閉じた式）。頭の槽 h = Q·τ/(A·Σo)、分流は開き具合の比、
+    貯める槽は cam(h)·A·h/τ = Q·o_store/Σo を二分法、横の槽は V = q_side·τ / cam_side(h_store)。"""
+    total = sum(RIG_OPEN.values())
+    flows = {k: q * o / total for k, o in RIG_OPEN.items()}
+    store = _solve(lambda h: interp(RIG_STORE_CAM, h) * 0.02 * h / 20.0 - flows["store"], 0.0, 10.0)
+    side = flows["side"] * 15.0 / min(1.0, interp(RIG_SIDE_CAM, store)) / 0.01
+    return {"header": q * 10.0 / (0.01 * total), "store": store, "side": side, "flows": flows}
+
+
+def interp(points, x: float) -> float:
+    pts = sorted((float(a), float(b)) for a, b in points)
+    if x <= pts[0][0]:
+        return pts[0][1]
+    if x >= pts[-1][0]:
+        return pts[-1][1]
+    for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+        if x <= x1:
+            return y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+    return pts[-1][1]
+
+
+def e11_moniac_rig(dt: float = 0.05, q1: float = 2e-4, q2: float = 3e-4, t_step: float = 600.0,
+                   t_end: float = 1200.0) -> dict:
+    checks, runs, summary = [], {}, {}
+    net = moniac_rig(dt, q1, q2, t_step)
+    res = net.run(t_end, trace=["store", "header"])
+    links = res["links"]
+    mid = int(round(t_step / dt)) - 1
+    tr = res["trace"]
+    tol = dt / 10.0  # 流入をステップ頭に入れる離散化の分（≈ dt/2τ、τ ≥ 10 s）を見込む
+    for phase, q, idx in (("q1", q1, mid), ("q2", q2, len(tr["store"]) - 1)):
+        st = rig_steady(q)
+        checks += [
+            close(f"{phase}:header", "🛢️", tr["header"][idx], st["header"], tol, note="頭の槽 h = Q·τ/(A·Σo)"),
+            close(f"{phase}:store", "🫙", tr["store"][idx], st["store"], tol, note="貯める槽: 浮き → 弁のカムで決まる水位"),
+        ]
+        summary[phase] = {"steady": st, "header": tr["header"][idx], "store": tr["store"][idx]}
+    st2 = rig_steady(q2)
+    checks.append(close("q2:side", "🪣", res["final"]["h:side"], st2["side"], tol,
+                        note="横の槽: 別の槽の浮きが出口の弁を開く"))
+    f = res["final"]
+    split = [f["q:2"], f["q:3"], f["q:4"]]
+    want = [RIG_OPEN[k] / sum(RIG_OPEN.values()) for k in ("store", "side", "through")]
+    checks.append(check("split", "🔱", all(rel_err(a / sum(split), b) <= 1e-8 for a, b in zip(split, want)),
+                        value=[a / sum(split) for a in split], expected=want, tol=1e-8,
+                        note="3 つの弁の分流 = 開き具合の比（床の丸め 1 ulp 分のずれまで）"))
+
+    # 溜まる: 貯める槽の弁が開く前（浮きが 5 cm に届く前）は、入った量がそのまま貯まる（整数で一致）
+    probe = moniac_rig(dt, q1, q2, t_step)
+    early = probe.run(10.0)
+    moved_in = early["links"][2]["volume_moved_q"]
+    checks.append(check("fill:exact", "🫙", early["volumes_q"]["store"] == moved_in and
+                        early["links"][5]["volume_moved_q"] == 0,
+                        value=early["volumes_q"]["store"], expected=moved_in, tol=0,
+                        note="弁が閉じている間: 貯める槽の体積 = 入った量（ulp まで）"))
+    # 浮きが別の槽の弁を動かす: 横の槽の出口が開くのは、貯める槽の水位が 5 cm を越えたステップ
+    cross = next(i for i, h in enumerate(tr["store"]) if interp(RIG_SIDE_CAM, h) > 0)
+    opened = links[6]["first_arrival"]
+    checks.append(check("float:cross", "🎈", opened is not None and abs(opened - (cross + 1) * dt) <= dt + 1e-12,
+                        value=opened, expected=(cross + 1) * dt, tol=dt,
+                        note="横の槽の弁は、貯める槽の浮きが 5 cm を越えた次のステップで開く"))
+    # 遅れ: 貯める槽からの戻りは 3 秒の管を通る
+    gap = links[5]["first_arrival"] - links[5]["first_flow"]
+    checks.append(check("delay", "⏳", abs(gap - 3.0) <= dt / 2 + 1e-12, value=gap, expected=3.0, tol=dt / 2,
+                        note="貯める槽の弁が開いてから下の槽に届くまで = 戻りの管の遅れ 3 秒"))
+    late = window(tr["store"], 0.9)
+    checks += [
+        check("still", "🫧", peak_to_peak(late) < 1e-6, value=peak_to_peak(late), tol=1e-6,
+              note="遅れ 1 段の浮き弁は揺れずに落ち着く"),
+        check("step-up", "📈", summary["q2"]["store"] > summary["q1"]["store"], value=summary["q2"]["store"],
+              expected=summary["q1"]["store"], note="ポンプを強めると貯める槽の水位が上がる"),
+        conserved("conserve", res),
+    ]
+    runs["rig"] = res["series"]
+    summary["golden"] = rig_fingerprint(res)
+    return {"params": {"dt": dt, "q1": q1, "q2": q2, "t_step": t_step, "t_end": t_end, "open": RIG_OPEN,
+                       "store_cam": RIG_STORE_CAM, "side_cam": RIG_SIDE_CAM},
+            "summary": summary, "runs": runs, "checks": checks}
+
+
+def rig_fingerprint(res: dict) -> dict:
+    """据え置きの比較用: 各槽の最後の水位を有効 9 桁で（OS の libm の差で末尾が揺れても変わらない桁）。"""
+    return {k: float(f"{v:.9g}") for k, v in sorted(res["final"].items()) if k.startswith("h:")}
+
+
 # --- 登録簿 ---------------------------------------------------------------
 
 EXPERIMENTS = {
@@ -539,6 +657,7 @@ EXPERIMENTS = {
     "E07": ("fluid-speed", "🏎️", "作動流体で変わる回路の速さ", e07_fluid_speed),
     "E08": ("flume", "🎋", "傾いた樋とトレーサー（流しそうめんの下ごしらえ）", e08_flume),
     "E10": ("somen-flume", "🥢", "流しそうめん（竹の継ぎ目・段差・曲がり・引っかかり）", e10_somen_flume),
+    "E11": ("moniac-rig", "🏛️", "MONIAC 型の水回り（分流・貯める・浮きで弁・遅れ）を据え置きの試験に", e11_moniac_rig),
 }
 SLUGS = {slug: eid for eid, (slug, *_rest) in EXPERIMENTS.items()}
 

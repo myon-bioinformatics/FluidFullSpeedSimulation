@@ -15,6 +15,7 @@ MONIAC は「水が流れ落ちる様子」の手本。部品は物理のまま�
 - ``cam``（水位 → 流量の表）/ ``rating``（セル体積 → 流量の表。樋の区間をつなぐ）
 - ``lip``（継ぎ目の縁を越える堰）/ ``spill``（曲がりの外側から横へあふれる）
 - ``pump``（一定流量）/ ``float_valve``（浮き弁。測った水位が遅れの段を通って弁を開く）
+- ``valve``（弁つきの出口。開き具合は一定か、別の水槽の浮き → カムで決まる。MONIAC の弁）
 - どの管にも ``delay``（輸送の遅れ）を付けられる。管の中の水も総量に数える
 
 運ばれる物 ``tracer``（そうめん・葉っぱ・浮き）: 入った節点に先にいた水が全部出たら、いちばん多く
@@ -30,7 +31,7 @@ from __future__ import annotations
 import math
 from typing import Callable
 
-from fixedq import Cam, DelayLine, clamp, from_q, lag_gain, lag_step, qdiv, qmul, qsqrt, to_q
+from fixedq import ONE, Cam, DelayLine, clamp, from_q, lag_gain, lag_step, qdiv, qmul, qsqrt, to_q
 from fluids import G, RE_LAMINAR, Section, channel_flow, fall_time, get_fluid, lip_flow, reynolds, side_spill
 from fluids import superelevation
 
@@ -124,6 +125,22 @@ def _law_spill(net, ln, n):
         ln["max_outer"] = max(ln["max_outer"], h_out)
         amount = qmul(to_q(side_spill(nd["length"], h_out, ln["rim"], ln["cd"], net.g)), net.dt_q)
     return max(amount, nd["v"] - ln["v_cap"])
+
+
+@register_law("valve")
+def _law_valve(net, ln, n):
+    """弁つきの出口: 全開で時定数 tau の線形流出に、開き具合（0..1）を掛ける。
+    開き具合は一定か、別の水槽の浮き（sensor の水位）→ カム（表）で決まる。浮きと弁の間に遅れの段も持てる。"""
+    if ln["cam"] is None:
+        o = ln["opening"]
+    else:
+        u = net.head_q(ln["sensor"])
+        for i in range(ln["stages"]):
+            ln["z"][i] = lag_step(ln["z"][i], u, ln["k_link"])
+            u = ln["z"][i]
+        o = clamp(ln["cam"](u), 0, ONE)
+    ln["last_opening"] = o
+    return qmul(qmul(net.nodes[ln["src"]]["v"], ln["k"]), o)
 
 
 @register_law("float_valve")
@@ -254,7 +271,8 @@ class Network:
         link = {
             "kind": kind, "src": src, "dst": dst, "delay": steps * self.dt, "delay_steps": steps,
             "line": DelayLine(steps - 1) if steps else None,
-            "pending": 0, "flow_sum": 0, "max_head": 0, "first_arrival_step": None, **extra,
+            "pending": 0, "flow_sum": 0, "max_head": 0, "first_arrival_step": None, "first_flow_step": None,
+            **extra,
         }
         self.links.append(link)
         return link
@@ -299,6 +317,25 @@ class Network:
         return self._link("pump", src, dst, delay, amount=qmul(to_q(rate), self.dt_q), rate=rate,
                           start_step=int(round(start / self.dt)),
                           until_step=None if until is None else int(round(until / self.dt)))
+
+    def valve(self, src: str, dst: str, *, tau: float, opening: float = 1.0, sensor: str | None = None,
+              cam=None, stages: int = 0, link_tau: float = 1.0, delay: float = 0.0) -> dict:
+        """弁つきの出口（MONIAC の弁）。全開の時定数 tau、開き具合は opening（0..1）か、
+        sensor の水位を cam（[[水位, 開き具合], ...]）で読み替えたもの。stages 段の遅れ（各 link_tau）は
+        浮き → ワイヤー → 弁のつながりの遅れ。"""
+        if self.nodes[src]["kind"] != "tank":
+            raise ValueError("valve needs a tank as src")
+        if not 0.0 <= opening <= 1.0:
+            raise ValueError("opening must be within 0..1")
+        if (cam is None) != (sensor is None):
+            raise ValueError("give both sensor and cam, or neither")
+        if sensor is not None and sensor not in self.nodes:
+            raise ValueError(f"unknown sensor node {sensor!r}")
+        h0 = self.head_q(sensor) if sensor else 0
+        return self._link("valve", src, dst, delay, tau=tau, k=lag_gain(self.dt, tau), opening=to_q(opening),
+                          sensor=sensor, cam=None if cam is None else Cam(cam),
+                          table=None if cam is None else [list(map(float, p)) for p in cam],
+                          stages=stages, k_link=lag_gain(self.dt, link_tau), z=[h0] * stages, last_opening=0)
 
     def float_valve(self, src: str, dst: str, *, sensor: str, setpoint: float, gain: float, qmax: float,
                     stages: int = 1, tau: float = 1.0, delay: float = 0.0) -> dict:
@@ -368,6 +405,8 @@ class Network:
         for i, ln in enumerate(self.links):
             self.nodes[ln["src"]]["v"] -= req[i]
             ln["flow_sum"] += req[i]
+            if req[i] and ln["first_flow_step"] is None:
+                ln["first_flow_step"] = n
         for i, ln in enumerate(self.links):
             if ln["line"] is None:
                 arrive = req[i]
@@ -466,9 +505,11 @@ class Network:
         }
 
     def _link_summary(self, i: int, ln: dict) -> dict:
-        fa = ln["first_arrival_step"]
+        fa, ff = ln["first_arrival_step"], ln["first_flow_step"]
         out = {"index": i, "kind": ln["kind"], "src": ln["src"], "dst": ln["dst"], "delay": ln["delay"],
-               "first_arrival": None if fa is None else fa * self.dt, "volume_moved": from_q(ln["flow_sum"])}
+               "first_flow": None if ff is None else ff * self.dt,
+               "first_arrival": None if fa is None else fa * self.dt, "volume_moved": from_q(ln["flow_sum"]),
+               "volume_moved_q": ln["flow_sum"]}
         if ln["kind"] == "pipe":
             h = from_q(ln["max_head"])
             v = ln["radius"] ** 2 * self.g * h / (8.0 * self.fluid.nu * ln["length"])
@@ -502,7 +543,7 @@ def ch_depth(ln: dict, net: "Network") -> float:
 
 # --- JSON の仕様から組む --------------------------------------------------
 
-LINK_BUILDERS = ("pipe", "orifice", "weir", "cam", "pump", "float_valve")
+LINK_BUILDERS = ("pipe", "orifice", "weir", "cam", "pump", "valve", "float_valve")
 SPEC_KEYS = {"dt", "fluid", "tanks", "channels", "flumes", "links", "tracers", "t_end", "trace", "sample_every"}
 
 
