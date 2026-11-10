@@ -449,6 +449,67 @@ def overland_t_e_power_law(intensity: float, length: float, alpha: float, m: flo
     return (length / (alpha * intensity ** (m - 1.0))) ** (1.0 / m)
 
 
+# --- 溜まる → 閾値 → 一気に（鹿威し・ピタゴラスの杯・マリオットびん） --------------------
+
+def tip_period(v_tip: float, q_in: float, t_dump: float = 0.0) -> float:
+    """🎍 鹿威しの周期 T = V_tip / q + t_dump（傾いている間も注ぎ込みは続き、そのまま流れ出る前提）。"""
+    if v_tip <= 0 or q_in <= 0:
+        raise ValueError("v_tip and q_in must be positive")
+    return v_tip / q_in + t_dump
+
+
+def siphon_flow(cd: float, tube_area: float, head: float, g: float = G) -> float:
+    """🍷 サイフォンの流量 Q = Cd·a·√(2g·H)。H は水面と出口の高さの差（Cd は管の損失をまとめた係数）。"""
+    return cd * tube_area * math.sqrt(2.0 * g * head) if head > 0 else 0.0
+
+
+def siphon_drain_time(tank_area: float, cd: float, tube_area: float, h_from: float, h_to: float, h_drop: float,
+                      g: float = G) -> float:
+    """🍷 注ぎ込みなしで、筒の水面が h_from から h_to まで下がる時間（出口は底より h_drop 下）。
+    A·dh/dt = −Cd·a·√(2g(h + h_drop)) を解いて t = 2A/(Cd·a·√(2g))·(√(h_from + h_drop) − √(h_to + h_drop))。"""
+    if h_from < h_to:
+        raise ValueError("h_from must be >= h_to")
+    return 2.0 * tank_area / (cd * tube_area * math.sqrt(2.0 * g)) * (
+        math.sqrt(h_from + h_drop) - math.sqrt(h_to + h_drop))
+
+
+def siphon_drain_time_with_inflow(tank_area: float, cd: float, tube_area: float, h_from: float, h_to: float,
+                                  h_drop: float, q_in: float, g: float = G, steps: int = 20000) -> float:
+    """🍷 注ぎ込み q_in がある間の排水時間。閉じた式にならないので RK4（steps 分割）で解く（物差し用の参照値）。
+    q_in が出口での流量以上なら下がりきらないので ValueError。"""
+    if siphon_flow(cd, tube_area, h_to + h_drop, g) <= q_in:
+        raise ValueError("inflow exceeds the siphon at the intake; the cup never empties")
+
+    def f(h: float) -> float:
+        return (q_in - siphon_flow(cd, tube_area, h + h_drop, g)) / tank_area
+
+    h, t = h_from, 0.0
+    dt = siphon_drain_time(tank_area, cd, tube_area, h_from, h_to, h_drop, g) / steps
+    for _ in range(10 * steps):
+        k1 = f(h)
+        k2 = f(h + 0.5 * dt * k1)
+        k3 = f(h + 0.5 * dt * k2)
+        k4 = f(h + dt * k3)
+        h_next = h + dt * (k1 + 2 * k2 + 2 * k3 + k4) / 6.0
+        if h_next <= h_to:  # 最後は線形に補間
+            return t + dt * (h - h_to) / (h - h_next)
+        h, t = h_next, t + dt
+    raise RuntimeError("siphon reference did not converge")  # pragma: no cover
+
+
+def mariotte_flow(cd: float, orifice_area: float, h_air: float, g: float = G) -> float:
+    """🫗 マリオットびんの一定流量 Q = Cd·a·√(2g·h_air)。h_air は空気管の下端と出口の高さの差。"""
+    return cd * orifice_area * math.sqrt(2.0 * g * h_air) if h_air > 0 else 0.0
+
+
+def mariotte_constant_time(h0: float, h_air: float, tank_area: float, cd: float, orifice_area: float,
+                           g: float = G) -> float:
+    """🫗 水面が空気管の下端まで下がる（流量が一定のまま）時間 (h0 − h_air)·A / Q。"""
+    if h0 <= h_air:
+        return 0.0
+    return (h0 - h_air) * tank_area / mariotte_flow(cd, orifice_area, h_air, g)
+
+
 __all__ = [
     "FLUIDS", "Fluid", "G", "REAL_FLUIDS", "RE_LAMINAR", "TEMP_TABLES", "fluid_table", "get_fluid", "table_value",
     "temperature_range",
@@ -459,4 +520,6 @@ __all__ = [
     "ORIFICE_DELTA", "PLACEHOLDER_MU_SCALE", "orifice_cd", "viscous_orifice",
     "overland_equilibrium", "overland_power_law", "overland_recession", "overland_rise", "overland_t_e_power_law",
     "plan_width", "wave_celerity",
+    "mariotte_constant_time", "mariotte_flow", "siphon_drain_time", "siphon_drain_time_with_inflow", "siphon_flow",
+    "tip_period",
 ]

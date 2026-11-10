@@ -23,12 +23,14 @@ import random
 import sys
 from pathlib import Path
 
-from fixedq import ONE, from_q, lag_step, qmul, random_scales, shift_lag_step, to_q
+from fixedq import ONE, from_q, lag_step, qdiv, qmul, random_scales, shift_lag_step, to_q
 from fluids import FLUIDS, PLACEHOLDER_MU_SCALE, REAL_FLUIDS, RE_LAMINAR, Section, channel_reynolds, fall_time
 from fluids import fluid_table, get_fluid, lip_head
 from fluids import ORIFICE_DELTA, TEMP_TABLES, lip_flow, normal_depth, superelevation, table_value, viscous_orifice
 from fluids import overland_equilibrium, overland_power_law, overland_recession, overland_rise, overland_t_e_power_law
 from fluids import poiseuille_head, poiseuille_tau, torricelli_empty_time, torricelli_head, transport_delay
+from fluids import mariotte_constant_time, mariotte_flow, siphon_drain_time, siphon_drain_time_with_inflow, siphon_flow
+from fluids import tip_period
 from network import Network, critical_gain, inverse_table, jsonable, peak_to_peak, settling_time, window
 import pixelwater as pw
 
@@ -1315,6 +1317,220 @@ def e17_viscosity(q_trickle: float = 3e-6, scales=VISC_SCALES, drain_scales=(1.0
             "summary": summary, "runs": runs, "checks": checks}
 
 
+# --- E19〜E21 溜まる → 閾値 → 一気に（鹿威し・ピタゴラスの杯・マリオットびん） --------------------
+
+TUBE = {"area": 2e-3, "v_tip": 1e-4}  # 🎍 筒（断面 20 cm²、100 mL で傾く）
+CUP = {"area": 3e-3, "h_crest": 0.08, "h_drop": 0.05, "tube": 2e-5, "cd": 0.6}  # 🍷 杯（30 cm²、頂 8 cm、出口は底より 5 cm 下）
+BOTTLE = {"area": 5e-3, "h0": 0.30, "h_air": 0.10, "orifice": 1e-5, "cd": 0.61}  # 🫗 びん（50 cm²、空気管の下端 10 cm）
+
+
+def shishi_layout(q: float, *, dt: float = 0.05, t_dump: float | None = None, dump_rate: float | None = None,
+                  fluid: str = "water") -> Network:
+    """桶 → ポンプ（細い注ぎ込み q）→ 🎍 筒 → 傾いて受け皿へ。"""
+    net = Network(dt, fluid).tank("bucket", 0.05, volume=0.5).tank("tube", TUBE["area"]).tank("basin", 0.01)
+    net.pump("bucket", "tube", rate=q)
+    net.tip("tube", "basin", v_tip=TUBE["v_tip"], t_dump=t_dump, dump_rate=dump_rate)
+    return net
+
+
+def _intervals(times: list[float]) -> list[float]:
+    return [b - a for a, b in zip(times, times[1:])]
+
+
+def e19_shishi_odoshi(q: float = 2e-6, dt: float = 0.05, cycles: float = 4.2, t_dump: float = 1.5,
+                      dump_rate: float = 1e-4, seed: int = 19) -> dict:
+    """🎍 注ぎ込み q が筒に溜まり、V_tip で傾いて一気に落ちる。周期 T = V_tip/q + t_dump（傾いている間の注ぎ込みも
+    一緒に落ちる）。落ちた量は「傾いた瞬間の体積 + 傾いている間に注がれた分」と整数で一致し、音（clack）の間隔は毎回同じ。"""
+    checks, runs, summary = [], {}, {}
+    v_tip = TUBE["v_tip"]
+
+    def run_case(tag: str, q: float, t_dump_: float | None, rate: float | None, icon: str, dt: float = dt) -> list[dict]:
+        net = shishi_layout(q, dt=dt, t_dump=t_dump_, dump_rate=rate)
+        amount = qmul(to_q(q), net.dt_q)
+        link = net.links[1]
+        t_end = cycles * tip_period(v_tip, q, link["t_dump"])
+        res = net.run(t_end, trace=["tube"])
+        tips = res["links"][1]["tips"]
+        closed = [x for x in tips if x["dumped_q"] is not None]
+        gaps = _intervals([x["t"] for x in tips])
+        expected = tip_period(v_tip, q, link["t_dump"])
+        summary[tag] = {"q": q, "t_dump": link["t_dump"], "clacks": [x["t"] for x in tips], "period": expected,
+                        "mean_gap": sum(gaps) / len(gaps) if gaps else None, "dump_steps": link["dump_steps"]}
+        runs[tag] = res["series"]
+        out = [
+            check(f"{tag}:count", icon + "🔔", len(tips) == int(cycles) and len(closed) >= int(cycles) - 1,
+                  value=len(tips), expected=int(cycles), note="t_end = cycles·T の間に鳴る回数"),
+            close(f"{tag}:period", icon + "⏱️", sum(gaps) / len(gaps), expected, 2 * dt / expected,
+                  note="clack の間隔 = V_tip/q + t_dump（2 ステップまで）"),
+            check(f"{tag}:even", icon + "🎵", max(gaps) - min(gaps) <= 1e-9, value=max(gaps) - min(gaps), tol=1e-9,
+                  note="間隔は毎回同じ（戻った直後の残りが毎回 1 ステップ分の注ぎ込みで同じ）"),
+            check(f"{tag}:threshold", icon + "📏",
+                  all(to_q(v_tip) <= x["volume_q"] < to_q(v_tip) + amount for x in tips),
+                  value=from_q(tips[0]["volume_q"]) if tips else None, expected=v_tip,
+                  note="傾いた瞬間の体積は V_tip 以上、V_tip + 1 ステップ分未満"),
+            check(f"{tag}:dump-exact", icon + "🪣",
+                  all(x["dumped_q"] == x["volume_q"] + (link["dump_steps"] - 1) * amount for x in closed),
+                  value=from_q(closed[0]["dumped_q"]) if closed else None,
+                  note="落ちた量 = 傾いた瞬間の体積 + 傾いている間の注ぎ込み（0 ulp）"),
+            check(f"{tag}:returns-empty", icon + "🔁", all(x["left_q"] == amount for x in closed),
+                  value=from_q(closed[0]["left_q"]) if closed else None, expected=from_q(amount),
+                  note="戻った筒には最後のステップの注ぎ込みだけが残る"),
+            check(f"{tag}:basin", icon + "🫙", res["volumes_q"]["basin"] == res["links"][1]["volume_moved_q"]
+                  and sum(x["dumped_q"] for x in closed) <= res["links"][1]["volume_moved_q"],
+                  value=from_q(res["volumes_q"]["basin"]), note="受け皿に入ったのは筒から落ちた分だけ（0 ulp）"),
+            conserved(f"{tag}:conserve", res),
+        ]
+        return out
+
+    checks += run_case("instant", q, None, None, "⚡")
+    checks += run_case("timed", q, t_dump, dump_rate, "🐢")
+    need = v_tip + q * t_dump
+    checks.append(check("timed:rate-enough", "🐢📐", dump_rate * t_dump >= need, value=dump_rate * t_dump, expected=need,
+                        note="傾いている間に V_tip + q·t_dump を落とし切れる流量（前提）"))
+    for item in random_scales(seed, 3, n_min=5, n_max=7):  # 1 周期を 1000 ステップに刻んで q を振る
+        q_r = item["value"]
+        checks += run_case(f"q={item['label']}", q_r, None, None, "🎲", dt=v_tip / q_r / 1000.0)[:5]
+    summary["v_tip"] = v_tip
+    return {"params": {"q": q, "dt": dt, "cycles": cycles, "t_dump": t_dump, "dump_rate": dump_rate, "tube": TUBE,
+                       "seed": seed},
+            "summary": summary, "runs": runs, "checks": checks}
+
+
+def cup_layout(q_in: float, *, dt: float = 0.02, head: float = 0.0, fluid: str = "water") -> Network:
+    """桶 → ポンプ → 🍷 杯 → サイフォン → 鉢。q_in = 0 なら注ぎ込みなし（head から排水だけ）。"""
+    net = Network(dt, fluid).tank("bucket", 0.05, volume=0.5).tank("cup", CUP["area"], head=head).tank("bowl", 0.05)
+    if q_in > 0:
+        net.pump("bucket", "cup", rate=q_in)
+    net.siphon("cup", "bowl", h_crest=CUP["h_crest"], h_drop=CUP["h_drop"], area=CUP["tube"], cd=CUP["cd"])
+    return net
+
+
+def e20_pythagorean_cup(q_in: float = 5e-6, dt: float = 0.02, dt_drain: float = 0.005, cycles: float = 3.1,
+                        seed: int = 20) -> dict:
+    """🍷 杯に注ぐと頂（h_crest）まで溜まり、サイフォンが働いて吸い口まで吸い切る。
+    注ぎ込みなしの排水時間は閉じた式、注ぎ込みありの周期は「溜まる時間 + RK4 の参照値」と比べる。"""
+    checks, runs, summary = [], {}, {}
+    A, hc, hd, a, cd = CUP["area"], CUP["h_crest"], CUP["h_drop"], CUP["tube"], CUP["cd"]
+    # 注ぎ込みなし: 頂まで入った杯が吸い切られる時間
+    net = cup_layout(0.0, dt=dt_drain, head=hc)
+    res = net.run(2.0 * siphon_drain_time(A, cd, a, hc, 0.0, hd), trace=["cup"])
+    ln = res["links"][0]
+    t_drain = siphon_drain_time(A, cd, a, hc, 0.0, hd)
+    checks += [
+        check("drain:primes-at-once", "🍷", ln["primes"] == [0.0], value=ln["primes"], note="頂まで入っていれば最初のステップで働く"),
+        close("drain:time", "⏱️", ln["breaks"][0]["t"], t_drain, 2 * dt_drain / t_drain,
+              note="吸い切る時間 = 2A/(Cd·a·√2g)·(√(h_crest + h_drop) − √h_drop)（2 ステップまで）"),
+        check("drain:empty", "🫗", res["volumes_q"]["cup"] == 0 and ln["breaks"][0]["left_q"] == 0,
+              value=res["volumes_q"]["cup"], expected=0, tol=0, note="吸い口（底）まで吸い切る: 残り 0 ulp"),
+        check("drain:breaks-once", "🔂", len(ln["breaks"]) == 1 and not ln["primed"], value=len(ln["breaks"]),
+              expected=1, note="空になったら止まり、注ぎ込みがなければ二度と働かない"),
+        conserved("drain:conserve", res),
+    ]
+    runs["drain"] = res["series"]
+    summary["drain"] = {"t_break": ln["breaks"][0]["t"], "t_closed_form": t_drain}
+    # 注ぎ込みあり: 溜まる → 吸い切る → 溜まる…
+    t_fill = A * hc / q_in
+    t_ref = siphon_drain_time_with_inflow(A, cd, a, hc, 0.0, hd, q_in)
+    period = t_fill + t_ref
+    net = cup_layout(q_in, dt=dt)
+    res = net.run(cycles * period, trace=["cup"])
+    ln = res["links"][1]
+    amount = qmul(to_q(q_in), net.dt_q)
+    gaps = _intervals(ln["primes"])
+    tr = res["trace"]["cup"]
+    after_break = [tr[int(round(b["t"] / dt)) - 1] for b in ln["breaks"]]
+    checks += [
+        check("cycle:siphon-wins", "📐", siphon_flow(cd, a, hd) > q_in, value=siphon_flow(cd, a, hd), expected=q_in,
+              note="吸い口での流量 > 注ぎ込み（吸い切れる前提）"),
+        close("cycle:fill", "🫙", ln["primes"][0], t_fill, 2 * dt / t_fill, note="最初に頂へ届く時刻 = A·h_crest/q_in"),
+        check("cycle:no-flow-before-prime", "🚫", ln["first_flow"] == ln["primes"][0], value=ln["first_flow"],
+              expected=ln["primes"][0], note="頂に届くまでサイフォンは流れない"),
+        check("cycle:rearms", "🔁", len(ln["primes"]) >= 3 and len(ln["breaks"]) >= 2, value=len(ln["primes"]),
+              expected=3, note="吸い切ったあと、また頂まで溜まると働く"),
+        close("cycle:period", "⏱️", sum(gaps) / len(gaps), period, 3 * dt / period,
+              note="周期 = A·h_crest/q_in + 注ぎ込みありの排水時間（RK4 の参照値。3 ステップまで）"),
+        check("cycle:empties", "🫗", all(b["left_q"] == 0 for b in ln["breaks"]) and
+              all(h <= from_q(amount) / A + 1e-12 for h in after_break),
+              value=max(after_break) if after_break else None, expected=from_q(amount) / A,
+              note="止まった直後の杯には、そのステップの注ぎ込みしか残らない"),
+        conserved("cycle:conserve", res),
+    ]
+    runs["cycle"] = res["series"]
+    summary["cycle"] = {"primes": ln["primes"], "breaks": [b["t"] for b in ln["breaks"]], "t_fill": t_fill,
+                        "t_drain_ref": t_ref, "period": period, "mean_gap": sum(gaps) / len(gaps)}
+    # 注ぎ込みを乱数で振る: 溜まる時間
+    for item in random_scales(seed, 3, n_min=5, n_max=6):
+        qq = item["value"]
+        net = cup_layout(qq, dt=dt)
+        res = net.run(1.2 * A * hc / qq + 5.0)
+        ln = res["links"][1]
+        tag = f"q={item['label']}"
+        checks += [
+            close(f"{tag}:fill", "🎲🫙", ln["primes"][0], A * hc / qq, 2 * dt / (A * hc / qq),
+                  note="頂へ届く時刻 = A·h_crest/q_in"),
+            conserved(f"{tag}:conserve", res),
+        ]
+    return {"params": {"q_in": q_in, "dt": dt, "dt_drain": dt_drain, "cycles": cycles, "cup": CUP, "seed": seed},
+            "summary": summary, "runs": runs, "checks": checks}
+
+
+def bottle_layout(h_air: float, *, dt: float = 0.05, h0: float | None = None, fluid: str = "water") -> Network:
+    """🫗 びん → マリオットの出口 → 受け皿。"""
+    net = Network(dt, fluid).tank("bottle", BOTTLE["area"], head=BOTTLE["h0"] if h0 is None else h0).tank("basin", 0.05)
+    net.mariotte("bottle", "basin", area=BOTTLE["orifice"], h_air=h_air, cd=BOTTLE["cd"])
+    return net
+
+
+def e21_mariotte(dt: float = 0.02, seed: int = 21) -> dict:
+    """🫗 空気管の下端が水面より下にあるあいだ、流量は Q = Cd·a·√(2g·h_air) で一定（水位が下がっても変わらない）。
+    水面が下端まで下がると、ふつうの Torricelli の排水に切り替わる。"""
+    checks, runs, summary = [], {}, {}
+    A, h0, h_air, a, cd = BOTTLE["area"], BOTTLE["h0"], BOTTLE["h_air"], BOTTLE["orifice"], BOTTLE["cd"]
+    q_c = mariotte_flow(cd, a, h_air)
+    t_c = mariotte_constant_time(h0, h_air, A, cd, a)
+    t_e = torricelli_empty_time(h_air, A, a, cd)
+    net = bottle_layout(h_air, dt=dt)
+    link = net.links[0]
+    res = net.run(t_c + 1.1 * t_e, trace=["bottle"])
+    ln = res["links"][0]
+    tr = res["trace"]["bottle"]
+    n_c = int(round(ln["constant_time"] / dt))
+    v0, out_q, area_q = to_q(h0 * A), link["const_out"], net.nodes["bottle"]["area_q"]
+    linear = all(tr[i] == from_q(qdiv(v0 - (i + 1) * out_q, area_q)) for i in range(n_c))
+    t_fall = ln["falling_from"]
+    worst = 0.0
+    for frac in (0.25, 0.5, 0.75):
+        t = t_fall + frac * t_e
+        worst = max(worst, abs(tr[int(round(t / dt)) - 1] - torricelli_head(h_air, t - t_fall, A, a, cd)))
+    checks += [
+        close("const:flow", "🫗", ln["constant_flow"], q_c, 4.0 / (q_c * dt * ONE),
+              note="一定の流量 Q = Cd·a·√(2g·h_air)（1 ステップ分の Q 整数の丸め 4 ulp まで）"),
+        check("const:linear", "📉", linear and n_c > 0, value=n_c, note="水位は毎ステップ同じ量だけ下がる（整数で厳密に直線）"),
+        close("const:time", "⏱️", ln["constant_time"], t_c, 2 * dt / t_c, note="一定のまま流れる時間 = (h0 − h_air)·A/Q"),
+        check("fall:torricelli", "🕳️", worst <= 1e-4, value=worst, tol=1e-4,
+              note="下端より下がった後は Torricelli の排水曲線（前進 Euler、1/4・1/2・3/4 で 0.1 mm まで）"),
+        close("fall:start", "🔀", t_fall, t_c, 2 * dt / t_c, note="切り替わる時刻 = 一定のまま流れる時間"),
+        conserved("conserve", res),
+    ]
+    runs["bottle"] = res["series"]
+    summary["bottle"] = {"q_const": ln["constant_flow"], "q_closed_form": q_c, "t_const": ln["constant_time"],
+                         "t_closed_form": t_c, "falling_from": t_fall, "torricelli_worst_m": worst}
+    for item in random_scales(seed, 3, n_min=2, n_max=2):  # 空気管の下端 1〜10 cm（h0 = 30 cm より下）
+        ha = item["value"]
+        qq = mariotte_flow(cd, a, ha)
+        tc = mariotte_constant_time(h0, ha, A, cd, a)
+        net = bottle_layout(ha, dt=0.1)
+        res = net.run(1.05 * tc)
+        ln = res["links"][0]
+        tag = f"h_air={item['label']}"
+        checks += [
+            close(f"{tag}:flow", "🎲🫗", ln["constant_flow"], qq, 4.0 / (qq * 0.1 * ONE), note="一定の流量 = Cd·a·√(2g·h_air)"),
+            close(f"{tag}:time", "🎲⏱️", ln["constant_time"], tc, 2 * 0.1 / tc, note="一定のまま流れる時間"),
+            conserved(f"{tag}:conserve", res),
+        ]
+    return {"params": {"dt": dt, "bottle": BOTTLE, "seed": seed}, "summary": summary, "runs": runs, "checks": checks}
+
+
 # --- E22 水時計（🏺 断面が高さで変わる器） --------------------------------------
 
 CLOCK = {"h0": 0.30, "r_top": 0.10, "orifice_d": 2.0e-3, "cd": 0.61, "marks": 12}
@@ -1726,6 +1942,9 @@ EXPERIMENTS = {
     "E16": ("bamboo-wear", "🪵", "竹の傷み（割れ目からの漏れ・節の削り残し）", e16_bamboo_wear),
     "E17": ("viscosity", "🍯", "粘度のつまみ（直接・倍率、仮置きの流体、粘い小孔）", e17_viscosity),
     "E18": ("rain-runoff", "🌧️", "斜面に降る雨（運動波の閉じた式との精度比べ・区間数での収束）", e18_rain_runoff),
+    "E19": ("shishi-odoshi", "🎍", "鹿威し（溜まる → 傾く → 一気に落ちる、周期 V_tip/q + t_dump）", e19_shishi_odoshi),
+    "E20": ("pythagorean-cup", "🍷", "ピタゴラスの杯（頂まで溜まるとサイフォンが吸い切る）", e20_pythagorean_cup),
+    "E21": ("mariotte", "🫗", "マリオットびん（空気管の下端まで流量が一定）", e21_mariotte),
     "E22": ("water-clock", "🏺", "水時計（断面が高さで変わる器: 4 次の放物面なら水位が一定の速さで下がる）", e22_water_clock),
 }
 SLUGS = {slug: eid for eid, (slug, *_rest) in EXPERIMENTS.items()}
@@ -1781,7 +2000,8 @@ def fluid_aliases() -> dict[str, str]:
 
 SCENE_ICONS = {"🏛": "moniac-rig", "🥢": "somen-flume", "🎋": "flume", "🫙": "flume-hopper", "🌊": "dam-break",
                "🕳": "moniac-drain", "🧊": "cold-water", "🪵": "bamboo-wear", "🍜": "noodle-length",
-               "🧱": "noodle-clog", "🍽": "chopsticks", "🌧": "rain-runoff", "🏺": "water-clock"}
+               "🧱": "noodle-clog", "🍽": "chopsticks", "🌧": "rain-runoff", "🎍": "shishi-odoshi",
+               "🍷": "pythagorean-cup", "🫗": "mariotte", "🏺": "water-clock"}
 
 
 def fluid_arg(text: str) -> str:
@@ -1790,7 +2010,7 @@ def fluid_arg(text: str) -> str:
 
 
 def scene_arg(text: str) -> str:
-    """draw の場面: 名前でも 🏛️ 🥢 🎋 🫙 🌊 🕳️ 🧊 🪵 🍜 🧱 🍽️ でもよい。"""
+    """draw の場面: 名前でも 🏛️ 🥢 🎋 🫙 🌊 🕳️ 🧊 🪵 🍜 🧱 🍽️ 🎍 🍷 🫗 でもよい。"""
     return SCENE_ICONS.get(_plain(text), text)
 
 
@@ -1913,6 +2133,15 @@ def rig_section(scene: str, fluid: str = "water", temp_c: float | None = None, m
     if scene == "rain-runoff":  # 🌧️ 雨が板に行き渡って（上流ほど浅い）、やむと下流から引いていく
         _net, res, _eq = rain_plane(RAIN["manning"], 20, fluid=fluid, sample_every=10, **visc)
         return res, ["plane", "basin"]
+    if scene == "shishi-odoshi":  # 🎍 筒がのこぎり歯、受け皿が階段
+        net = shishi_layout(2e-6, dt=0.05, t_dump=1.5, dump_rate=1e-4, fluid=fluid)
+        return net.run(3.2 * tip_period(TUBE["v_tip"], 2e-6, 1.5), sample_every=4), ["tube", "basin"]
+    if scene == "pythagorean-cup":  # 🍷 杯が頂まで溜まって吸い切られ、鉢が階段
+        net = cup_layout(5e-6, dt=0.02, fluid=fluid)
+        return net.run(3.0 * 71.0, sample_every=10), ["cup", "bowl"]
+    if scene == "mariotte":  # 🫗 びんは直線で下がり、空気管の下端から先は Torricelli で鈍る
+        net = bottle_layout(BOTTLE["h_air"], dt=0.02, fluid=fluid)
+        return net.run(250.0, sample_every=25), ["bottle", "basin"]
     if scene == "water-clock":
         h0, r_top, a = CLOCK["h0"], CLOCK["r_top"], math.pi * (CLOCK["orifice_d"] / 2) ** 2
         k = clock_rate(h0, r_top, CLOCK["orifice_d"], CLOCK["cd"])
@@ -1932,7 +2161,7 @@ def _from(res: dict, t0: float) -> dict:
 
 
 RIG_SCENES = ("moniac-rig", "somen-flume", "noodle-length", "noodle-clog", "chopsticks", "cold-water",
-              "bamboo-wear", "rain-runoff", "water-clock")
+              "bamboo-wear", "rain-runoff", "shishi-odoshi", "pythagorean-cup", "mariotte", "water-clock")
 
 
 def _visc(args) -> dict:
@@ -1998,7 +2227,7 @@ def build_parser() -> argparse.ArgumentParser:
                          allow_abbrev=False)
     scenes = RIG_SCENES + pw.SECTION_CASES + pw.SCENES
     drw.add_argument("scene", type=scene_arg, choices=scenes,
-                     help="場面（名前か 🏛️ 🥢 🍜 🧱 🍽️ 🧊 🪵 🌧️ 🎋 🫙 🌊 🕳️）")
+                     help="場面（名前か 🏛️ 🥢 🍜 🧱 🍽️ 🧊 🪵 🌧️ 🎍 🍷 🫗 🏺 🎋 🫙 🌊 🕳️）")
     drw.add_argument("block", nargs="?", type=block_arg,
                      help="流体のブロック・アイコン（🟦 🟨 🟧 🟩 🟪 / 💧 🍶 🧴 🟢 ☠️）か、塗りたい好きな絵文字")
     drw.add_argument("--view", choices=("frames", "frame", "files"), default="frames",
