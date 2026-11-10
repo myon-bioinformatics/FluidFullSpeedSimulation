@@ -510,6 +510,134 @@ def mariotte_constant_time(h0: float, h_air: float, tank_area: float, cd: float,
     return (h0 - h_air) * tank_area / mariotte_flow(cd, orifice_area, h_air, g)
 
 
+# --- 🍷 エタノール・水の混合物（蒸留と熟成） -----------------------------------------
+
+M_ETHANOL, M_WATER = 46.068e-3, 18.015e-3  # モル質量 [kg/mol]
+LATENT_ETHANOL, LATENT_WATER = 38.56e3, 40.66e3  # 沸点での蒸発熱 [J/mol]
+RHO_WATER_20 = 998.203  # 20 °C の水 [kg/m³]（密度表は 20 °C の水に対する比）
+
+# 101.3 kPa のエタノール（x: 液、y: 蒸気のモル分率）と沸点 [°C]。Perry's Chemical Engineers' Handbook Table 13-1
+ETHANOL_WATER_VLE = (
+    (0.0000, 0.0000, 100.0), (0.0190, 0.1700, 95.5), (0.0721, 0.3891, 89.0), (0.0966, 0.4375, 86.7),
+    (0.1238, 0.4704, 85.3), (0.1661, 0.5089, 84.1), (0.2337, 0.5445, 82.7), (0.2608, 0.5580, 82.3),
+    (0.3273, 0.5826, 81.5), (0.3965, 0.6122, 80.7), (0.5079, 0.6564, 79.8), (0.5198, 0.6599, 79.7),
+    (0.5732, 0.6841, 79.3), (0.6763, 0.7385, 78.74), (0.7472, 0.7815, 78.41), (0.8943, 0.8943, 78.15),
+    (1.0000, 1.0000, 78.3),
+)
+AZEOTROPE_X = 0.8943  # 共沸点（y = x、78.15 °C）
+
+# 20 °C の水溶液の密度（20 °C の水に対する比）。質量% 0〜100 の 1 % 刻み。Wikipedia: Ethanol (data page)
+_DENSITY_REL_20 = (
+    1.00000, 0.99813, 0.99629, 0.99451, 0.99279, 0.99113, 0.98955, 0.98802, 0.98653, 0.98505,
+    0.98361, 0.98221, 0.98084, 0.97948, 0.97816, 0.97687, 0.97560, 0.97431, 0.97301, 0.97169,
+    0.97036, 0.96901, 0.96763, 0.96624, 0.96483, 0.96339, 0.96190, 0.96037, 0.95880, 0.95717,
+    0.95551, 0.95381, 0.95207, 0.95028, 0.94847, 0.94662, 0.94473, 0.94281, 0.94086, 0.93886,
+    0.93684, 0.93479, 0.93272, 0.93062, 0.92849, 0.92636, 0.92421, 0.92204, 0.91986, 0.91766,
+    0.91546, 0.91322, 0.91097, 0.90872, 0.90645, 0.90418, 0.90191, 0.89962, 0.89733, 0.89502,
+    0.89271, 0.89040, 0.88807, 0.88574, 0.88339, 0.88104, 0.87869, 0.87632, 0.87396, 0.87158,
+    0.86920, 0.86680, 0.86440, 0.86200, 0.85958, 0.85716, 0.85473, 0.85230, 0.84985, 0.84740,
+    0.84494, 0.84245, 0.83997, 0.83747, 0.83496, 0.83242, 0.82987, 0.82729, 0.82469, 0.82207,
+    0.81942, 0.81674, 0.81401, 0.81127, 0.80848, 0.80567, 0.80280, 0.79988, 0.79688, 0.79383,
+    0.79074,
+)
+# 同じデータページの「質量% → 体積%」の実測の行（ABV の換算の答え合わせ用）
+ABV_CHECK_ROWS = ((4.0, 5.00), (10.0, 12.40), (18.0, 22.10), (25.0, 30.40), (30.0, 36.20), (39.0, 46.3),
+                  (45.31, 53.00), (55.16, 63.0), (71.9, 78.3), (91.0, 94.00))
+
+
+def vle_y(x: float) -> float:
+    """液のエタノールのモル分率 x と釣り合う蒸気の y（表を直線でつなぐ）。"""
+    return _vle_column(x, 1)
+
+
+def bubble_t(x: float) -> float:
+    """沸点 [°C]（表を直線でつなぐ）。"""
+    return _vle_column(x, 2)
+
+
+def _vle_column(x: float, col: int) -> float:
+    rows = ETHANOL_WATER_VLE
+    if x <= 0.0:
+        return rows[0][col]
+    if x >= 1.0:
+        return rows[-1][col]
+    for a, b in zip(rows, rows[1:]):
+        if x <= b[0]:
+            w = (x - a[0]) / (b[0] - a[0])
+            return a[col] + w * (b[col] - a[col])
+    return rows[-1][col]  # pragma: no cover
+
+
+def density_20(mass_fraction: float) -> float:
+    """20 °C の水溶液の密度 [kg/m³]（質量分率 0..1、1 % 刻みの表を直線でつなぐ）。"""
+    w = min(max(mass_fraction, 0.0), 1.0) * 100.0
+    i = min(int(w), 99)
+    rel = _DENSITY_REL_20[i] + (w - i) * (_DENSITY_REL_20[i + 1] - _DENSITY_REL_20[i])
+    return rel * RHO_WATER_20
+
+
+def mix_mass(n_ethanol: float, n_water: float) -> float:
+    return n_ethanol * M_ETHANOL + n_water * M_WATER
+
+
+def mix_volume(n_ethanol: float, n_water: float) -> float:
+    """混ぜた液の体積 [m³]（20 °C）。体積は足し算にならない（混ぜると縮む）ので密度表から。"""
+    m = mix_mass(n_ethanol, n_water)
+    return 0.0 if m <= 0 else m / density_20(n_ethanol * M_ETHANOL / m)
+
+
+def abv(n_ethanol: float, n_water: float) -> float:
+    """アルコール度数（20 °C の体積%）= 純エタノールの体積 / 液の体積 × 100。"""
+    v = mix_volume(n_ethanol, n_water)
+    return 0.0 if v <= 0 else 100.0 * (n_ethanol * M_ETHANOL / density_20(1.0)) / v
+
+
+def mole_fraction(n_ethanol: float, n_water: float) -> float:
+    total = n_ethanol + n_water
+    return 0.0 if total <= 0 else n_ethanol / total
+
+
+def moles_for_abv(abv_percent: float, volume_m3: float) -> tuple[float, float]:
+    """度数と体積 [m³] から (エタノール, 水) のモル数。質量分率を二分法で探す。"""
+    if not 0.0 <= abv_percent <= 100.0 or volume_m3 < 0:
+        raise ValueError("abv must be within 0..100 and volume >= 0")
+    lo, hi = 0.0, 1.0
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        if abv(mid / M_ETHANOL, (1 - mid) / M_WATER) < abv_percent:
+            lo = mid
+        else:
+            hi = mid
+    w = 0.5 * (lo + hi)
+    mass = volume_m3 * density_20(w)
+    return mass * w / M_ETHANOL, mass * (1 - w) / M_WATER
+
+
+def latent_heat(y: float) -> float:
+    """蒸気 1 mol をつくる熱 [J/mol]（モル分率で混ぜる）。"""
+    return y * LATENT_ETHANOL + (1.0 - y) * LATENT_WATER
+
+
+def rayleigh_log(x_end: float, x0: float) -> float:
+    """Rayleigh 式 ln(W0/W) = ∫_{x_end}^{x0} dx / (y − x)。y(x) は表の直線なので区間ごとに厳密に積分する。"""
+    if x_end > x0:
+        raise ValueError("x_end must be <= x0")
+    rows = ETHANOL_WATER_VLE
+    total = 0.0
+    for a, b in zip(rows, rows[1:]):
+        lo, hi = max(a[0], x_end), min(b[0], x0)
+        if hi <= lo:
+            continue
+        slope = (b[1] - a[1]) / (b[0] - a[0])  # y = a_y + slope (x − a_x)
+        c0 = a[1] - slope * a[0]  # y − x = c0 + (slope − 1) x
+        k = slope - 1.0
+        f = lambda x: c0 + k * x
+        if f(lo) <= 0 or f(hi) <= 0:
+            raise ValueError("y − x must stay positive (below the azeotrope)")
+        total += (hi - lo) / f(lo) if abs(k) < 1e-15 else math.log(f(hi) / f(lo)) / k
+    return total
+
+
 __all__ = [
     "FLUIDS", "Fluid", "G", "REAL_FLUIDS", "RE_LAMINAR", "TEMP_TABLES", "fluid_table", "get_fluid", "table_value",
     "temperature_range",
@@ -522,4 +650,7 @@ __all__ = [
     "plan_width", "wave_celerity",
     "mariotte_constant_time", "mariotte_flow", "siphon_drain_time", "siphon_drain_time_with_inflow", "siphon_flow",
     "tip_period",
+    "ABV_CHECK_ROWS", "AZEOTROPE_X", "ETHANOL_WATER_VLE", "LATENT_ETHANOL", "LATENT_WATER", "M_ETHANOL", "M_WATER",
+    "abv", "bubble_t", "density_20", "latent_heat", "mix_mass", "mix_volume", "mole_fraction", "moles_for_abv",
+    "rayleigh_log", "vle_y",
 ]
