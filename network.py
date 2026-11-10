@@ -28,6 +28,7 @@ MONIAC は「水が流れ落ちる様子」の手本。部品は物理のまま�
 
 from __future__ import annotations
 
+import bisect
 import math
 import random
 from typing import Callable
@@ -57,8 +58,12 @@ def register_law(kind: str):
 
 @register_law("pipe")
 def _law_pipe(net, ln, n):
-    ln["max_head"] = max(ln["max_head"], net.head_q(ln["src"]))
-    return qmul(net.nodes[ln["src"]]["v"], ln["k"])
+    h = net.head_q(ln["src"])
+    ln["max_head"] = max(ln["max_head"], h)
+    nd = net.nodes[ln["src"]]
+    if nd["profile"] is None:
+        return qmul(nd["v"], ln["k"])  # 断面一定: 厳密離散化
+    return qmul(qmul(ln["c_q"], h), net.dt_q)  # 断面が変わる器: Q = c·h を前進 Euler で
 
 
 ORIFICE_RE_STEADY = 1.0e4  # これより低い Re では鋭いふちの小孔の Cd が Re で大きく変わる（Sci. Rep. 2023 ほか）
@@ -225,11 +230,55 @@ class Network:
         self.nodes[name] = data
         return data
 
-    def tank(self, name: str, area: float, head: float = 0.0, volume: float | None = None) -> "Network":
-        if area <= 0:
-            raise ValueError("area must be positive")
-        v = head * area if volume is None else volume
-        self._node(name, kind="tank", area=area, area_q=to_q(area), v=to_q(v))
+    def tank(self, name: str, area: float | None = None, head: float = 0.0, volume: float | None = None,
+             profile=None, samples: int = 512) -> "Network":
+        """水槽。area 一定か、profile で高さにより断面が変わる器（🏺 水時計のような形）。
+
+        profile は ``[[h, A(h)], ...]``（間は直線）か、Python の関数 ``A(h)``（spec からは表だけ）。
+        0 から h_max まで samples 個に刻んで体積 V(h) を台形で積み上げ、V → h の表（Q 整数の Cam）で
+        水位を引く。h_max を超えた分は一番上の断面で伸ばす。表の刻みの粗さは結果の profile_samples で分かる。
+        """
+        if profile is None:
+            if area is None or area <= 0:
+                raise ValueError("area must be positive")
+            v = head * area if volume is None else volume
+            self._node(name, kind="tank", area=area, area_q=to_q(area), v=to_q(v), profile=None)
+            return self
+        if samples < 2:
+            raise ValueError("samples must be >= 2")
+        if callable(profile):
+            if area is None or area <= 0:
+                raise ValueError("a callable profile needs area=h_max (the height the table covers)")
+            h_max, area_at = float(area), profile
+            knots = []
+        else:
+            pts = sorted((float(h), float(a)) for h, a in profile)
+            if len(pts) < 2 or pts[0][0] != 0.0 or any(a <= 0 for _h, a in pts):
+                raise ValueError("profile table must start at h = 0 and have positive areas")
+            h_max = pts[-1][0]
+            knots = [h for h, _a in pts]
+
+            def area_at(h: float, _pts=pts) -> float:
+                if h <= _pts[0][0]:
+                    return _pts[0][1]
+                if h >= _pts[-1][0]:
+                    return _pts[-1][1]
+                i = bisect.bisect_left([x for x, _ in _pts], h)
+                (x0, a0), (x1, a1) = _pts[i - 1], _pts[i]
+                return a0 + (a1 - a0) * (h - x0) / (x1 - x0)
+        hs = sorted(set(knots) | {h_max * i / (samples - 1) for i in range(samples)})
+        table, v_acc = [(0.0, 0.0)], 0.0
+        for h0, h1 in zip(hs, hs[1:]):
+            v_acc += 0.5 * (area_at(h0) + area_at(h1)) * (h1 - h0)
+            table.append((v_acc, h1))
+        a_top = area_at(h_max)
+        if head and volume is None:
+            if head > h_max:
+                volume = v_acc + (head - h_max) * a_top
+            else:
+                volume = from_q(Cam([(h, v) for v, h in table])(to_q(head)))
+        self._node(name, kind="tank", area=None, area_q=None, v=to_q(volume or 0.0), profile="table",
+                   vh=Cam(table), h_max=h_max, v_max=v_acc, a_top=a_top, area_at=area_at, samples=len(hs))
         return self
 
     def channel(self, prefix: str, dst: str, *, length: float, cells: int, slope: float, section,
@@ -368,9 +417,10 @@ class Network:
         if self.nodes[src]["kind"] != "tank":
             raise ValueError("pipe needs a tank as src")
         c = math.pi * radius ** 4 * self.g / (8.0 * self.fluid.nu * length)  # [m²/s]
-        tau = self.nodes[src]["area"] / c
-        return self._link("pipe", src, dst, delay, radius=radius, length=length,
-                          conductance=c, tau=tau, k=lag_gain(self.dt, tau))
+        area = self.nodes[src]["area"]
+        tau = None if area is None else area / c
+        return self._link("pipe", src, dst, delay, radius=radius, length=length, conductance=c, c_q=to_q(c),
+                          tau=tau, k=None if tau is None else lag_gain(self.dt, tau))
 
     def orifice(self, src: str, dst: str, *, area: float, cd: float = 0.61, delay: float = 0.0,
                 viscous: bool = False, delta: float | None = None) -> dict:
@@ -411,8 +461,8 @@ class Network:
         """弁つきの出口（MONIAC の弁）。全開の時定数 tau、開き具合は opening（0..1）か、
         sensor の水位を cam（[[水位, 開き具合], ...]）で読み替えたもの。stages 段の遅れ（各 link_tau）は
         浮き → ワイヤー → 弁のつながりの遅れ。"""
-        if self.nodes[src]["kind"] != "tank":
-            raise ValueError("valve needs a tank as src")
+        if self.nodes[src]["kind"] != "tank" or self.nodes[src]["profile"] is not None:
+            raise ValueError("valve needs a constant-area tank as src")
         if not 0.0 <= opening <= 1.0:
             raise ValueError("opening must be within 0..1")
         if (cam is None) != (sensor is None):
@@ -491,7 +541,14 @@ class Network:
     def head_q(self, name: str) -> int:
         nd = self.nodes[name]
         if nd["kind"] == "tank":
-            return qdiv(nd["v"], nd["area_q"])
+            if nd["profile"] is None:
+                return qdiv(nd["v"], nd["area_q"])
+            v = nd["v"]
+            if v <= 0:
+                return 0
+            if from_q(v) > nd["v_max"]:  # 表の上は一番上の断面で伸ばす
+                return to_q(nd["h_max"] + (from_q(v) - nd["v_max"]) / nd["a_top"])
+            return nd["vh"](v)
         return to_q(nd["section"].depth(from_q(nd["v"]) / nd["length"]))
 
     def head(self, name: str) -> float:
@@ -748,6 +805,8 @@ class Network:
             "fluid": self.fluid.key, "temp_c": self.fluid.temp_c, "dt": self.dt, "steps": steps, "series": series, "trace": traces,
             "final": series[-1] if series else {}, "total_q": total0, "conservation_error_q": worst,
             "volumes_q": {k: nd["v"] for k, nd in self.nodes.items()},
+            "profile_samples": {k: nd["samples"] for k, nd in self.nodes.items()
+                                if nd["kind"] == "tank" and nd["profile"] is not None},
             "links": [self._link_summary(i, ln) for i, ln in enumerate(self.links)],
             "channels": {p: self._channel_summary(ch) for p, ch in self.channels.items()},
             "tracers": [{"name": tr["name"], "state": tr["state"], "arrival": tr["arrival"], "path": tr["path"],

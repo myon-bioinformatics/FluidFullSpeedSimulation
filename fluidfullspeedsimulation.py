@@ -23,7 +23,7 @@ import random
 import sys
 from pathlib import Path
 
-from fixedq import ONE, from_q, lag_step, qmul, shift_lag_step, to_q
+from fixedq import ONE, from_q, lag_step, qmul, random_scales, shift_lag_step, to_q
 from fluids import FLUIDS, PLACEHOLDER_MU_SCALE, REAL_FLUIDS, RE_LAMINAR, Section, channel_reynolds, fall_time
 from fluids import fluid_table, get_fluid, lip_head
 from fluids import ORIFICE_DELTA, TEMP_TABLES, lip_flow, normal_depth, superelevation, table_value, viscous_orifice
@@ -1314,6 +1314,187 @@ def e17_viscosity(q_trickle: float = 3e-6, scales=VISC_SCALES, drain_scales=(1.0
             "summary": summary, "runs": runs, "checks": checks}
 
 
+# --- E22 水時計（🏺 断面が高さで変わる器） --------------------------------------
+
+CLOCK = {"h0": 0.30, "r_top": 0.10, "orifice_d": 2.0e-3, "cd": 0.61, "marks": 12}
+
+
+def clepsydra_area(h0: float, r_top: float):
+    """流出型の水時計の断面 A(h) = π r_top² √(h/h0)（半径 ∝ h^(1/4)、4 次の放物面）。
+    Torricelli の流出 Cd·a·√(2gh) と釣り合って dh/dt が一定になる形。"""
+    return lambda h: math.pi * r_top * r_top * math.sqrt(max(h, 0.0) / h0)
+
+
+def cone_area(h0: float, r_top: float, r_bottom: float):
+    """切頭円すい（カルナックの水時計のおおよその形）。半径が高さに比例するので A(h) ∝ r(h)²。"""
+    return lambda h: math.pi * (r_bottom + (r_top - r_bottom) * max(h, 0.0) / h0) ** 2
+
+
+def clock_rate(h0: float, r_top: float, orifice_d: float, cd: float, g: float = 9.80665) -> float:
+    """水位の下がる速さ k = Cd·a·√(2g h0) / (π r_top²) [m/s]。空になる時間 T = h0 / k。"""
+    a = math.pi * (orifice_d / 2) ** 2
+    return cd * a * math.sqrt(2.0 * g * h0) / (math.pi * r_top * r_top)
+
+
+def water_clock(shape: str = "clepsydra", *, dt: float | None = None, samples: int = 512, viscous: bool = False,
+                fluid: str = "water", **over) -> Network:
+    """水時計 1 つ（clock）と受け皿（sea）。shape: clepsydra（4 次の放物面）/ cylinder（同じ上の半径の筒）/ cone。
+    dt を省くと空になる時間の 1/8000。"""
+    c = {**CLOCK, **over}
+    h0, r_top, a = c["h0"], c["r_top"], math.pi * (c["orifice_d"] / 2) ** 2
+    k = clock_rate(h0, r_top, c["orifice_d"], c["cd"])
+    net = Network(dt or (h0 / k) / 8000.0, fluid).tank("sea", 1.0)
+    if shape == "clepsydra":
+        net.tank("clock", h0, head=h0, profile=clepsydra_area(h0, r_top), samples=samples)
+    elif shape == "cylinder":
+        net.tank("clock", math.pi * r_top * r_top, head=h0)
+    elif shape == "cone":
+        net.tank("clock", h0, head=h0, profile=cone_area(h0, r_top, c.get("r_bottom", 0.5 * r_top)), samples=samples)
+    else:
+        raise ValueError("shape must be clepsydra, cylinder or cone")
+    net.orifice("clock", "sea", area=a, cd=c["cd"], viscous=viscous)
+    return net
+
+
+def _marks(trace: list[float], dt: float, t_end: float, n: int, h0: float) -> list[float]:
+    """時刻 T·j/n（j = 0..n）の水位（trace[i] は (i+1)·dt の値。間は線形補間、0 は h0）。"""
+    pts = [h0] + list(trace)
+    out = []
+    for j in range(n + 1):
+        x = (t_end * j / n) / dt
+        i = min(int(x), len(pts) - 2)
+        out.append(pts[i] + (x - i) * (pts[i + 1] - pts[i]))
+    return out
+
+
+def _linear_dev(trace: list[float], dt: float, h0: float, k: float, until: float) -> float:
+    """h0 − k·t からの最大のずれ / h0（t ≤ until）。"""
+    n = int(until / dt)
+    return max(abs(h - (h0 - k * (i + 1) * dt)) for i, h in enumerate(trace[:n])) / h0
+
+
+def e22_water_clock(dt_list=(1.0, 0.25, 0.05), samples_list=(64, 512, 4096), seed: int = 22) -> dict:
+    """🏺 流出型の水時計。半径 ∝ h^(1/4) の器なら水位が一定の速さで下がり（目盛りが等間隔）、筒だと
+    目盛りが詰まっていく。断面が高さで変わる水槽（profile）の精度を、閉じた式 h = h0 − k·t で測る。"""
+    checks, runs, summary = [], {}, {}
+    h0, r_top, n_marks = CLOCK["h0"], CLOCK["r_top"], CLOCK["marks"]
+    k = clock_rate(h0, r_top, CLOCK["orifice_d"], CLOCK["cd"])
+    t_empty = h0 / k
+    a = math.pi * (CLOCK["orifice_d"] / 2) ** 2
+    area_cyl = math.pi * r_top * r_top
+
+    # 🏺 4 次の放物面: 線形に下がる・目盛りが等間隔・空になる時刻
+    net = water_clock("clepsydra")
+    res = net.run(t_empty * 1.02, trace=["clock"], sample_every=1)
+    tr = res["trace"]["clock"]
+    dev = _linear_dev(tr, net.dt, h0, k, 0.9 * t_empty)
+    marks = _marks(tr, net.dt, t_empty, n_marks, h0)
+    gaps = [a_ - b_ for a_, b_ in zip(marks, marks[1:])]
+    t_dry = next(((i + 1) * net.dt for i, h in enumerate(tr) if h <= 0.0), None)
+    checks += [
+        check("clepsydra:linear", "📏", dev <= 2e-4, value=dev, expected=0.0, tol=2e-4,
+              note="h = h0 − k·t からの最大のずれ / h0（t ≤ 0.9 T。前進 Euler の分だけ残る）"),
+        check("clepsydra:marks-even", "🕰️", max(gaps) - min(gaps) <= 2e-3 * h0 / n_marks,
+              value=[round(g_ / (h0 / n_marks), 5) for g_ in gaps], expected=1.0,
+              note=f"{n_marks} 等分の時刻の水位の間隔が等しい（h0/{n_marks} の 0.2 % まで）"),
+        check("clepsydra:empty-time", "⏱️", t_dry is not None and rel_err(t_dry, t_empty) <= 2e-3, value=t_dry,
+              expected=t_empty, tol=2e-3, note="空になる時刻 T = h0/k = π r² h0 / (Cd a √(2g h0))"),
+        conserved("clepsydra:conserve", res),
+    ]
+    runs["clepsydra"] = res["series"]
+    summary["clepsydra"] = {"k": k, "t_empty": t_empty, "t_dry": t_dry, "linear_dev": dev, "marks": marks,
+                            "dt": net.dt, "samples": res["profile_samples"]["clock"]}
+
+    # 🥫 同じ上の半径の筒: Torricelli で h = (√h0 − c t)²。目盛りの間隔は 23:21:…:1 に詰まる
+    c_cyl = CLOCK["cd"] * a * math.sqrt(2.0 * 9.80665) / (2.0 * area_cyl)
+    t_cyl = math.sqrt(h0) / c_cyl  # 筒が空になる時間（= 2 T。筒は 🏺 の 1.5 倍の水を持ち、下では遅い）
+    net = water_clock("cylinder")
+    res = net.run(t_cyl * 1.02, trace=["clock"], sample_every=1)
+    tr = res["trace"]["clock"]
+    marks_c = _marks(tr, net.dt, t_cyl, n_marks, h0)
+    gaps_c = [a_ - b_ for a_, b_ in zip(marks_c, marks_c[1:])]
+    ratio_exact = (2 * n_marks - 1)  # 最初の間隔 / 最後の間隔 = (2n−1)/1
+    dev_c = _linear_dev(tr, net.dt, h0, h0 / t_cyl, 0.9 * t_cyl)
+    checks += [
+        close("cylinder:gap-ratio", "🥫", gaps_c[0] / gaps_c[-1], ratio_exact, 2e-2,
+              note="筒の目盛り: 最初の間隔 / 最後の間隔 = (2n−1)/1（h ∝ (1 − t/T)²）"),
+        check("cylinder:gaps-shrink", "📉", all(x > y for x, y in zip(gaps_c, gaps_c[1:])), value=round(gaps_c[-1] / gaps_c[0], 4),
+              note="筒は時間が進むほど目盛りが詰まる（上ほど速く下がる）"),
+        check("cylinder:not-linear", "〽️", dev_c > 50 * dev, value=dev_c, expected=dev, note="筒は直線から大きく外れる（🏺 の 50 倍以上）"),
+        conserved("cylinder:conserve", res),
+    ]
+    runs["cylinder"] = res["series"]
+    summary["cylinder"] = {"t_empty": t_cyl, "gap_ratio": gaps_c[0] / gaps_c[-1], "gap_ratio_exact": ratio_exact,
+                           "linear_dev": dev_c, "marks": marks_c}
+
+    # 🔺 切頭円すい（古代の形）: ほぼ線形だが、4 次の放物面ほどではない
+    net = water_clock("cone")
+    res = net.run(t_empty * 1.5, trace=["clock"], sample_every=1)
+    tr = res["trace"]["clock"]
+    t_cone = next(((i + 1) * net.dt for i, h in enumerate(tr) if h <= 0.0), None)
+    dev_cone = _linear_dev(tr, net.dt, h0, h0 / t_cone, 0.9 * t_cone) if t_cone else math.inf
+    checks += [
+        check("cone:between", "🔺", dev < dev_cone < dev_c, value=dev_cone, note="円すいの直線からのずれは 🏺 と 🥫 の間"),
+        conserved("cone:conserve", res),
+    ]
+    runs["cone"] = res["series"]
+    summary["cone"] = {"t_empty": t_cone, "linear_dev": dev_cone}
+
+    # 📐 収束: dt を小さくするとずれが 1 次で減る。表の刻み（samples）はそれより小さい
+    conv = {}
+    for dt in dt_list:
+        net = water_clock("clepsydra", dt=dt)
+        conv[dt] = _linear_dev(net.run(0.9 * t_empty, trace=["clock"], sample_every=1)["trace"]["clock"], dt, h0, k, 0.9 * t_empty)
+    devs = [conv[dt] for dt in dt_list]
+    orders = [math.log(devs[i] / devs[i + 1]) / math.log(dt_list[i] / dt_list[i + 1]) for i in range(len(dt_list) - 1)]
+    tbl = {}
+    for n_s in samples_list:
+        net = water_clock("clepsydra", dt=0.25, samples=n_s)
+        tbl[n_s] = _linear_dev(net.run(0.9 * t_empty, trace=["clock"], sample_every=1)["trace"]["clock"], 0.25, h0, k, 0.9 * t_empty)
+    checks += [
+        check("converge:dt", "📐", all(x > y for x, y in zip(devs, devs[1:])) and all(0.7 <= o <= 1.3 for o in orders),
+              value=[round(o, 3) for o in orders], expected=1.0, note="dt を 1/4 にするとずれも約 1/4（前進 Euler の 1 次）"),
+        check("converge:samples", "🧮", tbl[samples_list[-1]] <= tbl[samples_list[0]] and tbl[samples_list[-1]] < 2 * conv[0.25],
+              value={str(n_s): v for n_s, v in tbl.items()}, note="表の刻みを細かくしても dt の分より小さく、効きは頭打ち"),
+    ]
+    summary["convergence"] = {"dt": {str(dt): conv[dt] for dt in dt_list}, "order": orders,
+                              "samples": {str(n_s): v for n_s, v in tbl.items()}}
+
+    # 🎲 穴の大きさを A×10^-N で振っても線形（dt は T/8000 に合わせる）
+    sweep = {}
+    for item in random_scales(seed, 3, n_min=3, n_max=3, digits=2):
+        d = item["value"]
+        kk = clock_rate(h0, r_top, d, CLOCK["cd"])
+        net = water_clock("clepsydra", orifice_d=d)
+        dv = _linear_dev(net.run(0.9 * h0 / kk, trace=["clock"], sample_every=1)["trace"]["clock"], net.dt, h0, kk, 0.9 * h0 / kk)
+        sweep[item["label"]] = {"t_empty": h0 / kk, "linear_dev": dv}
+        checks.append(check(f"sweep:{item['label']}", "🎲", dv <= 2e-4, value=dv, tol=2e-4,
+                            note=f"穴の直径 {item['label']} m でも直線（T = {h0 / kk:.0f} s）"))
+    summary["sweep"] = sweep
+
+    # 🧪 出口が鋭い穴でなく細い管（層流、Q ∝ h）なら、4 次の放物面でも一定には下がらない（Høyrup 1998 の注意）。
+    #    A(h)·dh/dt = −c·h → h = (√h0 − κt/2)²: 筒 + 穴と同じ形で、目盛りの比は (2n−1):1 に戻る
+    r_tube, l_tube = 0.4e-3, 0.05
+    net = Network(4.0).tank("sea", 1.0).tank("clock", h0, head=h0, profile=clepsydra_area(h0, r_top))
+    pipe = net.pipe("clock", "sea", radius=r_tube, length=l_tube)
+    kappa = pipe["conductance"] * math.sqrt(h0) / area_cyl
+    t_tube = 2.0 * math.sqrt(h0) / kappa
+    res = net.run(t_tube * 1.02, trace=["clock"], sample_every=1)
+    marks_t = _marks(res["trace"]["clock"], net.dt, t_tube, n_marks, h0)
+    gaps_t = [a_ - b_ for a_, b_ in zip(marks_t, marks_t[1:])]
+    checks += [
+        close("tube:gap-ratio", "🧪", gaps_t[0] / gaps_t[-1], ratio_exact, 3e-2,
+              note="細い管の出口（Q ∝ h）だと 🏺 でも目盛りが (2n−1):1 に詰まる（筒 + 穴と同じ形）"),
+        check("tube:laminar", "〰️", res["links"][0]["laminar"], value=res["links"][0]["reynolds_max"], expected=RE_LAMINAR,
+              note="管の中は層流（Poiseuille の前提）"),
+        conserved("tube:conserve", res),
+    ]
+    runs["tube"] = res["series"]
+    summary["tube"] = {"t_empty": t_tube, "gap_ratio": gaps_t[0] / gaps_t[-1], "reynolds_max": res["links"][0]["reynolds_max"]}
+    return {"params": {**CLOCK, "dt_list": list(dt_list), "samples_list": list(samples_list), "seed": seed},
+            "summary": summary, "runs": runs, "checks": checks}
+
+
 # --- 登録簿 ---------------------------------------------------------------
 
 EXPERIMENTS = {
@@ -1334,6 +1515,7 @@ EXPERIMENTS = {
     "E15": ("cold-water", "🧊", "冷たい水（水温で粘度・密度が変わる）", e15_cold_water),
     "E16": ("bamboo-wear", "🪵", "竹の傷み（割れ目からの漏れ・節の削り残し）", e16_bamboo_wear),
     "E17": ("viscosity", "🍯", "粘度のつまみ（直接・倍率、仮置きの流体、粘い小孔）", e17_viscosity),
+    "E22": ("water-clock", "🏺", "水時計（断面が高さで変わる器: 4 次の放物面なら水位が一定の速さで下がる）", e22_water_clock),
 }
 SLUGS = {slug: eid for eid, (slug, *_rest) in EXPERIMENTS.items()}
 
@@ -1388,7 +1570,7 @@ def fluid_aliases() -> dict[str, str]:
 
 SCENE_ICONS = {"🏛": "moniac-rig", "🥢": "somen-flume", "🎋": "flume", "🫙": "flume-hopper", "🌊": "dam-break",
                "🕳": "moniac-drain", "🧊": "cold-water", "🪵": "bamboo-wear", "🍜": "noodle-length",
-               "🧱": "noodle-clog", "🍽": "chopsticks"}
+               "🧱": "noodle-clog", "🍽": "chopsticks", "🏺": "water-clock"}
 
 
 def fluid_arg(text: str) -> str:
@@ -1517,6 +1699,16 @@ def rig_section(scene: str, fluid: str = "water", temp_c: float | None = None, m
         for i, name in enumerate(("udon", "somen")):
             net.tracer(name, "take/0:0", release=40.0 + i, stop="basin", size=NOODLES[name])
         return net.run(100.0, sample_every=10), ["take/0", "take/0b", "basin", "floor"]
+    if scene == "water-clock":
+        h0, r_top, a = CLOCK["h0"], CLOCK["r_top"], math.pi * (CLOCK["orifice_d"] / 2) ** 2
+        k = clock_rate(h0, r_top, CLOCK["orifice_d"], CLOCK["cd"])
+        net = Network((h0 / k) / 400.0, fluid, **visc).tank("sea", 1.0)
+        net.tank("clepsydra", h0, head=h0, profile=clepsydra_area(h0, r_top))
+        net.tank("cylinder", math.pi * r_top * r_top, head=h0)
+        net.tank("cone", h0, head=h0, profile=cone_area(h0, r_top, 0.5 * r_top))
+        for name in ("clepsydra", "cylinder", "cone"):
+            net.orifice(name, "sea", area=a, cd=CLOCK["cd"])
+        return net.run(h0 / k, sample_every=1), ["clepsydra", "cylinder", "cone"]
     raise KeyError(f"unknown rig scene {scene!r}")
 
 
@@ -1526,7 +1718,7 @@ def _from(res: dict, t0: float) -> dict:
 
 
 RIG_SCENES = ("moniac-rig", "somen-flume", "noodle-length", "noodle-clog", "chopsticks", "cold-water",
-              "bamboo-wear")
+              "bamboo-wear", "water-clock")
 
 
 def _visc(args) -> dict:
