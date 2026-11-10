@@ -21,6 +21,7 @@ uv run python fluidfullspeedsimulation.py draw 🥢 🟥                        
 uv run python fluidfullspeedsimulation.py draw 🧊 --temp-c 5                  # 🧊 水温を変えて細い流れ（場面: 🏛️ 🥢 🧊 🪵 🎋 🫙 🌊 🕳️）
 uv run python fluidfullspeedsimulation.py draw 🥢 --viscosity-scale 8         # 🍯 粘度を 8 倍（--mu 8 なら 8 mPa·s を直接）
 uv run python fluidfullspeedsimulation.py draw 🏺 --frames 4                   # 🏺 水時計（4 次の放物面 / 筒 / 円すい）
+uv run python fluidfullspeedsimulation.py draw ⚗️ --frames 4                   # ⚗️ 釜と前留・ハート・セコンド・後留
 uv run python fluidfullspeedsimulation.py run 🚧                             # 🚧 慣性が要る題材をどれだけ外すか（数で記す）
 uv run python -m pytest -q                              # 🧪 テスト（python -S -m unittest discover -s tests でも可）
 ```
@@ -105,6 +106,7 @@ commit・blob・sha256 は `vendor.lock.json` に固定。更新は親の `vendo
 | E21 🫗 | `mariotte` | マリオットびん: 空気管の下端が水面より下のあいだ流量 Q = Cd·a·√(2g·h_air) で一定（整数で毎ステップ同じ）、水位は直線で下がる、一定のまま流れる時間 = (h0 − h_air)·A/Q、下端から先は Torricelli の曲線（0.1 mm まで） |
 | E22 🏺 | `water-clock` | 水時計: 半径 ∝ h^(1/4) の器なら水位が一定の速さで下がり 12 等分の目盛りが等間隔（ずれ 7e-5）、同じ半径の筒は目盛りが 23:…:1 に詰まる、円すいはその間。dt を 1/4 にするとずれも 1/4（1 次）、表の刻みは頭打ち。出口が細い管（Q ∝ h）だと 🏺 でも筒と同じ形に戻る |
 | E23 🚧 | `inertia-limits` | 慣性が要る題材は再現しない — 外れ方を数で記す: U 字管はエンジンでは指数関数で落ち着くだけ（一様な管 r 3 mm は実物だと ζ = 0.032 で周期 1.35 s の揺れ、エンジンの τ は 13.6 ms）、ダム決壊の先端は Ritter の 2√(g h0) に届かず勾配で 2 倍以上変わる、負の波が上流へ戻らない、水撃の Δp = ρ c Δv（18 bar）は量として無い |
+| E24 ⚗️ | `distillation` | ワインの蒸留: 釜に残る量と組成が Rayleigh 式どおり（ずれ 5e-5、dt で 1 次に減る）、火力を変えても同じ道筋、共沸点（97.2 %）より濃くならない、エタノールと水がそれぞれ 0 ulp。コニャック式の 2 回蒸留で初留 30.4 %（公表 28〜32 %）、60 % で切ったハート 70.2 %（公表 68〜72 %） |
 
 どの実験も ⚖️ 総量の保存（ずれ 0 ulp）と、層流の前提（Re）・Courant 数などの前提条件を一緒に確かめる。
 閉じた式とのずれ（δ）は丸めずにそのまま出す（`run -v`）。
@@ -264,6 +266,23 @@ uv run python fluidfullspeedsimulation.py draw 🫗 🟩                     # �
 - ダム決壊の先端は深さ 0 の尖りなので、水深 0.1·h0 の等深線の速さ（Ritter では (2 − 3√0.1)·√(g h0)）で比べる。エンジンの樋は等流の表（運動波）で勾配が要るため、勾配 0 の Ritter と同じ条件は作れない
 - ランダムな Δh（A×10^-N）で単調な緩和・保存を、ランダムな半径で ζ の境目を確かめる
 
+## ⚗️ 蒸留（2 成分の水槽）
+
+- `Network(species=("ethanol", "water"), volume_of=…)` で各水槽が成分ごとの量（モル、Q 整数）を持つ。普通の法則は出す側の組成で床に分け、`boil`・`evaporate` は成分ごとの量を決める。成分ごとの総量は 0 ulp で保存（`parts_error_q`）
+- `boil(pot, power=W, cuts=[…])`: 1 ステップに P·dt/λ(y) mol の蒸気。y は気液平衡（Perry's の表、101.3 kPa）。`cuts` で受け器を切り替える（受け器の体積 `volume`、流れ出る留液の度数 `abv_below`）
+- 度数は 20 °C の密度表から（エタノールと水は混ぜると縮むので体積は足し算にならない）
+- 物差し: Rayleigh 式 ln(W0/W) = ∫ dx/(y − x)。表の直線で区間ごとに厳密に積分する
+
+| 2 回蒸留（25 L・12 % のワイン、5 kW） | 量 | 度数 | 公表 |
+|---|---|---|---|
+| 🍇 初留（流れ出る度数 5 % で切る） | 9.59 L | 30.4 % | 28〜32 % |
+| 前留（初留の 1 %） | 0.10 L | 75.5 % | 約 80 % |
+| 🥃 ハート（60 % を切るまで） | 2.57 L | 70.2 % | 68〜72 % |
+| セコンド（5 % を切るまで） | 2.95 L | 34.3 % | — |
+
+- 初留の切り方は出典に数がないのでこちらで選んだ（2 % で 26.2 %、3 % で 27.9 %、8 % で 33.2 %）。ハートの 60 % は出典どおり
+- 前留・セコンドを次の蒸留へ戻す運用は入れていない（ワイン 9.7 L で 1 L のハート）
+
 ## ⚠️ 限界
 
 - 入口・出口損失、温度変化、表面張力は入れていない。Cd（0.61・0.62・0.58）と Manning の n（0.010）は代表値
@@ -307,4 +326,9 @@ uv run python fluidfullspeedsimulation.py draw 🫗 🟩                     # �
 - [WOLF (ULiège): Ritter（1892）のダム決壊の解 — 先端 2c0·t、h = (2c0 − x/t)²/9g](https://wolf.hece.uliege.be/tutorials/wolfgpu_ritter.html)
 - [LMNO Engineering: Joukowski 水撃 ΔP = ρ c ΔV（Wylie 1993、Chaudhry 1987）](https://www.lmnoeng.com/WaterHammer/impulse.php)
 - [wermac: 水撃の圧力波の速さ（水 21 °C で 1460 m/s）](https://wermac.org/misc/waterhammer.html)
+- [Perry's Chemical Engineers' Handbook Table 13-1: エタノール・水の気液平衡（101.3 kPa）](https://es.scribd.com/document/215977942/Paginas-desdeChap13)
+- [Wikipedia: Ethanol (data page)（20 °C の水溶液の密度・体積%）](https://en.wikipedia.org/wiki/Ethanol_(data_page))
+- [AIChE 2012, Kunz: The Rayleigh Equation Revisited（Rayleigh 式、エタノール・水は Rayleigh 卿の最初の系の一つ）](https://aiche.org/node/94936)
+- [cognac.com: 初留 28〜32 %、ハート約 70 %](https://cognac.com/guide/cognac-distillation/)
+- [destination-cognac: 60 % を切ったらセコンドへ](https://www.destination-cognac.com/?p=8037)
 - [ふるなび: そうめんとひやむぎの違い（食品表示基準の太さ区分）](https://furunavi.jp/discovery/knowledge_food/202504-somen_hiyamugi/)
