@@ -52,6 +52,8 @@ jobs:
         run: uv sync --locked
       - name: Verify every experiment (exit code 0 = all checks pass)
         run: uv run --locked python fluidfullspeedsimulation.py verify
+      - name: README demos match the code (GIF bytes, exit code 0 = same)
+        run: uv run --locked python fluidfullspeedsimulation.py demos --check
       - name: Test with JUnit
         run: |
           mkdir -p build/test-results

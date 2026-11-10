@@ -7,6 +7,37 @@
 - 🧮 量はすべて Q 整数（固定小数点）。移した量をそのまま足し引きするので、総量は 1 ulp も変わらない
 - 🟦 見せ方は絵文字のブロックを積む断面図（行 = 高さ、列 = 区間・水槽）。溜まる・流れる・遅れるがそのまま見える
 
+## 🎞️ デモ（場面ごとに GIF 1 枚）
+
+`draw` の場面を既定の引数で 1 枚ずつ。断面図は 16 段・40 時刻（最初と最後で一息）、ドット絵は `draw --view files` と同じ。
+
+| 🎞️ | 見どころ |
+|---|---|
+| ![D01](docs/demos/D01_moniac-rig_water.gif) | **D01 🏛️ `moniac-rig`**<br>列: 頭 ｜ 貯める槽 ｜ 戻りの管 ｜ 横の槽。頭から弁で分かれて、貯める槽と横の槽が溜まっていく（0〜20 分） |
+| ![D02](docs/demos/D02_moniac-drain_water.gif) | **D02 🕳️ `moniac-drain`**<br>ドット絵: 水槽の底の穴から抜けて、床に広がって平らになる |
+| ![D03](docs/demos/D03_flume_water.gif) | **D03 🎋 `flume`**<br>空の樋（20 区間）にポンプで流し込む。先端が区間ごとに遅れて届き、10 秒で 🟨 の 🍜 を放す（0〜60 秒） |
+| ![D04](docs/demos/D04_flume-hopper_water.gif) | **D04 🫙 `flume-hopper`**<br>列: じょうご ｜ 遅れ 3 秒の細管（灰色）｜ 樋。じょうごに溜まってから管を通って樋へ（0〜90 秒） |
+| ![D05](docs/demos/D05_somen-flume_water.gif) | **D05 🥢 `somen-flume`**<br>列: 竹 3 本 ｜ 受け皿 ｜ 床。継ぎ目の手前にたまりができ、🍜 3 本が流れていく（0〜40 秒） |
+| ![D06](docs/demos/D06_noodle-length_water.gif) | **D06 🍜 `noodle-length`**<br>長さ 30 cm の麺が区間をまたいで流れる（体 = 頭の後ろの区間を合計 L まで） |
+| ![D07](docs/demos/D07_noodle-clog_water.gif) | **D07 🧱 `noodle-clog`**<br>細い流れで束が縁に積もり、たまりが上がって、最後に全部まとめて受け皿へ流れ出す（100〜200 秒） |
+| ![D08](docs/demos/D08_chopsticks_water.gif) | **D08 🍽️ `chopsticks`**<br>箸で取られた 🍜 はそこで消える。取り逃した分だけ受け皿へ（24〜50 秒） |
+| ![D09](docs/demos/D09_cold-water_water.gif) | **D09 🧊 `cold-water`**<br>10 °C の細い流れ。ひやむぎ・そうめんの 2 本が流れる（0〜110 秒） |
+| ![D10](docs/demos/D10_bamboo-wear_water.gif) | **D10 🪵 `bamboo-wear`**<br>列: 節のある竹 ｜ 次の竹 ｜ 受け皿 ｜ 床。節の手前にたまり、うどんだけ節で止まる。割れ目の漏れが床へ（0〜100 秒） |
+| ![D11](docs/demos/D11_rain-runoff_water.gif) | **D11 🌧️ `rain-runoff`**<br>列: 斜面（20 区間）｜ 受け皿。雨が行き渡って下流ほど深く、やむと引いていく（0〜286 秒） |
+| ![D12](docs/demos/D12_shishi-odoshi_water.gif) | **D12 🎍 `shishi-odoshi`**<br>列: 筒 ｜ 受け皿。筒はのこぎり歯（溜まる → 傾く → 空く）、受け皿は階段 |
+| ![D13](docs/demos/D13_pythagorean-cup_poison-water.gif) | **D13 🍷 `pythagorean-cup` 🟪**<br>列: 杯 ｜ 鉢。頂まで溜まると吸い切られ、鉢が階段。☠️ Poison Water（粘度 5 倍）で |
+| ![D14](docs/demos/D14_mariotte_water.gif) | **D14 🫗 `mariotte`**<br>列: びん ｜ 受け皿。空気管の下端までは一定の速さで下がり、その先は Torricelli で鈍る |
+| ![D15](docs/demos/D15_water-clock_water.gif) | **D15 🏺 `water-clock`**<br>列: 4 次の放物面 ｜ 筒 ｜ 円すい（口は同じ）。🏺 は一定の速さで下がって空になり、筒は下ほど遅く残り、円すいは先に空く |
+| ![D16](docs/demos/D16_dam-break_namekian-water.gif) | **D16 🌊 `dam-break` 🟩**<br>ドット絵のダム決壊。🟩 Namekian Water（粘度 0.8 倍）で |
+| ![D17](docs/demos/D17_inertia-limits_water.gif) | **D17 🚧 `inertia-limits`**<br>ダム決壊を断面図で（勾配 1 %）。慣性が無いので先端は尖らず、盛り上がったまま下流へずれる（Ritter とは別物、E23） |
+| ![D18](docs/demos/D18_distillation_water.gif) | **D18 ⚗️ `distillation` 🟨**<br>列: 釜 ｜ 前留 ｜ ハート ｜ セコンド ｜ 後留。釜が減り、受け器が順に溜まる（0〜50 分。🟨 は色だけ） |
+| ![D19](docs/demos/D19_angels-share_water.gif) | **D19 👼 `angels-share` 🟧**<br>列: スコットランド ｜ ケンタッキー上の階 ｜ 同 下の階 ｜ 台湾。樽が 30 年かけて減る（1 フレーム = 1 年。🟧 は色だけ） |
+
+- 🟦 1 段 = 縦いっぱい / 16。縦いっぱいは走らせた中の最大（樋は全区間で共通、水槽はそれぞれ）。いちばん上の段は明るい色（水面）
+- 🟨 は運ばれる物（🍜）、灰色の帯は遅れのある管、下の帯は時刻（最初 → 最後）。色は Ironmate の色 ID と派生規則
+- 🔁 作り直す: `uv run python fluidfullspeedsimulation.py demos`（`docs/demos/` の GIF と `demos.json` に bytes・sha256）。`demos --check` は書かずにバイト単位で比べ、違えば終了コード 1（CI で確かめる）。`--only 🏛️ D03` で一部だけ
+- 🖼️ 1 場面だけ好きな引数で: `draw 🥢 --view files --frames 60 --rows 24 --fill 🟥`（GIF + PNG + 🧾 受領記録 JSON）
+
 ## 🚀 使い方
 
 ```bash
@@ -23,6 +54,8 @@ uv run python fluidfullspeedsimulation.py draw 🥢 --viscosity-scale 8         
 uv run python fluidfullspeedsimulation.py draw 🏺 --frames 4                   # 🏺 水時計（4 次の放物面 / 筒 / 円すい）
 uv run python fluidfullspeedsimulation.py draw ⚗️ --frames 4                   # ⚗️ 釜と前留・ハート・セコンド・後留
 uv run python fluidfullspeedsimulation.py draw 👼 --frames 4                   # 👼 4 つの蔵の樽が 30 年で減っていく
+uv run python fluidfullspeedsimulation.py draw 🫙 --view files --out-dir build/pixel  # 🎞️ 断面図も GIF・PNG・受領記録に
+uv run python fluidfullspeedsimulation.py demos --check                      # 🎞️ README のデモが今のコードと同じか
 uv run python fluidfullspeedsimulation.py run 🚧                             # 🚧 慣性が要る題材をどれだけ外すか（数で記す）
 uv run python -m pytest -q                              # 🧪 テスト（python -S -m unittest discover -s tests でも可）
 ```
@@ -136,6 +169,7 @@ uv run python fluidfullspeedsimulation.py draw bamboo-wear                      
 - 📏 段数 = round(水深 / 縦いっぱい × rows)。1 段 = 縦いっぱい / rows なので、段数から水深を ±½ 段で読み戻せる（E09 で確かめる）
 - 縦いっぱいは `--cap-mode run-max`（走らせた中の最大。樋は全区間で共通）か `rim`（樋の縁）。`rows` の既定は 8
 - 🍜 は水面の段に置く。ブロックの色は自由（`--fill`）。既定は 🟦 水・🟨 エタノール・🟧 メタノール・🟩 Namekian Water・🟪 Poison Water
+- 🎞️ `--view files` で同じ格子を GIF（時刻を追う）・PNG（最後の時刻）に。名前は `<prefix><場面>_<流体>_n<時刻の数>_h<段数>_r<NN><suffix>`、既定は 40 時刻・16 段。水槽の列は 4 マス幅、樋の区間・管は 1 マス、組の間は 1 マス空ける。`--fill` の 🟦 🟨 🟧 🟩 🟪 🟥 🟫 は塗る色にも効く
 
 ## 🍜 麺の長さ・たまり・箸（E12〜E14）
 
@@ -153,9 +187,7 @@ uv run python fluidfullspeedsimulation.py draw chopsticks --frames 6      # 取�
 
 ## 🟦 ドット絵の水
 
-| 💧 dam-break | 💧 moniac-drain |
-|---|---|
-| ![dam-break](docs/images/dam-break_water_s0_t0800_r01.gif) | ![moniac-drain](docs/images/moniac-drain_water_s0_t0600_r01.gif) |
+GIF は 🎞️ デモの D02 🕳️・D16 🌊。
 
 ```bash
 uv run python fluidfullspeedsimulation.py draw moniac-drain --fluid ethanol --scale 8 --out-dir build/pixel \

@@ -158,7 +158,7 @@ class Cli(unittest.TestCase):
                                      "cli-moniac-drain_ethanol_s0_t0030_r01.json"])
 
     def test_draw_rejects_unknown_scene(self):
-        for argv in (["draw", "waterfall"], ["draw", "flume", "--view", "files"],
+        for argv in (["draw", "waterfall"], ["draw", "flume", "--view", "movie"],
                      ["draw", "flume", "--cap-mode", "median"], ["draw", "flume", "--rows", "x"]):
             with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()), \
                     self.assertRaises(SystemExit) as cm:
