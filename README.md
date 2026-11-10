@@ -21,6 +21,7 @@ uv run python fluidfullspeedsimulation.py draw 🥢 🟥                        
 uv run python fluidfullspeedsimulation.py draw 🧊 --temp-c 5                  # 🧊 水温を変えて細い流れ（場面: 🏛️ 🥢 🧊 🪵 🎋 🫙 🌊 🕳️）
 uv run python fluidfullspeedsimulation.py draw 🥢 --viscosity-scale 8         # 🍯 粘度を 8 倍（--mu 8 なら 8 mPa·s を直接）
 uv run python fluidfullspeedsimulation.py draw 🏺 --frames 4                   # 🏺 水時計（4 次の放物面 / 筒 / 円すい）
+uv run python fluidfullspeedsimulation.py run 🚧                             # 🚧 慣性が要る題材をどれだけ外すか（数で記す）
 uv run python -m pytest -q                              # 🧪 テスト（python -S -m unittest discover -s tests でも可）
 ```
 
@@ -97,6 +98,7 @@ commit・blob・sha256 は `vendor.lock.json` に固定。更新は親の `vendo
 | E16 🪵 | `bamboo-wear` | 竹の傷み: 割れ目の漏れ = Cd·a·√(2gh)、床に落ちたのは漏れた分だけ（ulp まで）、節の削り残しの手前のたまり = 節 + 越流水深、細い流れではうどん（2 mm）だけ節で引っかかる |
 | E17 🍯 | `viscosity` | 粘度のつまみ: 層流の樋の水深は閉じた式どおり動き、粘いほどそうめんが遅く着く。継ぎ目のたまり・Manning の竹・Cd 一定の小孔はビット単位で同じ。`viscous=True` の小孔は Re が下がると Cd が下がり（低い Re で δ·√Re）抜け方が遅くなる。☠️ Poison Water（×5）の水深 |
 | E22 🏺 | `water-clock` | 水時計: 半径 ∝ h^(1/4) の器なら水位が一定の速さで下がり 12 等分の目盛りが等間隔（ずれ 7e-5）、同じ半径の筒は目盛りが 23:…:1 に詰まる、円すいはその間。dt を 1/4 にするとずれも 1/4（1 次）、表の刻みは頭打ち。出口が細い管（Q ∝ h）だと 🏺 でも筒と同じ形に戻る |
+| E23 🚧 | `inertia-limits` | 慣性が要る題材は再現しない — 外れ方を数で記す: U 字管はエンジンでは指数関数で落ち着くだけ（一様な管 r 3 mm は実物だと ζ = 0.032 で周期 1.35 s の揺れ、エンジンの τ は 13.6 ms）、ダム決壊の先端は Ritter の 2√(g h0) に届かず勾配で 2 倍以上変わる、負の波が上流へ戻らない、水撃の Δp = ρ c Δv（18 bar）は量として無い |
 
 どの実験も ⚖️ 総量の保存（ずれ 0 ulp）と、層流の前提（Re）・Courant 数などの前提条件を一緒に確かめる。
 閉じた式とのずれ（δ）は丸めずにそのまま出す（`run -v`）。
@@ -197,6 +199,26 @@ uv run python fluidfullspeedsimulation.py draw moniac-drain --fluid ethanol --sc
 - 細管の出口は Q = c·h を前進 Euler で（断面一定の水槽は今までどおり厳密離散化）。弁は断面一定の水槽だけ
 - 流出型の水時計は A(h) ∝ √h（半径 ∝ h^(1/4)、4 次の放物面）で Torricelli の流出と釣り合い dh/dt = −k が一定。k = Cd·a·√(2g h0)/(π r²)、空になる時間 T = h0/k
 
+## ⚠️ 慣性が要る題材（再現しない）
+
+このエンジンはストックとフロー（水槽の積分と、水位で決まる流量）だけで、運動量（ẍ）を持たない。慣性で決まる現象は
+**直さず**、どれだけ外すかを E23 🚧 `inertia-limits` が数で記す（`draw 🚧` は 1 % 勾配のダム決壊）。
+
+| 題材 | 実物（閉じた式） | エンジン | ずれ |
+|---|---|---|---|
+| 🔔 U 字管（一様な管 r 3 mm、底 0.3 m、足 0.3 m） | L_eff·ÿ + b·ẏ + 2g·y = 0、ζ = 0.032 → 減衰振動、周期 1.35 s、減衰 7 s | 指数関数、τ = 13.6 ms、揺れは一度も出ない | 種類ごと外す（揺れ続けるものを一瞬で落ち着かせる） |
+| 🫗 U 字管（槽 0.01 m²、細管 r 0.75 mm・0.5 m） | ζ = 86 → 揺れない、遅い根 2059 s、速い根 70 ms | τ = 2059 s | 遅い根と 0.003 % 差。足りる |
+| 📐 一様な管の境目 | 半径 > 0.54 mm で実物は揺れる（ζ < 1） | どの太さでも揺れない | — |
+| 🌊 ダム決壊 h0 0.1 m、勾配 0.1 % | Ritter: 先端 2√(g h0) = 1.98 m/s、0.1·h0 の等深線 1.04 m/s、ダム地点 4/9·h0 | 等深線 0.45 m/s（比 0.43）、ダム地点 0.097 m（比 2.18） | 水面形の RMS ずれ 35 % of h0 |
+| 🌊 ダム決壊 h0 0.1 m、勾配 1 % | 同上（Ritter に勾配は無い） | 等深線 1.41 m/s（比 1.35）、ダム地点 0.028 m（比 0.64） | RMS ずれ 49 %。先端 2√(g h0) に対しては 0.71 |
+| ↩️ 負の波 | 堤の近くから奥へ水位が下がる（負の波が上流へ戻る） | 奥の壁から堤へ下がる（運動波は下流にしか伝わらない） | 向きが逆 |
+| 🟦 ドット絵のダム決壊 | — | 先端は 1 ティックに「斜め 1 + 横の回数」マスまで（実測 1 マス/ティック、平均 0.55） | 規則の上限で、物理ではない |
+| 💥 水撃（10 mm 管、Δv 1.27 m/s） | Joukowsky Δp = ρ c Δv = 17.8 bar（水頭 182 m、c = 1400 m/s） | 次のステップで流量 0。圧力という量が無い | 衝撃ごと無視 |
+
+- U 字管の式: 足の面積 A、底の管の面積 a = πr²・長さ L として L_eff = 2·足の高さ + L·A/a、b = 8νLA/(a r²)（Poiseuille の損失をエネルギー法で）。ζ = b / (2√(2g·L_eff))。エンジンの τ = b/2g = A/(2c) は、実物が揺れないときの遅い根に 1/ζ² のオーダーで一致する
+- ダム決壊の先端は深さ 0 の尖りなので、水深 0.1·h0 の等深線の速さ（Ritter では (2 − 3√0.1)·√(g h0)）で比べる。エンジンの樋は等流の表（運動波）で勾配が要るため、勾配 0 の Ritter と同じ条件は作れない
+- ランダムな Δh（A×10^-N）で単調な緩和・保存を、ランダムな半径で ζ の境目を確かめる
+
 ## ⚠️ 限界
 
 - 入口・出口損失、温度変化、表面張力は入れていない。Cd（0.61・0.62・0.58）と Manning の n（0.010）は代表値
@@ -225,4 +247,8 @@ uv run python fluidfullspeedsimulation.py draw moniac-drain --fluid ethanol --sc
 - [Int. J. Fluid Power: 流量係数は低い Re で √Re に比例、高い Re で一定（Merritt 1967、δ ≈ 0.2）](https://journals.riverpublishers.com/index.php/IJFP/article/download/617/355/1531)
 - [Torricelli's law — Wikipedia（clepsydra problem: 半径 ∝ h^(1/4) で水位が一定に下がる）](https://en.wikipedia.org/wiki/Torricelli%27s_law)
 - [Høyrup 1998, Roskilde: 古代の水時計の出口は細い管で層流（Poiseuille）になりうるため、4 次の放物面でも一定には下がらない](https://rucforsk.ruc.dk/ws/files/4340180/1998_Waterclock_MS.pdf)
+- [schoolphysics: Liquid in a U-tube — T = 2π√(L/g)、L は液柱の長さの半分](https://www.schoolphysics.co.uk/age16-19/Mechanics/Simple%20harmonic%20motion/text/Liquid_in_a_u_tube/index.html)
+- [WOLF (ULiège): Ritter（1892）のダム決壊の解 — 先端 2c0·t、h = (2c0 − x/t)²/9g](https://wolf.hece.uliege.be/tutorials/wolfgpu_ritter.html)
+- [LMNO Engineering: Joukowski 水撃 ΔP = ρ c ΔV（Wylie 1993、Chaudhry 1987）](https://www.lmnoeng.com/WaterHammer/impulse.php)
+- [wermac: 水撃の圧力波の速さ（水 21 °C で 1460 m/s）](https://wermac.org/misc/waterhammer.html)
 - [ふるなび: そうめんとひやむぎの違い（食品表示基準の太さ区分）](https://furunavi.jp/discovery/knowledge_food/202504-somen_hiyamugi/)

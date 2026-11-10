@@ -23,12 +23,12 @@ import random
 import sys
 from pathlib import Path
 
-from fixedq import ONE, from_q, lag_step, qmul, random_scales, shift_lag_step, to_q
+from fixedq import ONE, from_q, lag_gain, lag_step, qmul, random_scales, shift_lag_step, to_q
 from fluids import FLUIDS, PLACEHOLDER_MU_SCALE, REAL_FLUIDS, RE_LAMINAR, Section, channel_reynolds, fall_time
 from fluids import fluid_table, get_fluid, lip_head
 from fluids import ORIFICE_DELTA, TEMP_TABLES, lip_flow, normal_depth, superelevation, table_value, viscous_orifice
-from fluids import poiseuille_head, poiseuille_tau, torricelli_empty_time, torricelli_head, transport_delay
-from network import Network, critical_gain, inverse_table, jsonable, peak_to_peak, settling_time, window
+from fluids import G, poiseuille_head, poiseuille_tau, torricelli_empty_time, torricelli_head, transport_delay
+from network import Network, critical_gain, inverse_table, jsonable, peak_to_peak, register_law, settling_time, window
 import pixelwater as pw
 
 FLUID_KEYS = REAL_FLUIDS  # 実験で回す流体（仮置きの流体は入れない）
@@ -1495,6 +1495,303 @@ def e22_water_clock(dt_list=(1.0, 0.25, 0.05), samples_list=(64, 512, 4096), see
             "summary": summary, "runs": runs, "checks": checks}
 
 
+# --- E23 慣性が要る題材（このエンジンでは再現しない） --------------------------------
+
+JOUKOWSKY_C = 1400.0  # 管の中の水を走る圧力波の速さ [m/s]（自由な水で約 1480、管の伸びで下がる。wermac: 21 °C で 1460）
+FRONT_FRACTION = 0.1  # 先端の読み方: 水深が h0 のこの割合を越えた時刻（Ritter の先端は深さ 0 の尖りなので同じ等深線で比べる）
+
+
+@register_law("level-pipe")
+def _law_level_pipe(net, ln, n):
+    """水位差で流れる細管（U 字管の底）: Hagen–Poiseuille Q = c·(h_src − h_dst)。逆向きは対の管が受け持つ。
+    等しい面積 A の 2 槽の差 x は dx/dt = −x/τ、τ = A/(2c) なので、その厳密離散化（1 − e^(−dt/τ)）で
+    A/2·x の分を動かす。慣性の項（ẍ）はこのエンジンには無い。"""
+    dh = net.head_q(ln["src"]) - net.head_q(ln["dst"])
+    if dh <= 0:
+        return 0
+    return qmul(qmul(dh, ln["half_area_q"]), ln["k"])
+
+
+def utube_theory(area: float, radius: float, length: float, limb: float, nu: float, g: float = G) -> dict:
+    """U 字管（足の面積 A、底の管の半径 r・長さ L、足の水の高さ limb）の閉じた式。
+
+    変位 y（片方の水面の上がり）の運動方程式（エネルギー法、底の管は Poiseuille の損失）:
+        L_eff·ÿ + b·ẏ + 2g·y = 0、 L_eff = 2·limb + L·A/a、 b = 8νLA/(a r²)、 a = πr²
+    一様な管（A = a）なら L_eff は水の全長で、T0 = 2π√(L_eff/2g) = 2π√(半分の長さ/g)（schoolphysics）。
+    減衰比 ζ = b/(2√(2g·L_eff))。ζ < 1 なら実物は揺れる（減衰振動）、ζ ≥ 1 なら揺れずに落ち着く。
+    エンジンは ÿ の項を持たない b·ẏ + 2g·y = 0 なので τ_engine = b/(2g) = A/(2c) の指数関数だけ。
+    """
+    a = math.pi * radius ** 2
+    c = math.pi * radius ** 4 * g / (8.0 * nu * length)
+    l_eff = 2.0 * limb + length * area / a
+    b = 8.0 * nu * length * area / (a * radius ** 2)
+    omega0 = math.sqrt(2.0 * g / l_eff)
+    zeta = b / (2.0 * math.sqrt(2.0 * g * l_eff))
+    out = {"area": area, "radius": radius, "length": length, "limb": limb, "nu": nu, "pipe_area": a,
+           "conductance": c, "tau_engine": area / (2.0 * c), "L_eff": l_eff, "b": b, "omega0": omega0,
+           "T0": 2.0 * math.pi / omega0, "zeta": zeta, "oscillates": zeta < 1.0}
+    if zeta < 1.0:
+        wd = omega0 * math.sqrt(1.0 - zeta * zeta)
+        out.update(T_damped=2.0 * math.pi / wd, decay_time=1.0 / (zeta * omega0), tau_slow=None, tau_fast=None)
+    else:
+        disc = math.sqrt(b * b - 8.0 * g * l_eff)
+        s_slow, s_fast = (-b + disc) / (2.0 * l_eff), (-b - disc) / (2.0 * l_eff)
+        out.update(T_damped=None, decay_time=None, tau_slow=-1.0 / s_slow, tau_fast=-1.0 / s_fast)
+    return out
+
+
+def utube(area: float, radius: float, length: float, limb: float, delta_h: float, dt: float,
+          fluid: str = "water") -> tuple[Network, dict]:
+    """左右の槽（面積 A）を底の細管でつないだ U 字管。左を limb + Δh/2、右を limb − Δh/2 から始める。"""
+    if abs(delta_h) / 2.0 > limb:
+        raise ValueError("delta_h / 2 must not exceed limb (a limb would run dry)")
+    net = Network(dt, fluid).tank("left", area, head=limb + delta_h / 2.0).tank("right", area, head=limb - delta_h / 2.0)
+    th = utube_theory(area, radius, length, limb, net.fluid.nu, net.g)
+    k = lag_gain(dt, th["tau_engine"])
+    for src, dst in (("left", "right"), ("right", "left")):
+        net.link("level-pipe", src, dst, half_area_q=to_q(area / 2.0), k=k, tau=th["tau_engine"])
+    return net, th
+
+
+def utube_crossover_radius(length: float, limb: float, nu: float, g: float = G, lo: float = 1e-5, hi: float = 0.1) -> float:
+    """一様な U 字管（A = a）で ζ = 1 になる半径。これより太ければ実物は揺れる。"""
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        th = utube_theory(math.pi * mid ** 2, mid, length, limb, nu, g)
+        lo, hi = (mid, hi) if th["zeta"] > 1.0 else (lo, mid)
+    return 0.5 * (lo + hi)
+
+
+def ritter_depth(x: float, t: float, h0: float, g: float = G) -> float:
+    """Ritter（1892）の解: 平らで摩擦のない床、下流は乾いた床。c0 = √(g h0)、−c0·t ≤ x ≤ 2c0·t で
+    h = (2c0 − x/t)² / 9g。上流（x < −c0 t）は h0、先端（x > 2c0 t）は 0。ダム地点 x = 0 では 4/9·h0 のまま。"""
+    if t <= 0:
+        return h0 if x < 0 else 0.0
+    c0 = math.sqrt(g * h0)
+    if x <= -c0 * t:
+        return h0
+    if x >= 2.0 * c0 * t:
+        return 0.0
+    return (2.0 * c0 - x / t) ** 2 / (9.0 * g)
+
+
+def ritter_isoline_speed(fraction: float, h0: float, g: float = G) -> float:
+    """Ritter の解で水深が fraction·h0 の点が進む速さ: (2 − 3√fraction)·c0（fraction → 0 で先端の 2c0）。"""
+    return (2.0 - 3.0 * math.sqrt(fraction)) * math.sqrt(g * h0)
+
+
+def dam_break(h0: float = 0.1, reservoir: float = 2.0, dry: float = 4.0, cells_per_m: float = 5.0,
+              width: float = 0.2, slope: float = 1e-3, n_manning: float = 0.010, dt: float = 0.02,
+              fluid: str = "water") -> tuple[Network, dict]:
+    """ダム決壊: 長方形の樋（幅 width）の上流 reservoir [m] を水深 h0 で満たし、下流 dry [m] は乾いた床。
+    エンジンの樋は等流の表（運動波）なので勾配が要る（slope > 0）。Ritter は勾配 0・摩擦 0 の解。"""
+    cells = int(round((reservoir + dry) * cells_per_m))
+    n_res = int(round(reservoir * cells_per_m))
+    net = _sea(Network(dt, fluid))
+    ch = net.channel("bed", "sea", length=reservoir + dry, cells=cells, slope=slope,
+                     section={"shape": "rect", "size": width}, law="manning", n_manning=n_manning, max_depth=2.0 * h0)
+    lc = ch["cell_length"]
+    for name in ch["cells"][:n_res]:
+        net.nodes[name]["v"] = to_q(width * h0 * lc)  # 初期の水柱（ダムの上流）
+    xs = [(i + 0.5) * lc - reservoir for i in range(cells)]  # セル中心。ダム地点が x = 0
+    return net, {"cells": cells, "n_res": n_res, "cell_length": lc, "x": xs, "h0": h0, "reservoir": reservoir,
+                 "dry": dry, "slope": slope, "width": width}
+
+
+def _front_fit(xs: list[float], ts: list[float]) -> float | None:
+    """最小二乗で位置 − 時刻の傾き [m/s]（点が 2 つ未満、または時刻が同じなら None）。"""
+    pts = [(t, x) for x, t in zip(xs, ts) if t is not None]
+    if len(pts) < 2:
+        return None
+    n = len(pts)
+    mt, mx = sum(t for t, _ in pts) / n, sum(x for _, x in pts) / n
+    sxx = sum((t - mt) ** 2 for t, _ in pts)
+    return None if sxx == 0 else sum((t - mt) * (x - mx) for t, x in pts) / sxx
+
+
+def dam_break_report(h0: float, slope: float, dt: float = 0.02, t_end: float = 30.0, fluid: str = "water") -> dict:
+    net, info = dam_break(h0=h0, slope=slope, dt=dt, fluid=fluid)
+    res = net.run(t_end, sample_every=1)
+    xs, n_res = info["x"], info["n_res"]
+    c0 = math.sqrt(net.g * h0)
+    thr = FRONT_FRACTION * h0
+    arrivals = []
+    for j in range(n_res, info["cells"]):
+        t_j = next((row["t"] for row in res["series"] if row["h:bed"][j] >= thr), None)
+        arrivals.append(t_j)
+    v_engine = _front_fit(xs[n_res:], arrivals)
+    v_ritter = ritter_isoline_speed(FRONT_FRACTION, h0, net.g)
+    t_obs = info["reservoir"] / c0  # 戻りの波がダム地点に届く前（Ritter の 4/9 がまだ成り立つ）
+    row = min(res["series"], key=lambda r: abs(r["t"] - t_obs))
+    prof = row["h:bed"]
+    ritter = [ritter_depth(x, row["t"], h0, net.g) for x in xs]
+    rms = math.sqrt(sum((a - b) ** 2 for a, b in zip(prof, ritter)) / len(xs)) / h0
+    dam_engine = 0.5 * (prof[n_res - 1] + prof[n_res])
+    dam_ritter = 0.5 * (ritter[n_res - 1] + ritter[n_res])
+    last = arrivals[-1]
+    # 貯水側の各セルが 0.9·h0 を初めて割る時刻（奥の壁 → 堤の順）。Ritter は堤の近くから、エンジンは奥から
+    drop_engine = [next((row["t"] for row in res["series"] if row["h:bed"][j] < 0.9 * h0), None) for j in range(n_res)]
+    drop_ritter = [abs(x) / ((3.0 * math.sqrt(0.9) - 2.0) * c0) for x in xs[:n_res]]
+    reversed_order = (None not in drop_engine and all(a <= b for a, b in zip(drop_engine, drop_engine[1:]))
+                      and all(a > b for a, b in zip(drop_ritter, drop_ritter[1:])))
+    return {
+        "h0": h0, "slope": slope, "c0": c0, "front_fraction": FRONT_FRACTION, "arrivals": arrivals,
+        "drawdown_engine": drop_engine, "drawdown_ritter": drop_ritter, "drawdown_reversed": reversed_order,
+        "v_engine": v_engine, "v_ritter_isoline": v_ritter, "v_ritter_tip": 2.0 * c0,
+        "front_ratio": None if v_engine is None else v_engine / v_ritter,
+        "tip_ratio": None if v_engine is None else v_engine / (2.0 * c0),
+        "t_end_engine": last, "t_end_ritter": info["dry"] / v_ritter,
+        "t_obs": row["t"], "dam_depth_engine": dam_engine, "dam_depth_ritter": dam_ritter,
+        "dam_ratio": dam_engine / dam_ritter, "profile_rms_over_h0": rms,
+        "courant": res["channels"]["bed"]["courant"], "res": res, "info": info,
+    }
+
+
+def joukowsky(delta_v: float, rho: float, c: float = JOUKOWSKY_C, g: float = G) -> dict:
+    """弁を急に閉めたときの圧力の跳ね上がり Δp = ρ·c·Δv（Joukowsky）。水頭にすると Δp/(ρg) = c·Δv/g。"""
+    dp = rho * c * delta_v
+    return {"delta_v": delta_v, "rho": rho, "c": c, "delta_p": dp, "delta_p_bar": dp / 1e5, "head": c * delta_v / g}
+
+
+def e23_inertia_limits(seed: int = 0, dt_frac: float = 0.02) -> dict:
+    """このエンジン（ストックとフローの準静的な模型）が、慣性の要る題材をどれだけ外すかを数で記す。
+
+    直さない（慣性を足せば別のエンジンになる）。検証は「外れ方が記録どおりか」を確かめる。
+    1. U 字管: 実物は L_eff·ÿ + b·ẏ + 2g·y = 0。ζ < 1 なら揺れる。エンジンは指数関数で落ち着くだけ
+    2. ダム決壊: Ritter の先端 2√(g h0)、ダム地点 4/9·h0。エンジンの樋は運動波（勾配が要る）
+    3. 水撃: 弁を急に閉めると Δp = ρ·c·Δv の衝撃。エンジンは流れが止まるだけ（圧力が無い）
+    """
+    checks, runs, summary = [], {}, {}
+    w = get_fluid("water")
+    geometries = {
+        # 名前: (A, r, L, limb). manometer は一様な管（A = a）、capillary は E02/E03 の槽と細管
+        "manometer": (math.pi * 0.003 ** 2, 0.003, 0.3, 0.3),
+        "capillary": (0.01, 0.75e-3, 0.5, 0.1),
+    }
+    expect = {"manometer": True, "capillary": False}
+    for name, (area, radius, length, limb) in geometries.items():
+        th = utube_theory(area, radius, length, limb, w.nu)
+        checks.append(check(f"{name}:kind", "🔔" if th["oscillates"] else "🫗", th["oscillates"] == expect[name],
+                            value=th["zeta"], expected=1.0,
+                            note=("ζ < 1: 実物は揺れる（エンジンは種類ごと外す）" if expect[name]
+                                  else "ζ ≥ 1: 実物も揺れない（エンジンで足りる）")))
+        if not th["oscillates"]:
+            checks.append(close(f"{name}:slow-root", "🐢", th["tau_engine"], th["tau_slow"], 1.0 / th["zeta"] ** 2,
+                                note="エンジンの τ = 実物の遅い根 1/|s_slow|（ずれは 1/ζ² のオーダー）"))
+            checks.append(check(f"{name}:fast-root", "⚡", th["tau_fast"] < 0.01 * th["tau_engine"],
+                                value=th["tau_fast"], expected=th["tau_engine"],
+                                note="慣性の過渡 1/|s_fast| は τ の 1 % 未満（無視して差し支えない）"))
+        else:
+            checks.append(check(f"{name}:kind-mismatch", "🚧", th["T_damped"] > th["tau_engine"] * 10,
+                                value=th["T_damped"], expected=th["tau_engine"],
+                                note="実物の周期 ≫ エンジンの τ: 揺れ続けるものを一瞬で落ち着かせてしまう"))
+        traces = {}
+        sweep = random_scales(seed + 1, 3, n_min=2, n_max=2)
+        dh_max = max(i["value"] for i in sweep)
+        u_peak = (area / th["pipe_area"]) * (dh_max / 2.0) * (th["omega0"] if th["oscillates"] else 1.0 / th["tau_slow"])
+        re_peak = u_peak * 2.0 * radius / w.nu
+        checks.append(check(f"{name}:laminar", "〰️", re_peak < RE_LAMINAR, value=re_peak, expected=RE_LAMINAR,
+                            note="底の管の最大流速の Re < 2300（Poiseuille の減衰で見積もってよい）"))
+        for item in sweep:
+            dh = item["value"]
+            dt = th["tau_engine"] * dt_frac
+            net, _th = utube(area, radius, length, limb, dh, dt)
+            res = net.run(8.0 * th["tau_engine"], trace=["left", "right"])
+            diff = [a - b for a, b in zip(res["trace"]["left"], res["trace"]["right"])]
+            monotone = all(b <= a + 1e-15 for a, b in zip(diff, diff[1:])) and all(d >= -1e-15 for d in diff)
+            tag = f"{name}:{item['label']}"
+            checks += [
+                check(f"{tag}:monotone", "📉", monotone, value=min(diff), expected=0.0,
+                      note="水位差は符号を変えず単調に減る（揺れは一度も出ない）"),
+                check(f"{tag}:settle", "🎯", abs(diff[-1]) <= 1e-3 * dh, value=diff[-1], tol=1e-3 * dh,
+                      note="8τ 後に差は 0.1 % 未満"),
+                conserved(f"{tag}:conserve", res),
+            ]
+            if dh == dh_max:
+                traces = {"t": [(n + 1) * dt for n in range(len(diff))], "diff": diff, "delta_h": dh}
+        runs[f"utube:{name}"] = [{"t": t, "diff": d} for t, d in zip(traces["t"][::25], traces["diff"][::25])]
+        summary[f"utube:{name}"] = dict(th) | {"no_oscillation_reproduced": True, "reynolds_peak": re_peak,
+                                               "delta_h_max": dh_max}
+    # 一様な U 字管の太さで、実物が揺れるかどうかの境目
+    r_star = utube_crossover_radius(0.3, 0.3, w.nu)
+    radii = random_scales(seed + 2, 4, n_min=3, n_max=3)  # 1〜10 mm
+    table = []
+    for item in radii:
+        r = item["value"]
+        th = utube_theory(math.pi * r * r, r, 0.3, 0.3, w.nu)
+        table.append({"radius": r, "zeta": th["zeta"], "oscillates": th["oscillates"], "tau_engine": th["tau_engine"],
+                      "T0": th["T0"]})
+    checks.append(check("crossover", "📐", all((row["radius"] > r_star) == row["oscillates"] for row in table),
+                        value=r_star, note="一様な管（L 0.3 m・足 0.3 m）: 半径がこれより太ければ実物は揺れる"))
+    summary["utube:crossover_radius"] = r_star
+    summary["utube:radius_table"] = table
+
+    # 🌊 ダム決壊（運動波の樋 vs Ritter）
+    for slope in (1e-3, 1e-2):
+        rep = dam_break_report(0.1, slope)
+        tag = f"dam:S{slope:g}"
+        checks += [
+            check(f"{tag}:front-off", "🐌" if rep["front_ratio"] < 1 else "🐇",
+                  rep["front_ratio"] is not None and abs(rep["front_ratio"] - 1.0) > 0.2, value=rep["front_ratio"],
+                  expected=1.0, tol=0.2,
+                  note=f"水深 {FRONT_FRACTION:g}·h0 の等深線の速さ: エンジン / Ritter（{rep['v_ritter_isoline']:.3f} m/s）。"
+                       "緩い勾配では遅く、急な勾配では速い（どちらも 20 % 以上外す）"),
+            check(f"{tag}:tip-ratio", "📏", rep["tip_ratio"] is not None and rep["tip_ratio"] < 1.0,
+                  value=rep["tip_ratio"], expected=1.0, note="先端 2√(g h0) には届かない"),
+            check(f"{tag}:dam-depth", "🏗️", abs(rep["dam_ratio"] - 1.0) > 0.2, value=rep["dam_depth_engine"],
+                  expected=rep["dam_depth_ritter"], tol=0.2, note="t = L_res/c0 のダム地点の水深（Ritter は 4/9·h0 に留まる）"),
+            check(f"{tag}:negative-wave", "↩️", rep["drawdown_reversed"], value=rep["drawdown_engine"][:3],
+                  expected=rep["drawdown_ritter"][:3],
+                  note="水位が下がり始める順: Ritter は堤の近くから奥へ（負の波が上流へ戻る）、エンジンは奥の壁から堤へ（運動波は下流にしか伝わらない）"),
+            check(f"{tag}:profile", "📉", rep["profile_rms_over_h0"] > 0.05, value=rep["profile_rms_over_h0"],
+                  expected=0.05, note="t = L_res/c0 での水面形の RMS ずれ / h0（放物線の水面形を出せない）"),
+            check(f"{tag}:courant", "🧭", rep["courant"] <= 1.0, value=rep["courant"], expected=1.0, note="Courant ≤ 1"),
+            conserved(f"{tag}:conserve", rep["res"]),
+        ]
+        runs[tag] = [{"t": r["t"], "h:bed": r["h:bed"]} for r in rep["res"]["series"][:: max(1, len(rep["res"]["series"]) // 8)]]
+        summary[tag] = {k: v for k, v in rep.items() if k not in ("res", "info", "arrivals")}
+    s1, s2 = summary["dam:S0.001"]["front_ratio"], summary["dam:S0.01"]["front_ratio"]
+    checks.append(check("dam:slope-dependence", "🚧", s2 > 2.0 * s1, value=[s1, s2],
+                        note="エンジンの先端の速さは勾配で 2 倍以上変わる（Ritter には勾配という量が無い）"))
+    # 🟦 ドット絵のダム決壊: 先端は規則で 1 ティックに 1 + 横の回数 マスまで（物理ではない）
+    fine = pw.run_pixels("dam-break", "water", seed=seed, frame_every=1)
+    arr = pw.pixel_arrivals(fine)
+    dry = [t for t in arr if t is not None and t > 0]
+    front = [sum(1 for t in dry if t <= tick) for tick in range(fine["ticks"] + 1)]
+    max_adv = max(b - a for a, b in zip(front, front[1:]))
+    mean_speed = len(dry) / max(dry) if dry else 0.0
+    cap = 1 + math.ceil(fine["lateral_rate"])
+    checks += [
+        check("pixel:cap", "🟦", max_adv <= cap, value=max_adv, expected=cap,
+              note="ドット絵の先端は 1 ティックに「斜め 1 + 横の回数」マスまで（規則の上限、物理ではない）"),
+        check("pixel:mean", "🟦", mean_speed <= 1.0 + fine["lateral_rate"], value=mean_speed,
+              expected=1.0 + fine["lateral_rate"], note="平均の先端の速さ [マス/ティック] ≤ 1 + 横の頻度"),
+    ]
+    summary["pixel:dam-break"] = {"max_advance_cells_per_tick": max_adv, "mean_cells_per_tick": mean_speed,
+                                  "cap": cap, "lateral_rate": fine["lateral_rate"], "note": "g も m も無い盤。速さは規則"}
+    # 💥 水撃
+    q, area_pipe = 1e-4, math.pi * 0.005 ** 2  # 10 mm の管に 0.1 L/s → 約 1.27 m/s
+    dv = q / area_pipe
+    jk = joukowsky(dv, w.rho)
+    dt = 0.01
+    net = Network(dt).tank("up", 0.05, head=0.5).tank("down", 0.05)
+    net.pump("up", "down", rate=q, until=1.0)
+    res = net.run(2.0, sample_every=1)
+    flows = [r["q:0"] for r in res["series"]]
+    stop = next(r["t"] for r, f in zip(res["series"], flows) if f == 0.0)
+    checks += [
+        check("hammer:stops-in-one-step", "🛑", abs(stop - (1.0 + dt)) <= dt / 2 + 1e-12, value=stop, expected=1.0 + dt,
+              note="弁を閉めた次のステップで流量 0（圧力の跳ね上がりは起きない＝量が無い）"),
+        check("hammer:ignored-surge", "💥", jk["delta_p"] > 1e6, value=jk["delta_p"], expected=1e6,
+              note=f"無視される衝撃 Δp = ρ·c·Δv（Δv = {dv:.2f} m/s, c = {JOUKOWSKY_C:g} m/s）= 水頭 {jk['head']:.0f} m"),
+        conserved("hammer:conserve", res),
+    ]
+    summary["hammer"] = jk | {"stop_time": stop}
+    return {"params": {"seed": seed, "dt_frac": dt_frac, "geometries": {k: list(v) for k, v in geometries.items()},
+                       "front_fraction": FRONT_FRACTION, "joukowsky_c": JOUKOWSKY_C},
+            "summary": summary, "runs": runs, "checks": checks}
+
+
 # --- 登録簿 ---------------------------------------------------------------
 
 EXPERIMENTS = {
@@ -1516,6 +1813,8 @@ EXPERIMENTS = {
     "E16": ("bamboo-wear", "🪵", "竹の傷み（割れ目からの漏れ・節の削り残し）", e16_bamboo_wear),
     "E17": ("viscosity", "🍯", "粘度のつまみ（直接・倍率、仮置きの流体、粘い小孔）", e17_viscosity),
     "E22": ("water-clock", "🏺", "水時計（断面が高さで変わる器: 4 次の放物面なら水位が一定の速さで下がる）", e22_water_clock),
+    "E23": ("inertia-limits", "🚧", "慣性が要る題材（U 字管の揺れ・ダム決壊・水撃）は再現しない — 外れ方を数で記す",
+            e23_inertia_limits),
 }
 SLUGS = {slug: eid for eid, (slug, *_rest) in EXPERIMENTS.items()}
 
@@ -1570,7 +1869,7 @@ def fluid_aliases() -> dict[str, str]:
 
 SCENE_ICONS = {"🏛": "moniac-rig", "🥢": "somen-flume", "🎋": "flume", "🫙": "flume-hopper", "🌊": "dam-break",
                "🕳": "moniac-drain", "🧊": "cold-water", "🪵": "bamboo-wear", "🍜": "noodle-length",
-               "🧱": "noodle-clog", "🍽": "chopsticks", "🏺": "water-clock"}
+               "🧱": "noodle-clog", "🍽": "chopsticks", "🏺": "water-clock", "🚧": "inertia-limits"}
 
 
 def fluid_arg(text: str) -> str:
@@ -1579,7 +1878,7 @@ def fluid_arg(text: str) -> str:
 
 
 def scene_arg(text: str) -> str:
-    """draw の場面: 名前でも 🏛️ 🥢 🎋 🫙 🌊 🕳️ 🧊 🪵 🍜 🧱 🍽️ でもよい。"""
+    """draw の場面: 名前でも 🏛️ 🥢 🎋 🫙 🌊 🕳️ 🧊 🪵 🍜 🧱 🍽️ 🚧 でもよい。"""
     return SCENE_ICONS.get(_plain(text), text)
 
 
@@ -1709,6 +2008,10 @@ def rig_section(scene: str, fluid: str = "water", temp_c: float | None = None, m
         for name in ("clepsydra", "cylinder", "cone"):
             net.orifice(name, "sea", area=a, cd=CLOCK["cd"])
         return net.run(h0 / k, sample_every=1), ["clepsydra", "cylinder", "cone"]
+    if scene == "inertia-limits":
+        # ダム決壊（勾配 1 %）。水位は奥の壁から下がり始め、先端は尖らずにだらだら伸びる（Ritter とは別物）
+        net, _info = dam_break(0.1, slope=1e-2, dt=0.02, fluid=fluid)
+        return net.run(3.0, sample_every=3), ["bed"]
     raise KeyError(f"unknown rig scene {scene!r}")
 
 
@@ -1718,7 +2021,7 @@ def _from(res: dict, t0: float) -> dict:
 
 
 RIG_SCENES = ("moniac-rig", "somen-flume", "noodle-length", "noodle-clog", "chopsticks", "cold-water",
-              "bamboo-wear", "water-clock")
+              "bamboo-wear", "water-clock", "inertia-limits")
 
 
 def _visc(args) -> dict:
@@ -1784,7 +2087,7 @@ def build_parser() -> argparse.ArgumentParser:
                          allow_abbrev=False)
     scenes = RIG_SCENES + pw.SECTION_CASES + pw.SCENES
     drw.add_argument("scene", type=scene_arg, choices=scenes,
-                     help="場面（名前か 🏛️ 🥢 🧊 🪵 🎋 🫙 🌊 🕳️）")
+                     help="場面（名前か 🏛️ 🥢 🍜 🧱 🍽️ 🧊 🪵 🚧 🎋 🫙 🌊 🕳️）")
     drw.add_argument("block", nargs="?", type=block_arg,
                      help="流体のブロック・アイコン（🟦 🟨 🟧 🟩 🟪 / 💧 🍶 🧴 🟢 ☠️）か、塗りたい好きな絵文字")
     drw.add_argument("--view", choices=("frames", "frame", "files"), default="frames",
