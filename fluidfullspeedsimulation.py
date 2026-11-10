@@ -27,6 +27,7 @@ from fixedq import ONE, from_q, lag_step, qmul, random_scales, shift_lag_step, t
 from fluids import FLUIDS, PLACEHOLDER_MU_SCALE, REAL_FLUIDS, RE_LAMINAR, Section, channel_reynolds, fall_time
 from fluids import fluid_table, get_fluid, lip_head
 from fluids import ORIFICE_DELTA, TEMP_TABLES, lip_flow, normal_depth, superelevation, table_value, viscous_orifice
+from fluids import overland_equilibrium, overland_power_law, overland_recession, overland_rise, overland_t_e_power_law
 from fluids import poiseuille_head, poiseuille_tau, torricelli_empty_time, torricelli_head, transport_delay
 from network import Network, critical_gain, inverse_table, jsonable, peak_to_peak, settling_time, window
 import pixelwater as pw
@@ -1495,6 +1496,215 @@ def e22_water_clock(dt_list=(1.0, 0.25, 0.05), samples_list=(64, 512, 4096), see
             "summary": summary, "runs": runs, "checks": checks}
 
 
+# --- E18 斜面に降る雨（運動波の閉じた式との精度比べ） --------------------------------
+
+PLANE = {"length": 30.0, "width": 1.0, "slope": 0.05, "max_depth": 0.01}  # 幅 1 m・長さ 30 m・勾配 5 % の板
+RAIN = {"manning": 1e-4, "laminar": 3e-6}  # 雨の強さ [m/s]（360 mm/h・10.8 mm/h）。Re > 2000 / Re < 500 になる強さ
+RAIN_DT = {"manning": 0.1, "laminar": 0.5}
+RAIN_CELLS = (10, 20, 40, 80)
+SKY = 10.0  # 空の水 [m³]（降らせる分より十分多く）
+
+
+def rain_plane(intensity: float, cells: int, *, law: str = "manning", dt: float | None = None, fluid: str = "water",
+               t_rain: float | None = None, t_end: float | None = None, sample_every: int = 1,
+               mu: float | None = None, mu_scale: float | None = None) -> tuple[Network, dict, dict]:
+    """空（sky）→ 雨 → 板（cells 区間、長方形断面）→ 受け皿（basin）。t_rain まで降らせ t_end まで流す。
+    戻り値は (回路, run の結果, 閉じた式の定常)。既定では t_rain = 3·t_e、t_end = 6·t_e。"""
+    sec = Section("rect", PLANE["width"])
+    net = Network(RAIN_DT[law] if dt is None else dt, fluid, mu=mu, mu_scale=mu_scale)
+    net.tank("sky", 1.0, volume=SKY).tank("basin", 1.0)
+    net.channel("plane", "basin", length=PLANE["length"], cells=cells, slope=PLANE["slope"], section=sec, law=law,
+                max_depth=PLANE["max_depth"])
+    eq = overland_equilibrium(sec, intensity, PLANE["length"], PLANE["slope"], law, nu=net.fluid.nu,
+                              h_max=PLANE["max_depth"])
+    if eq["h_e"] >= 0.95 * PLANE["max_depth"]:
+        raise ValueError(f"rain {intensity:g} m/s fills the plane past the rating table ({eq['h_e']:.4g} m)")
+    t_rain = 3.0 * eq["t_e"] if t_rain is None else t_rain
+    t_end = 2.0 * t_rain if t_end is None else t_end
+    net.rain("plane", intensity, "sky", until=t_rain)
+    res = net.run(t_end, sample_every=sample_every)
+    eq["t_rain"] = t_rain
+    return net, res, eq
+
+
+def _outlet_series(res: dict) -> tuple[list[float], list[float]]:
+    """出口（板の最後の区間 → 受け皿）の流量の時系列 (t, Q)。"""
+    idx = next(ln["index"] for ln in res["links"] if ln["kind"] == "rating" and ln["dst"] == "basin")
+    return [row["t"] for row in res["series"]], [row[f"q:{idx}"] for row in res["series"]]
+
+
+def _at(ts: list[float], qs: list[float], t: float) -> float:
+    """時系列を時刻 t で線形補間。"""
+    for (t0, q0), (t1, q1) in zip(zip(ts, qs), zip(ts[1:], qs[1:])):
+        if t0 <= t <= t1:
+            return q0 if t1 == t0 else q0 + (q1 - q0) * (t - t0) / (t1 - t0)
+    return qs[-1]
+
+
+def _cross(ts: list[float], qs: list[float], level: float, rising: bool = True, after: float = 0.0) -> float:
+    """流量が初めて level を越える（rising）／下回る時刻（線形補間）。届かなければ inf。"""
+    for (t0, q0), (t1, q1) in zip(zip(ts, qs), zip(ts[1:], qs[1:])):
+        if t1 < after:
+            continue
+        hit = (q0 < level <= q1) if rising else (q0 > level >= q1)
+        if hit:
+            return t0 + (t1 - t0) * (level - q0) / (q1 - q0)
+    return math.inf
+
+
+def _last_rain_row(res: dict, t_rain: float) -> dict:
+    """雨がやむ直前の記録行（定常を読む）。"""
+    return [row for row in res["series"] if row["t"] <= t_rain - 0.5 * res["dt"]][-1]
+
+
+def rain_accuracy(law: str, intensity: float, cells: int, fluid: str = "water", dt: float | None = None) -> dict:
+    """1 回分の精度: 定常・95 % 到達時刻・t_e/2 の流量・立ち上がりの形（0.2〜0.8 t_e）・減衰の、閉じた式との相対誤差。"""
+    net, res, eq = rain_plane(intensity, cells, law=law, fluid=fluid, dt=dt)
+    sec = Section("rect", PLANE["width"])
+    kw = {"nu": net.fluid.nu}
+    ts, qs = _outlet_series(res)
+    q_e, t_e, t_rain = eq["Q_e"], eq["t_e"], eq["t_rain"]
+    steady = _last_rain_row(res, t_rain)
+    idx = next(ln["index"] for ln in res["links"] if ln["kind"] == "rating" and ln["dst"] == "basin")
+    h95 = normal_depth(sec, 0.95 * q_e, PLANE["slope"], law, h_max=PLANE["max_depth"], **kw)
+    t95_exact, t95 = h95 / intensity, _cross(ts, qs, 0.95 * q_e)
+    q_half_exact = overland_rise(sec, intensity, 0.5 * t_e, PLANE["slope"], law, **kw)
+    q_half = _at(ts, qs, 0.5 * t_e)
+    rise = []
+    for f in (0.2, 0.35, 0.5, 0.65, 0.8):
+        exact = overland_rise(sec, intensity, f * t_e, PLANE["slope"], law, **kw)
+        rise.append(rel_err(_at(ts, qs, f * t_e), exact))
+    rec = []
+    for f in (0.5, 1.0, 2.0):
+        exact = overland_recession(sec, intensity, PLANE["length"], PLANE["slope"], law, f * t_e,
+                                   h_max=PLANE["max_depth"], **kw)
+        rec.append({"t_after": f * t_e, "engine": _at(ts, qs, t_rain + f * t_e), "exact": exact,
+                    "rel_err": rel_err(_at(ts, qs, t_rain + f * t_e), exact)})
+    t05_fall = _cross(ts, qs, 0.05 * q_e, rising=False, after=t_rain) - t_rain
+    ch = res["channels"]["plane"]
+    drained_q = res["volumes_q"]["basin"] + sum(res["volumes_q"][c] for c in ch_cells(res))
+    return {
+        "cells": cells, "fluid": fluid, "intensity": intensity, "dt": res["dt"], "t_e": t_e, "t_rain": t_rain,
+        "Q_e": q_e, "h_e": eq["h_e"], "outflow_steady": steady[f"q:{idx}"], "depth_steady": steady["h:plane"][-1],
+        "t95": t95, "t95_exact": t95_exact, "t95_rel_err": rel_err(t95, t95_exact),
+        "q_half": q_half, "q_half_exact": q_half_exact, "q_half_rel_err": rel_err(q_half, q_half_exact),
+        "rise_max_rel_err": max(rise), "recession": rec, "rec_max_rel_err": max(r["rel_err"] for r in rec),
+        "t05_fall": t05_fall, "courant": ch["courant"], "overflow": ch["overflow"],
+        "rained_q": ch["rained_q"], "drained_q": drained_q, "conservation_error_q": res["conservation_error_q"],
+        "volumes_q": res["volumes_q"], "series": res["series"],
+    }
+
+
+def ch_cells(res: dict) -> list[str]:
+    return [k for k in res["volumes_q"] if k.startswith("plane:")]
+
+
+def _steady_checks(tag: str, icon: str, a: dict) -> list[dict]:
+    return [
+        close(f"{tag}:outflow", icon + "🔁", a["outflow_steady"], a["Q_e"], 1e-3, note="定常の流出 = i·B·L（雨がやむ直前）"),
+        close(f"{tag}:depth", icon + "📏", a["depth_steady"], a["h_e"], 1e-3, note="出口の水深 = h_e（Q(h_e) = i·B·L）"),
+        check(f"{tag}:courant", "🧭", a["courant"] <= 1.0, value=a["courant"], expected=1.0, note="Courant ≤ 1"),
+        check(f"{tag}:rained=drained", "🌧️", a["rained_q"] == a["drained_q"], value=a["drained_q"],
+              expected=a["rained_q"], tol=0, note="降った量 = 受け皿 + 板に残る水（ulp まで）"),
+        check(f"{tag}:conserve", "⚖️", a["conservation_error_q"] == 0, value=a["conservation_error_q"], expected=0,
+              tol=0, note="Σ水槽 + 管の中（Q 整数、ulp）"),
+    ]
+
+
+def e18_rain_runoff(cells_list=RAIN_CELLS, base_cells: int = 20, seed: int = 18) -> dict:
+    """🌧️ 板に一様な雨。運動波の閉じた式（定常 Q_e = i·B·L、h_e、t_e = h_e/i、立ち上がり Q(i·t)、減衰の特性線）と比べ、
+    区間を細かくすると誤差が縮むこと（収束）を精度表に残す。
+
+    誤差の出どころは 2 つ: 区間に分ける（上流側の区間ほど水がたまりにくく、先端がなまる → t95・減衰の誤差 ∝ Δx）と、
+    ステップに分ける（雨はそのステップの流出を決めた後に入るので、水深が dt だけ遅れる → Q(t_e/2) の誤差 ≈ m·dt/(t_e/2)）。
+    Manning は粘度によらず、層流は t_e ∝ ν^(1/3)。"""
+    checks, runs, summary = [], {}, {}
+    sec = Section("rect", PLANE["width"])
+    w = get_fluid("water")
+    table, by_cells = [], {}
+    for n in cells_list:
+        a = rain_accuracy("manning", RAIN["manning"], n)
+        by_cells[n] = a
+        table.append({k: a[k] for k in ("cells", "dt", "t95_rel_err", "q_half_rel_err", "rise_max_rel_err",
+                                        "rec_max_rel_err", "courant")})
+        checks += _steady_checks(f"manning:{n}", "", a)
+        runs[f"manning:{n}"] = a["series"][:: max(1, len(a["series"]) // 400)]
+    fine = by_cells[max(cells_list)]
+    base = by_cells[base_cells]
+    errs = [row["t95_rel_err"] for row in table]
+    errs_r = [row["rec_max_rel_err"] for row in table]
+    ratios = [y / x for x, y in zip(errs, errs[1:])]
+    half_dt = rain_accuracy("manning", RAIN["manning"], base_cells, dt=0.5 * RAIN_DT["manning"])
+    table.append({k: half_dt[k] for k in ("cells", "dt", "t95_rel_err", "q_half_rel_err", "rise_max_rel_err",
+                                          "rec_max_rel_err", "courant")})
+    summary["accuracy"] = table
+    alpha, m = overland_power_law(PLANE["slope"], "manning", nu=w.nu)
+    nf = max(cells_list)
+    checks += [
+        close(f"manning:{nf}:t95", "⏱️", fine["t95"], fine["t95_exact"], 0.05,
+              note="95 % に届く時刻 = h95/i（最も細かい区間。粗いほど遅れる: 精度表）"),
+        check(f"manning:{nf}:rise-shape", "📈", fine["rise_max_rel_err"] <= 0.02, value=fine["rise_max_rel_err"],
+              tol=0.02, note="立ち上がり Q(i·t)（0.2〜0.8 t_e）との最大相対ずれ"),
+        check(f"manning:{nf}:recession", "📉", fine["rec_max_rel_err"] <= 0.05, value=fine["rec_max_rel_err"],
+              tol=0.05, note="減衰（特性線の陰関数解、やんで 0.5〜2 t_e 後）との最大相対ずれ"),
+        check(f"manning:{base_cells}:recession-slower", "🐢", base["t05_fall"] > base["t95"], value=base["t05_fall"],
+              expected=base["t95"], note="5 % まで引く時間 > 95 % まで上がる時間（減衰は立ち上がりより遅い）"),
+        close("manning:t_e-power-law", "📐", overland_t_e_power_law(RAIN["manning"], PLANE["length"], alpha, m),
+              base["t_e"], 2 * base["h_e"] / PLANE["width"],
+              note="広い平面の t_e = (L/(α i^(m−1)))^(1/m)（R ≈ h とみなす分 2h/B までずれる）"),
+        check("manning:converges-dx", "📉", all(r <= 0.7 for r in ratios) and all(y < x for x, y in zip(errs_r, errs_r[1:])),
+              value=errs, note="区間を倍にするごとに t95 の誤差が 0.7 倍未満に縮む（減衰の誤差も縮む）: 1 次の収束"),
+        close("manning:q-half-dt", "⏲️", base["q_half_rel_err"], m * base["dt"] / (0.5 * base["t_e"]), 0.3,
+              note="Q(t_e/2) の誤差 ≈ m·dt/(t_e/2)（雨がそのステップの流出の後に入る分）。区間数には依らない"),
+        check("manning:q-half-halves", "⏲️", half_dt["q_half_rel_err"] < 0.6 * base["q_half_rel_err"],
+              value=half_dt["q_half_rel_err"], expected=base["q_half_rel_err"], note="dt を半分にすると Q(t_e/2) の誤差も半分に"),
+    ]
+    # 🍶 Manning は粘度によらない
+    e = rain_accuracy("manning", RAIN["manning"], base_cells, fluid="ethanol")
+    checks.append(check("manning:fluid-free", "🟰", e["volumes_q"] == base["volumes_q"],
+                        note="Manning の板は 🍶 でも各区間・受け皿の体積がビット単位で同じ"))
+    # 〰️ 層流: 水とエタノール
+    lam = {}
+    for key in ("water", "ethanol"):
+        fl = get_fluid(key)
+        b = rain_accuracy("laminar", RAIN["laminar"], base_cells, fluid=key)
+        lam[key] = b
+        re = channel_reynolds(sec, b["h_e"], b["Q_e"], fl.nu)
+        checks += _steady_checks(f"laminar:{key}", fl.icon, b)
+        checks += [
+            check(f"laminar:{key}:regime", "〰️", re < 500.0, value=re, expected=500.0, note="Re = v·R/ν < 500（層流の前提）"),
+            check(f"laminar:{key}:rise-shape", "📈", b["rise_max_rel_err"] <= 0.05, value=b["rise_max_rel_err"], tol=0.05,
+                  note=f"立ち上がり Q(i·t) との最大相対ずれ（{base_cells} 区間）"),
+        ]
+        runs[f"laminar:{key}"] = b["series"][:: max(1, len(b["series"]) // 400)]
+        summary[f"laminar:{key}"] = {k: b[k] for k in ("t_e", "h_e", "t95", "t95_exact", "t95_rel_err",
+                                                       "rise_max_rel_err", "rec_max_rel_err")}
+    ratio = (get_fluid("ethanol").nu / w.nu) ** (1.0 / 3.0)
+    checks += [
+        close("laminar:t_e-ratio", "🍶⏱️", lam["ethanol"]["t_e"] / lam["water"]["t_e"], ratio, 1e-3,
+              note="閉じた式: t_e ∝ ν^(1/3)（q = g·S·h³/(3ν)）"),
+        close("laminar:t95-ratio", "🍶🏎️", lam["ethanol"]["t95"] / lam["water"]["t95"], ratio, 2e-2,
+              note="回した 95 % 到達時刻の比も ν^(1/3) に沿う"),
+    ]
+    # 🎲 雨の強さを A×10^-5 で振る（Manning、定常だけ）
+    sweep = []
+    for item in random_scales(seed, 3, n_min=5, n_max=5):
+        a = rain_accuracy("manning", item["value"], base_cells)
+        sweep.append({"label": item["label"], "Q_e": a["Q_e"], "outflow": a["outflow_steady"], "h_e": a["h_e"],
+                      "depth": a["depth_steady"], "t95_rel_err": a["t95_rel_err"]})
+        checks += _steady_checks(f"sweep:{item['label']}", "🎲", a)[:2] + [
+            check(f"sweep:{item['label']}:conserve", "⚖️", a["conservation_error_q"] == 0,
+                  value=a["conservation_error_q"], expected=0, tol=0)]
+    summary["sweep"] = sweep
+    summary["manning"] = {k: base[k] for k in ("t_e", "h_e", "Q_e", "t95", "t95_exact", "q_half", "q_half_exact",
+                                              "rise_max_rel_err", "recession", "t05_fall")}
+    summary["manning_fine"] = {k: fine[k] for k in ("cells", "t95", "t95_exact", "rise_max_rel_err", "rec_max_rel_err")}
+    summary["power_law"] = {"alpha": alpha, "m": m, "t_e": overland_t_e_power_law(RAIN["manning"], PLANE["length"], alpha, m)}
+    return {"params": {"plane": PLANE, "rain": RAIN, "dt": RAIN_DT, "cells": list(cells_list), "base_cells": base_cells,
+                       "seed": seed, "sky": SKY},
+            "summary": summary, "runs": runs, "checks": checks}
+
+
 # --- 登録簿 ---------------------------------------------------------------
 
 EXPERIMENTS = {
@@ -1515,6 +1725,7 @@ EXPERIMENTS = {
     "E15": ("cold-water", "🧊", "冷たい水（水温で粘度・密度が変わる）", e15_cold_water),
     "E16": ("bamboo-wear", "🪵", "竹の傷み（割れ目からの漏れ・節の削り残し）", e16_bamboo_wear),
     "E17": ("viscosity", "🍯", "粘度のつまみ（直接・倍率、仮置きの流体、粘い小孔）", e17_viscosity),
+    "E18": ("rain-runoff", "🌧️", "斜面に降る雨（運動波の閉じた式との精度比べ・区間数での収束）", e18_rain_runoff),
     "E22": ("water-clock", "🏺", "水時計（断面が高さで変わる器: 4 次の放物面なら水位が一定の速さで下がる）", e22_water_clock),
 }
 SLUGS = {slug: eid for eid, (slug, *_rest) in EXPERIMENTS.items()}
@@ -1570,7 +1781,7 @@ def fluid_aliases() -> dict[str, str]:
 
 SCENE_ICONS = {"🏛": "moniac-rig", "🥢": "somen-flume", "🎋": "flume", "🫙": "flume-hopper", "🌊": "dam-break",
                "🕳": "moniac-drain", "🧊": "cold-water", "🪵": "bamboo-wear", "🍜": "noodle-length",
-               "🧱": "noodle-clog", "🍽": "chopsticks", "🏺": "water-clock"}
+               "🧱": "noodle-clog", "🍽": "chopsticks", "🌧": "rain-runoff", "🏺": "water-clock"}
 
 
 def fluid_arg(text: str) -> str:
@@ -1699,6 +1910,9 @@ def rig_section(scene: str, fluid: str = "water", temp_c: float | None = None, m
         for i, name in enumerate(("udon", "somen")):
             net.tracer(name, "take/0:0", release=40.0 + i, stop="basin", size=NOODLES[name])
         return net.run(100.0, sample_every=10), ["take/0", "take/0b", "basin", "floor"]
+    if scene == "rain-runoff":  # 🌧️ 雨が板に行き渡って（上流ほど浅い）、やむと下流から引いていく
+        _net, res, _eq = rain_plane(RAIN["manning"], 20, fluid=fluid, sample_every=10, **visc)
+        return res, ["plane", "basin"]
     if scene == "water-clock":
         h0, r_top, a = CLOCK["h0"], CLOCK["r_top"], math.pi * (CLOCK["orifice_d"] / 2) ** 2
         k = clock_rate(h0, r_top, CLOCK["orifice_d"], CLOCK["cd"])
@@ -1718,7 +1932,7 @@ def _from(res: dict, t0: float) -> dict:
 
 
 RIG_SCENES = ("moniac-rig", "somen-flume", "noodle-length", "noodle-clog", "chopsticks", "cold-water",
-              "bamboo-wear", "water-clock")
+              "bamboo-wear", "rain-runoff", "water-clock")
 
 
 def _visc(args) -> dict:
@@ -1784,7 +1998,7 @@ def build_parser() -> argparse.ArgumentParser:
                          allow_abbrev=False)
     scenes = RIG_SCENES + pw.SECTION_CASES + pw.SCENES
     drw.add_argument("scene", type=scene_arg, choices=scenes,
-                     help="場面（名前か 🏛️ 🥢 🧊 🪵 🎋 🫙 🌊 🕳️）")
+                     help="場面（名前か 🏛️ 🥢 🍜 🧱 🍽️ 🧊 🪵 🌧️ 🎋 🫙 🌊 🕳️）")
     drw.add_argument("block", nargs="?", type=block_arg,
                      help="流体のブロック・アイコン（🟦 🟨 🟧 🟩 🟪 / 💧 🍶 🧴 🟢 ☠️）か、塗りたい好きな絵文字")
     drw.add_argument("--view", choices=("frames", "frame", "files"), default="frames",

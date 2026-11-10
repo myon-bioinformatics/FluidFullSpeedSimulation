@@ -34,7 +34,8 @@ import random
 from typing import Callable
 
 from fixedq import ONE, Cam, DelayLine, clamp, from_q, lag_gain, lag_step, qdiv, qmul, qsqrt, to_q
-from fluids import G, RE_LAMINAR, Section, channel_flow, fall_time, get_fluid, lip_flow, reynolds, side_spill
+from fluids import G, RE_LAMINAR, Section, channel_flow, fall_time, get_fluid, lip_flow, plan_width, reynolds
+from fluids import side_spill
 from fluids import viscous_orifice
 from fluids import superelevation
 
@@ -449,6 +450,26 @@ class Network:
         """[[水位, 流量], ...] の表で決まる流出（特殊形状のスリット）。"""
         return self._link("cam", src, dst, delay, cam=Cam(table), table=[list(map(float, p)) for p in table])
 
+    def rain(self, prefix: str, intensity: float, src: str, *, start: float = 0.0, until: float | None = None) -> list[dict]:
+        """🌧️ 樋 prefix の全セルに一様な雨 intensity [m/s] を降らせる（src の水槽から各セルへのポンプ）。
+
+        1 セルの受ける流量 = intensity × 平面の幅（fluids.plan_width）× セル長。ポンプなので start〜until の間だけ降り、
+        src が空になれば按分で止まる。戻り値は作ったポンプの並び（link に rain=True・channel=prefix を付ける）。
+        """
+        if prefix not in self.channels:
+            raise ValueError(f"unknown channel {prefix!r}")
+        if intensity < 0:
+            raise ValueError("intensity must be >= 0")
+        ch = self.channels[prefix]
+        sec = self.nodes[ch["cells"][0]]["section"]
+        rate = intensity * plan_width(sec) * ch["cell_length"]
+        out = []
+        for cell in ch["cells"]:
+            ln = self.pump(src, cell, rate=rate, start=start, until=until)
+            ln.update(rain=True, channel=prefix, intensity=intensity)
+            out.append(ln)
+        return out
+
     def pump(self, src: str, dst: str, *, rate: float, start: float = 0.0, until: float | None = None,
              delay: float = 0.0) -> dict:
         """一定流量。start から until まで動く。"""
@@ -860,6 +881,7 @@ class Network:
                 "courant": celerity * self.dt / ch["cell_length"], "depth_cap": ch["depth_cap"],
                 "spilled": sum(from_q(ln["flow_sum"]) for ln in spills),
                 "leaked": sum(from_q(ln["flow_sum"]) for ln in mine if ln.get("crack")),
+                "rained_q": sum(ln["flow_sum"] for ln in mine if ln.get("rain")),
                 "max_outer_depth": max((ln["max_outer"] for ln in spills), default=None)}
 
 
@@ -872,7 +894,8 @@ def ch_depth(ln: dict, net: "Network") -> float:
 # --- JSON の仕様から組む --------------------------------------------------
 
 LINK_BUILDERS = ("pipe", "orifice", "weir", "cam", "pump", "valve", "float_valve")
-SPEC_KEYS = {"dt", "fluid", "temp_c", "mu", "mu_scale", "tanks", "channels", "flumes", "links", "tracers", "t_end", "trace", "sample_every"}
+SPEC_KEYS = {"dt", "fluid", "temp_c", "mu", "mu_scale", "tanks", "channels", "flumes", "rains", "links", "tracers",
+             "t_end", "trace", "sample_every"}
 
 
 def build(spec: dict) -> Network:
@@ -887,6 +910,7 @@ def build(spec: dict) -> Network:
 
     channels・flumes は tanks の後、links の前に作る（樋のセルを管の行き先に使えるように）。
     flumes は {"prefix", "dst", "segments": [...], "spill"}（Network.flume を参照）。
+    rains は {"prefix", "intensity", "src", "start", "until"}（Network.rain。樋の全セルに一様な雨）。
     links の law が LINK_BUILDERS 以外なら、register_law で登録した法則として net.link に渡す。
     """
     extra = set(spec) - SPEC_KEYS
@@ -900,6 +924,8 @@ def build(spec: dict) -> Network:
         net.channel(**c)
     for fl in spec.get("flumes", []):
         net.flume(**fl)
+    for rn in spec.get("rains", []):  # 🌧️ {"prefix", "intensity", "src", "start", "until"}
+        net.rain(**rn)
     for ln in spec.get("links", []):
         ln = dict(ln)
         law = ln.pop("law")
