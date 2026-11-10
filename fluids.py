@@ -370,6 +370,274 @@ def side_spill(cell_length: float, h_outer: float, rim: float, cd: float = 0.62,
     return cd * (2.0 / 3.0) * cell_length * math.sqrt(2.0 * g) * over ** 1.5
 
 
+# --- 斜面に降る雨（運動波）の閉じた式 ---------------------------------------------
+
+def plan_width(section: Section) -> float:
+    """雨を受ける平面の幅。長方形は幅そのもの、半円は口の幅 2r（縁まで満ちた竹が受ける幅）。"""
+    return section.size if section.shape == "rect" else 2.0 * section.size
+
+
+def wave_celerity(section: Section, h: float, slope: float, law: str, *, nu: float, n_manning: float = 0.010,
+                  beta: float | None = None, g: float = G, rel: float = 1e-4) -> float:
+    """運動波の速さ c = dQ/dA = (dQ/dh) / B(h)。dQ/dh は中心差分（刻み h·rel）。"""
+    if h <= 0:
+        return 0.0
+    dh = h * rel
+    qp = channel_flow(section, h + dh, slope, law, nu=nu, n_manning=n_manning, beta=beta, g=g)
+    qm = channel_flow(section, h - dh, slope, law, nu=nu, n_manning=n_manning, beta=beta, g=g)
+    return (qp - qm) / (2.0 * dh) / section.top_width(h)
+
+
+def overland_equilibrium(section: Section, intensity: float, length: float, slope: float, law: str, *, nu: float,
+                         h_max: float, n_manning: float = 0.010, beta: float | None = None, g: float = G) -> dict:
+    """一様な雨 i が長さ L の斜面に降るときの定常（運動波、Henderson & Wooding 1964）。
+
+    特性線に沿って dh/dt = i、dx/dt = c(h) なので、上流端（x = 0、h = 0）から出た特性線は
+    x(t) = Q(i·t) / (i·B) を進む。これが L に届く時刻が平衡到達時間 t_e で、そのとき出口の水深は
+    h_e（Q(h_e) = i·B·L）。よって t_e = h_e / i。流量の形 Q(h) は何でもよい（べき乗則に限らない）。
+    戻り値: Q_e（定常流出）、h_e、t_e、B（雨を受ける幅）。
+    """
+    b = plan_width(section)
+    q_e = intensity * b * length
+    h_e = normal_depth(section, q_e, slope, law, nu=nu, h_max=h_max, n_manning=n_manning, beta=beta, g=g)
+    return {"Q_e": q_e, "h_e": h_e, "t_e": h_e / intensity, "B": b}
+
+
+def overland_rise(section: Section, intensity: float, t: float, slope: float, law: str, *, nu: float,
+                  n_manning: float = 0.010, beta: float | None = None, g: float = G) -> float:
+    """立ち上がり（t < t_e）: 出口の水深は h = i·t、流量は Q(i·t)。べき乗則なら α(i·t)^m。"""
+    return channel_flow(section, intensity * t, slope, law, nu=nu, n_manning=n_manning, beta=beta, g=g)
+
+
+def overland_recession(section: Section, intensity: float, length: float, slope: float, law: str, t_after: float, *,
+                       nu: float, h_max: float, n_manning: float = 0.010, beta: float | None = None,
+                       g: float = G) -> float:
+    """雨がやんでから t_after 後の出口の流量（定常から始まる減衰、Kibler & Woolhiser 1970 の式 19–21）。
+
+    雨がやむと特性線に沿って h は変わらず x = x0 + c(h)·t_after。出口に届く特性線は、定常の分布
+    Q(h) = i·B·x0 から出たものなので、Q(h)/(i·B) + c(h)·t_after = L を h について二分法で解く
+    （左辺は h について単調増加）。
+    """
+    b = plan_width(section)
+    eq = overland_equilibrium(section, intensity, length, slope, law, nu=nu, h_max=h_max, n_manning=n_manning,
+                              beta=beta, g=g)
+    kw = {"nu": nu, "n_manning": n_manning, "beta": beta, "g": g}
+
+    def reach(h: float) -> float:
+        return channel_flow(section, h, slope, law, **kw) / (intensity * b) + wave_celerity(
+            section, h, slope, law, **kw) * t_after
+
+    lo, hi = 0.0, eq["h_e"]
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        lo, hi = (mid, hi) if reach(mid) < length else (lo, mid)
+    return channel_flow(section, 0.5 * (lo + hi), slope, law, **kw)
+
+
+def overland_power_law(slope: float, law: str, *, nu: float, n_manning: float = 0.010, beta: float = 3.0,
+                       g: float = G) -> tuple[float, float]:
+    """広い平面（R ≈ h）のべき乗則 q = α·h^m（単位幅あたり）。Manning: α = √S/n、m = 5/3。層流: α = g·S/(β·ν)、m = 3。"""
+    if law == "manning":
+        return math.sqrt(slope) / n_manning, 5.0 / 3.0
+    if law == "laminar":
+        return g * slope / (beta * nu), 3.0
+    raise ValueError("law must be 'manning' or 'laminar'")
+
+
+def overland_t_e_power_law(intensity: float, length: float, alpha: float, m: float) -> float:
+    """広い平面の平衡到達時間 t_e = (L / (α·i^(m−1)))^(1/m)（Woolhiser & Liggett 1967 の形）。"""
+    return (length / (alpha * intensity ** (m - 1.0))) ** (1.0 / m)
+
+
+# --- 溜まる → 閾値 → 一気に（鹿威し・ピタゴラスの杯・マリオットびん） --------------------
+
+def tip_period(v_tip: float, q_in: float, t_dump: float = 0.0) -> float:
+    """🎍 鹿威しの周期 T = V_tip / q + t_dump（傾いている間も注ぎ込みは続き、そのまま流れ出る前提）。"""
+    if v_tip <= 0 or q_in <= 0:
+        raise ValueError("v_tip and q_in must be positive")
+    return v_tip / q_in + t_dump
+
+
+def siphon_flow(cd: float, tube_area: float, head: float, g: float = G) -> float:
+    """🍷 サイフォンの流量 Q = Cd·a·√(2g·H)。H は水面と出口の高さの差（Cd は管の損失をまとめた係数）。"""
+    return cd * tube_area * math.sqrt(2.0 * g * head) if head > 0 else 0.0
+
+
+def siphon_drain_time(tank_area: float, cd: float, tube_area: float, h_from: float, h_to: float, h_drop: float,
+                      g: float = G) -> float:
+    """🍷 注ぎ込みなしで、筒の水面が h_from から h_to まで下がる時間（出口は底より h_drop 下）。
+    A·dh/dt = −Cd·a·√(2g(h + h_drop)) を解いて t = 2A/(Cd·a·√(2g))·(√(h_from + h_drop) − √(h_to + h_drop))。"""
+    if h_from < h_to:
+        raise ValueError("h_from must be >= h_to")
+    return 2.0 * tank_area / (cd * tube_area * math.sqrt(2.0 * g)) * (
+        math.sqrt(h_from + h_drop) - math.sqrt(h_to + h_drop))
+
+
+def siphon_drain_time_with_inflow(tank_area: float, cd: float, tube_area: float, h_from: float, h_to: float,
+                                  h_drop: float, q_in: float, g: float = G, steps: int = 20000) -> float:
+    """🍷 注ぎ込み q_in がある間の排水時間。閉じた式にならないので RK4（steps 分割）で解く（物差し用の参照値）。
+    q_in が出口での流量以上なら下がりきらないので ValueError。"""
+    if siphon_flow(cd, tube_area, h_to + h_drop, g) <= q_in:
+        raise ValueError("inflow exceeds the siphon at the intake; the cup never empties")
+
+    def f(h: float) -> float:
+        return (q_in - siphon_flow(cd, tube_area, h + h_drop, g)) / tank_area
+
+    h, t = h_from, 0.0
+    dt = siphon_drain_time(tank_area, cd, tube_area, h_from, h_to, h_drop, g) / steps
+    for _ in range(10 * steps):
+        k1 = f(h)
+        k2 = f(h + 0.5 * dt * k1)
+        k3 = f(h + 0.5 * dt * k2)
+        k4 = f(h + dt * k3)
+        h_next = h + dt * (k1 + 2 * k2 + 2 * k3 + k4) / 6.0
+        if h_next <= h_to:  # 最後は線形に補間
+            return t + dt * (h - h_to) / (h - h_next)
+        h, t = h_next, t + dt
+    raise RuntimeError("siphon reference did not converge")  # pragma: no cover
+
+
+def mariotte_flow(cd: float, orifice_area: float, h_air: float, g: float = G) -> float:
+    """🫗 マリオットびんの一定流量 Q = Cd·a·√(2g·h_air)。h_air は空気管の下端と出口の高さの差。"""
+    return cd * orifice_area * math.sqrt(2.0 * g * h_air) if h_air > 0 else 0.0
+
+
+def mariotte_constant_time(h0: float, h_air: float, tank_area: float, cd: float, orifice_area: float,
+                           g: float = G) -> float:
+    """🫗 水面が空気管の下端まで下がる（流量が一定のまま）時間 (h0 − h_air)·A / Q。"""
+    if h0 <= h_air:
+        return 0.0
+    return (h0 - h_air) * tank_area / mariotte_flow(cd, orifice_area, h_air, g)
+
+
+# --- 🍷 エタノール・水の混合物（蒸留と熟成） -----------------------------------------
+
+M_ETHANOL, M_WATER = 46.068e-3, 18.015e-3  # モル質量 [kg/mol]
+LATENT_ETHANOL, LATENT_WATER = 38.56e3, 40.66e3  # 沸点での蒸発熱 [J/mol]
+RHO_WATER_20 = 998.203  # 20 °C の水 [kg/m³]（密度表は 20 °C の水に対する比）
+
+# 101.3 kPa のエタノール（x: 液、y: 蒸気のモル分率）と沸点 [°C]。Perry's Chemical Engineers' Handbook Table 13-1
+ETHANOL_WATER_VLE = (
+    (0.0000, 0.0000, 100.0), (0.0190, 0.1700, 95.5), (0.0721, 0.3891, 89.0), (0.0966, 0.4375, 86.7),
+    (0.1238, 0.4704, 85.3), (0.1661, 0.5089, 84.1), (0.2337, 0.5445, 82.7), (0.2608, 0.5580, 82.3),
+    (0.3273, 0.5826, 81.5), (0.3965, 0.6122, 80.7), (0.5079, 0.6564, 79.8), (0.5198, 0.6599, 79.7),
+    (0.5732, 0.6841, 79.3), (0.6763, 0.7385, 78.74), (0.7472, 0.7815, 78.41), (0.8943, 0.8943, 78.15),
+    (1.0000, 1.0000, 78.3),
+)
+AZEOTROPE_X = 0.8943  # 共沸点（y = x、78.15 °C）
+
+# 20 °C の水溶液の密度（20 °C の水に対する比）。質量% 0〜100 の 1 % 刻み。Wikipedia: Ethanol (data page)
+_DENSITY_REL_20 = (
+    1.00000, 0.99813, 0.99629, 0.99451, 0.99279, 0.99113, 0.98955, 0.98802, 0.98653, 0.98505,
+    0.98361, 0.98221, 0.98084, 0.97948, 0.97816, 0.97687, 0.97560, 0.97431, 0.97301, 0.97169,
+    0.97036, 0.96901, 0.96763, 0.96624, 0.96483, 0.96339, 0.96190, 0.96037, 0.95880, 0.95717,
+    0.95551, 0.95381, 0.95207, 0.95028, 0.94847, 0.94662, 0.94473, 0.94281, 0.94086, 0.93886,
+    0.93684, 0.93479, 0.93272, 0.93062, 0.92849, 0.92636, 0.92421, 0.92204, 0.91986, 0.91766,
+    0.91546, 0.91322, 0.91097, 0.90872, 0.90645, 0.90418, 0.90191, 0.89962, 0.89733, 0.89502,
+    0.89271, 0.89040, 0.88807, 0.88574, 0.88339, 0.88104, 0.87869, 0.87632, 0.87396, 0.87158,
+    0.86920, 0.86680, 0.86440, 0.86200, 0.85958, 0.85716, 0.85473, 0.85230, 0.84985, 0.84740,
+    0.84494, 0.84245, 0.83997, 0.83747, 0.83496, 0.83242, 0.82987, 0.82729, 0.82469, 0.82207,
+    0.81942, 0.81674, 0.81401, 0.81127, 0.80848, 0.80567, 0.80280, 0.79988, 0.79688, 0.79383,
+    0.79074,
+)
+# 同じデータページの「質量% → 体積%」の実測の行（ABV の換算の答え合わせ用）
+ABV_CHECK_ROWS = ((4.0, 5.00), (10.0, 12.40), (18.0, 22.10), (25.0, 30.40), (30.0, 36.20), (39.0, 46.3),
+                  (45.31, 53.00), (55.16, 63.0), (71.9, 78.3), (91.0, 94.00))
+
+
+def vle_y(x: float) -> float:
+    """液のエタノールのモル分率 x と釣り合う蒸気の y（表を直線でつなぐ）。"""
+    return _vle_column(x, 1)
+
+
+def bubble_t(x: float) -> float:
+    """沸点 [°C]（表を直線でつなぐ）。"""
+    return _vle_column(x, 2)
+
+
+def _vle_column(x: float, col: int) -> float:
+    rows = ETHANOL_WATER_VLE
+    if x <= 0.0:
+        return rows[0][col]
+    if x >= 1.0:
+        return rows[-1][col]
+    for a, b in zip(rows, rows[1:]):
+        if x <= b[0]:
+            w = (x - a[0]) / (b[0] - a[0])
+            return a[col] + w * (b[col] - a[col])
+    return rows[-1][col]  # pragma: no cover
+
+
+def density_20(mass_fraction: float) -> float:
+    """20 °C の水溶液の密度 [kg/m³]（質量分率 0..1、1 % 刻みの表を直線でつなぐ）。"""
+    w = min(max(mass_fraction, 0.0), 1.0) * 100.0
+    i = min(int(w), 99)
+    rel = _DENSITY_REL_20[i] + (w - i) * (_DENSITY_REL_20[i + 1] - _DENSITY_REL_20[i])
+    return rel * RHO_WATER_20
+
+
+def mix_mass(n_ethanol: float, n_water: float) -> float:
+    return n_ethanol * M_ETHANOL + n_water * M_WATER
+
+
+def mix_volume(n_ethanol: float, n_water: float) -> float:
+    """混ぜた液の体積 [m³]（20 °C）。体積は足し算にならない（混ぜると縮む）ので密度表から。"""
+    m = mix_mass(n_ethanol, n_water)
+    return 0.0 if m <= 0 else m / density_20(n_ethanol * M_ETHANOL / m)
+
+
+def abv(n_ethanol: float, n_water: float) -> float:
+    """アルコール度数（20 °C の体積%）= 純エタノールの体積 / 液の体積 × 100。"""
+    v = mix_volume(n_ethanol, n_water)
+    return 0.0 if v <= 0 else 100.0 * (n_ethanol * M_ETHANOL / density_20(1.0)) / v
+
+
+def mole_fraction(n_ethanol: float, n_water: float) -> float:
+    total = n_ethanol + n_water
+    return 0.0 if total <= 0 else n_ethanol / total
+
+
+def moles_for_abv(abv_percent: float, volume_m3: float) -> tuple[float, float]:
+    """度数と体積 [m³] から (エタノール, 水) のモル数。質量分率を二分法で探す。"""
+    if not 0.0 <= abv_percent <= 100.0 or volume_m3 < 0:
+        raise ValueError("abv must be within 0..100 and volume >= 0")
+    lo, hi = 0.0, 1.0
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        if abv(mid / M_ETHANOL, (1 - mid) / M_WATER) < abv_percent:
+            lo = mid
+        else:
+            hi = mid
+    w = 0.5 * (lo + hi)
+    mass = volume_m3 * density_20(w)
+    return mass * w / M_ETHANOL, mass * (1 - w) / M_WATER
+
+
+def latent_heat(y: float) -> float:
+    """蒸気 1 mol をつくる熱 [J/mol]（モル分率で混ぜる）。"""
+    return y * LATENT_ETHANOL + (1.0 - y) * LATENT_WATER
+
+
+def rayleigh_log(x_end: float, x0: float) -> float:
+    """Rayleigh 式 ln(W0/W) = ∫_{x_end}^{x0} dx / (y − x)。y(x) は表の直線なので区間ごとに厳密に積分する。"""
+    if x_end > x0:
+        raise ValueError("x_end must be <= x0")
+    rows = ETHANOL_WATER_VLE
+    total = 0.0
+    for a, b in zip(rows, rows[1:]):
+        lo, hi = max(a[0], x_end), min(b[0], x0)
+        if hi <= lo:
+            continue
+        slope = (b[1] - a[1]) / (b[0] - a[0])  # y = a_y + slope (x − a_x)
+        c0 = a[1] - slope * a[0]  # y − x = c0 + (slope − 1) x
+        k = slope - 1.0
+        f = lambda x: c0 + k * x
+        if f(lo) <= 0 or f(hi) <= 0:
+            raise ValueError("y − x must stay positive (below the azeotrope)")
+        total += (hi - lo) / f(lo) if abs(k) < 1e-15 else math.log(f(hi) / f(lo)) / k
+    return total
+
+
 __all__ = [
     "FLUIDS", "Fluid", "G", "REAL_FLUIDS", "RE_LAMINAR", "TEMP_TABLES", "fluid_table", "get_fluid", "table_value",
     "temperature_range",
@@ -378,4 +646,11 @@ __all__ = [
     "Section", "channel_flow", "channel_reynolds", "hydraulic_radius", "normal_depth",
     "fall_time", "lip_flow", "lip_head", "side_spill", "superelevation",
     "ORIFICE_DELTA", "PLACEHOLDER_MU_SCALE", "orifice_cd", "viscous_orifice",
+    "overland_equilibrium", "overland_power_law", "overland_recession", "overland_rise", "overland_t_e_power_law",
+    "plan_width", "wave_celerity",
+    "mariotte_constant_time", "mariotte_flow", "siphon_drain_time", "siphon_drain_time_with_inflow", "siphon_flow",
+    "tip_period",
+    "ABV_CHECK_ROWS", "AZEOTROPE_X", "ETHANOL_WATER_VLE", "LATENT_ETHANOL", "LATENT_WATER", "M_ETHANOL", "M_WATER",
+    "abv", "bubble_t", "density_20", "latent_heat", "mix_mass", "mix_volume", "mole_fraction", "moles_for_abv",
+    "rayleigh_log", "vle_y",
 ]
