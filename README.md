@@ -21,6 +21,7 @@ uv run python fluidfullspeedsimulation.py draw 🥢 🟥                        
 uv run python fluidfullspeedsimulation.py draw 🧊 --temp-c 5                  # 🧊 水温を変えて細い流れ（場面: 🏛️ 🥢 🧊 🪵 🎋 🫙 🌊 🕳️）
 uv run python fluidfullspeedsimulation.py draw 🥢 --viscosity-scale 8         # 🍯 粘度を 8 倍（--mu 8 なら 8 mPa·s を直接）
 uv run python fluidfullspeedsimulation.py draw 🏺 --frames 4                   # 🏺 水時計（4 次の放物面 / 筒 / 円すい）
+uv run python fluidfullspeedsimulation.py draw 👼 --frames 4                   # 👼 4 つの蔵の樽が 30 年で減っていく
 uv run python fluidfullspeedsimulation.py run 🚧                             # 🚧 慣性が要る題材をどれだけ外すか（数で記す）
 uv run python -m pytest -q                              # 🧪 テスト（python -S -m unittest discover -s tests でも可）
 ```
@@ -105,6 +106,7 @@ commit・blob・sha256 は `vendor.lock.json` に固定。更新は親の `vendo
 | E21 🫗 | `mariotte` | マリオットびん: 空気管の下端が水面より下のあいだ流量 Q = Cd·a·√(2g·h_air) で一定（整数で毎ステップ同じ）、水位は直線で下がる、一定のまま流れる時間 = (h0 − h_air)·A/Q、下端から先は Torricelli の曲線（0.1 mm まで） |
 | E22 🏺 | `water-clock` | 水時計: 半径 ∝ h^(1/4) の器なら水位が一定の速さで下がり 12 等分の目盛りが等間隔（ずれ 7e-5）、同じ半径の筒は目盛りが 23:…:1 に詰まる、円すいはその間。dt を 1/4 にするとずれも 1/4（1 次）、表の刻みは頭打ち。出口が細い管（Q ∝ h）だと 🏺 でも筒と同じ形に戻る |
 | E23 🚧 | `inertia-limits` | 慣性が要る題材は再現しない — 外れ方を数で記す: U 字管はエンジンでは指数関数で落ち着くだけ（一様な管 r 3 mm は実物だと ζ = 0.032 で周期 1.35 s の揺れ、エンジンの τ は 13.6 ms）、ダム決壊の先端は Ritter の 2√(g h0) に届かず勾配で 2 倍以上変わる、負の波が上流へ戻らない、水撃の Δp = ρ c Δv（18 bar）は量として無い |
+| E25 👼 | `angels-share` | 天使の取り分: 🎯 スコットランドの数字（年 2 %・度数 −0.5 点・湿度 88 %）で 2 つの速さを合わせ、同じ式で 🔮 湿度で度数の上下が入れ替わる湿度 RH* = 55.2 %、乾いた上の階のケンタッキーは度数が上がり湿った下の階は下がる、63.5 % で詰めたスコッチが 40 % を切るまで 44.7 年。閉じた式との差 1e-8 以下、刻みによらない、成分ごとに 0 ulp |
 
 どの実験も ⚖️ 総量の保存（ずれ 0 ulp）と、層流の前提（Re）・Courant 数などの前提条件を一緒に確かめる。
 閉じた式とのずれ（δ）は丸めずにそのまま出す（`run -v`）。
@@ -244,6 +246,39 @@ uv run python fluidfullspeedsimulation.py draw 🫗 🟩                     # �
 - 細管の出口は Q = c·h を前進 Euler で（断面一定の水槽は今までどおり厳密離散化）。弁は断面一定の水槽だけ
 - 流出型の水時計は A(h) ∝ √h（半径 ∝ h^(1/4)、4 次の放物面）で Torricelli の流出と釣り合い dh/dt = −k が一定。k = Cd·a·√(2g h0)/(π r²)、空になる時間 T = h0/k
 
+## 👼 天使の取り分（E25）
+
+⚠️ これは**較正したモデル**で、物理として検証したものではない。🎯 = 出典の数字に合わせた（予測ではない）、📝 = 置いた仮定、🔮 = 較正に使っていない出力。
+
+- 樽の中身（エタノール・水のモル）は、それぞれ 1 次で木を抜けて空へ: `evaporate(rates={ethanol: f·k_e, water: f·k_w(RH)})`
+- エタノールは空気に無いので湿度によらない。水は空気の乾きに比例: k_w(RH) = k_w,ref·(1 − RH)/(1 − RH_ref)
+- 暑さは 1 つの倍率 f で両方に掛ける（f は各地の年の減りから合わせる）。度数の向きは f によらず RH だけで決まる
+
+| 入力 | 値 | 種類 |
+|---|---|---|
+| 樽・詰め度数 | 200 L・63.5 % | 🎯 スコッチの標準の詰め度数（whiskipedia） |
+| スコットランド | 湿度 88 %・年 2 %・度数 −0.5 点/年 | 🎯 puninwine・alcoholprofessor・hedonism |
+| ケンタッキー（上の階） | 湿度 45 %・年 4 % | 🎯 年 4 %（alcoholprofessor）/ 📝 湿度（上の階は暑く乾く: vinepair、数値は仮定） |
+| ケンタッキー（下の階） | 湿度 75 %・年 3 % | 📝 下の階は外より湿る（vinepair、数値は仮定） |
+| 台湾 | 湿度 80 %・年 11 % | 🎯 年 10〜12 %（thewhiskeywash・milroys）/ 📝 湿度 |
+
+| 合わせた定数（🎯） | 値 |
+|---|---|
+| k_e（エタノール） | 0.02811 /年 |
+| k_w,ref（水、湿度 88 %） | 0.00753 /年 |
+| 温度の倍率 f | ケンタッキー上 1.336・下 1.305・台湾 5.29（スコットランド 1） |
+| 木が吸う量（任意） | 3.64 L（1 年目の減り 3.75 % に合わせる。木が満ちるまで 📝 約 3 か月） |
+
+| 出力（🔮） | 値 |
+|---|---|
+| 度数が動かない湿度 RH* | 55.2 %（これより乾けば度数が上がる） |
+| ケンタッキー上の階の度数 | 上がる（1 年目 63.71 %）。同じ蔵の下の階は下がる（vinepair の向きと同じ） |
+| 台湾の度数 | 下がる（1 年目 61.48 %。湿度 80 % の仮定しだいで、確かめるデータは無い） |
+| スコッチが 40 % を切るまで | 44.7 年（そのとき 200 L → 90.3 L） |
+| 木の吸い込みありの 2 年目 | 年 2.02 %（1 年目だけ多く減って戻る） |
+
+検証（36/36）: 50 年後の成分が閉じた式 n0·e^(−f·k·t) と 1e-8 以内、1 年を 10〜99 等分しても同じ（厳密離散化）、RH* の樽は 30 年たっても度数が 63.5 % のまま（温度 ×1・×3）、湿度を A×10^-1 で振っても向きは RH* との大小どおり、成分ごとに 0 ulp。
+
 ## ⚠️ 慣性が要る題材（再現しない）
 
 このエンジンはストックとフロー（水槽の積分と、水位で決まる流量）だけで、運動量（ẍ）を持たない。慣性で決まる現象は
@@ -307,4 +342,11 @@ uv run python fluidfullspeedsimulation.py draw 🫗 🟩                     # �
 - [WOLF (ULiège): Ritter（1892）のダム決壊の解 — 先端 2c0·t、h = (2c0 − x/t)²/9g](https://wolf.hece.uliege.be/tutorials/wolfgpu_ritter.html)
 - [LMNO Engineering: Joukowski 水撃 ΔP = ρ c ΔV（Wylie 1993、Chaudhry 1987）](https://www.lmnoeng.com/WaterHammer/impulse.php)
 - [wermac: 水撃の圧力波の速さ（水 21 °C で 1460 m/s）](https://wermac.org/misc/waterhammer.html)
+- [Alcohol Professor: Why Bourbon Gets Stronger and Scotch Gets Weaker with Aging（スコットランド年 2 %・ケンタッキー 4 % 前後、湿ったスコットランドは度数が下がり乾いたケンタッキーは上がる、スコッチは年 0.5 % ほど下がり 40 % を切ると売れない）](https://www.alcoholprofessor.com/blog-posts/bourbon-stronger-scotch-weaker-aging)
+- [The Whiskey Wash: What Is "The Angel's Share"?（スコットランド等は年 2 %、インド・台湾は年 12 % まで）](https://thewhiskeywash.com/barrel-ownership/what-is-the-angels-share-2/)
+- [Pun in Wine: Angel's Share（スコットランドの蔵は湿度 88 % 前後、1 年目は 3.5〜4 % 減ってから落ち着く）](https://puninwine.com/pages/glossary/angel-s-share)
+- [Hedonism: Whisky 101 — What is the Angel's Share?（湿った蔵では度数が年 0.5 % ほど下がり体積は年 2 %）](https://hedonism.co.uk/pages/whisky-101-what-angels-share)
+- [Milroy's of Soho: What Is the Angel's Share?（台湾 8〜12 %）](https://milroysofsoho.com/blogs/core-whisky-definitions/what-is-the-angel-s-share-the-whisky-lost-to-maturation)
+- [VinePair: Does rickhouse placement matter?（上の階は暑く湿度が低く度数が上がる、下の階は湿って度数が低い）](https://vinepair.com/articles/ask-a-distiller-does-rickhouse-placement-matter-for-whiskey)
+- [Whiskipedia: Filling strength（63.5 % が英国の標準の詰め度数）](https://whiskipedia.com/fundamentals/filling-strength/)
 - [ふるなび: そうめんとひやむぎの違い（食品表示基準の太さ区分）](https://furunavi.jp/discovery/knowledge_food/202504-somen_hiyamugi/)

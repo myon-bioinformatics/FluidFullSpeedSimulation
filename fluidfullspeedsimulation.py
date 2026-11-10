@@ -31,6 +31,7 @@ from fluids import overland_equilibrium, overland_power_law, overland_recession,
 from fluids import G, poiseuille_head, poiseuille_tau, torricelli_empty_time, torricelli_head, transport_delay
 from fluids import mariotte_constant_time, mariotte_flow, siphon_drain_time, siphon_drain_time_with_inflow, siphon_flow
 from fluids import tip_period
+from fluids import abv, mix_volume, moles_for_abv
 from network import Network, critical_gain, inverse_table, jsonable, peak_to_peak, register_law, settling_time, window
 import pixelwater as pw
 
@@ -2218,6 +2219,231 @@ def e23_inertia_limits(seed: int = 0, dt_frac: float = 0.02) -> dict:
             "summary": summary, "runs": runs, "checks": checks}
 
 
+# --- E25 天使の取り分（👼 樽の木を抜けていく水とエタノール） -----------------------------
+
+YEAR = 365.25 * 86400.0  # [s]
+CASK = {"volume": 0.2, "fill_abv": 63.5}  # 200 L の樽、スコッチの標準の詰め度数 63.5 %（whiskipedia）
+SCOTLAND = {"rh": 0.88, "loss": 0.02, "abv_drop": 0.5}  # 湿度 88 %（puninwine）、年 2 %（各社）、度数 −0.5 点/年
+CLIMATES = {  # rh・loss は入力（🎯 = 較正に使う出典の数字、📝 = 置いた仮定）。f は温度の倍率（loss から合わせる）
+    "scotland": {"icon": "🏴", "rh": 0.88, "loss": 0.02, "src": "🎯 湿度 88 %・年 2 %（puninwine / alcoholprofessor）"},
+    "kentucky-top": {"icon": "🔥", "rh": 0.45, "loss": 0.04,
+                     "src": "🎯 年 4 %（alcoholprofessor）/ 📝 湿度 45 %（上の階は暑く乾く: vinepair、数値は仮定）"},
+    "kentucky-ground": {"icon": "🧱", "rh": 0.75, "loss": 0.03,
+                        "src": "📝 湿度 75 %・年 3 %（下の階は湿る: vinepair、数値は仮定）"},
+    "taiwan": {"icon": "🌴", "rh": 0.80, "loss": 0.11, "src": "🎯 年 10〜12 %（thewhiskeywash / milroys）/ 📝 湿度 80 %"},
+}
+SCOTCH_MIN_ABV = 40.0  # スコッチとして売れる下限（alcoholprofessor / puninwine）
+
+
+def angel_rates(fill_abv: float = CASK["fill_abv"], volume: float = CASK["volume"], target: dict = SCOTLAND) -> dict:
+    """スコットランドの 1 年目（体積 −loss、度数 −abv_drop 点）に合う k_e・k_w [1/年] を厳密に解く（🎯 較正）。
+
+    1 年後の中身は moles_for_abv(度数, 体積) で決まるので、k_s = ln(n_s0 / n_s1) がそのまま出る。"""
+    ne0, nw0 = moles_for_abv(fill_abv, volume)
+    ne1, nw1 = moles_for_abv(fill_abv - target["abv_drop"], volume * (1.0 - target["loss"]))
+    return {"k_e": math.log(ne0 / ne1), "k_w": math.log(nw0 / nw1), "rh_ref": target["rh"]}
+
+
+def water_rate(k_w_ref: float, rh: float, rh_ref: float) -> float:
+    """水の抜ける速さは空気の乾き（1 − RH）に比例する: k_w(RH) = k_w,ref·(1 − RH)/(1 − RH_ref)。
+    エタノールは空気に無いので湿度によらない（k_e 一定）。"""
+    return k_w_ref * max(1.0 - rh, 0.0) / (1.0 - rh_ref)
+
+
+def crossover_rh(rates: dict) -> float:
+    """度数が動かない湿度 RH*: k_w(RH*) = k_e → RH* = 1 − (1 − RH_ref)·k_e/k_w,ref。温度の倍率にはよらない。"""
+    return 1.0 - (1.0 - rates["rh_ref"]) * rates["k_e"] / rates["k_w"]
+
+
+def cask_state(t_years: float, rates: dict, rh: float, f: float = 1.0, fill_abv: float = CASK["fill_abv"],
+               volume: float = CASK["volume"]) -> tuple[float, float]:
+    """閉じた式 n_s(t) = n_s0·e^(−f·k_s·t) の (エタノール, 水) [mol]。"""
+    ne0, nw0 = moles_for_abv(fill_abv, volume)
+    kw = water_rate(rates["k_w"], rh, rates["rh_ref"])
+    return ne0 * math.exp(-f * rates["k_e"] * t_years), nw0 * math.exp(-f * kw * t_years)
+
+
+def fit_temperature(rates: dict, rh: float, loss: float, volume: float = CASK["volume"]) -> float:
+    """1 年目の体積の減り loss に合う温度の倍率 f（二分法、🎯 較正）。"""
+    v0 = mix_volume(*cask_state(0.0, rates, rh, volume=volume))
+    lo, hi = 1e-3, 1e3
+    for _ in range(200):
+        mid = math.sqrt(lo * hi)
+        lost = 1.0 - mix_volume(*cask_state(1.0, rates, rh, mid, volume=volume)) / v0
+        lo, hi = (mid, hi) if lost < loss else (lo, mid)
+    return math.sqrt(lo * hi)
+
+
+def years_to_abv(limit: float, rates: dict, rh: float, f: float = 1.0, t_max: float = 500.0) -> float | None:
+    """度数が limit を切るまでの年数（閉じた式を二分法）。切らなければ None。"""
+    if abv(*cask_state(t_max, rates, rh, f)) > limit:
+        return None
+    lo, hi = 0.0, t_max
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        lo, hi = (mid, hi) if abv(*cask_state(mid, rates, rh, f)) > limit else (lo, mid)
+    return 0.5 * (lo + hi)
+
+
+@register_law("soak")
+def _law_soak(net, ln, n):
+    """🪵 木が中身を吸う: 木（dst）の量が capacity に届くまで、1 ステップに (capacity − 今の量)·(1 − e^(−dt/τ))。
+    成分モードでは樽の中身の比のまま吸う。"""
+    room = ln["capacity_q"] - net.nodes[ln["dst"]]["v"]
+    return qmul(room, ln["gain"]) if room > 0 else 0
+
+
+def angel_cask(rates: dict, climates: dict, *, steps_per_year: int = 365, soak: dict | None = None) -> Network:
+    """樽を気候ごとに 1 つずつ並べ、どれも空（air）へ抜ける。soak = {"capacity": mol, "tau_years": 年} で木の吸い込みも。
+    刻みは 1 年を steps_per_year 等分（既定 365 でほぼ 1 日。年の区切りがちょうどステップに乗る）。"""
+    net = Network(YEAR / steps_per_year, species=("ethanol", "water"), volume_of=lambda p: mix_volume(p["ethanol"], p["water"]))
+    ne0, nw0 = moles_for_abv(CASK["fill_abv"], CASK["volume"])
+    net.tank("air", 1.0)
+    for name, c in climates.items():
+        net.tank(name, 0.25, parts={"ethanol": ne0, "water": nw0})
+        kw = water_rate(rates["k_w"], c["rh"], rates["rh_ref"])
+        net.evaporate(name, "air", rates={"ethanol": c["f"] * rates["k_e"] / YEAR, "water": c["f"] * kw / YEAR})
+        if soak:
+            net.tank(f"{name}:wood", 1.0)
+            net.link("soak", name, f"{name}:wood", capacity_q=to_q(soak["capacity"]),
+                     gain=lag_gain(net.dt, soak["tau_years"] * YEAR))
+    return net
+
+
+def _cask_series(res: dict, name: str) -> list[tuple[float, float, float]]:
+    """(年, 体積 m³, 度数) の並び（0 年目を含む）。"""
+    ne0, nw0 = moles_for_abv(CASK["fill_abv"], CASK["volume"])
+    out = [(0.0, mix_volume(ne0, nw0), CASK["fill_abv"])]
+    for row in res["series"]:
+        p = row[f"parts:{name}"]
+        out.append((row["t"] / YEAR, mix_volume(p["ethanol"], p["water"]), abv(p["ethanol"], p["water"])))
+    return out
+
+
+def e25_angels_share(years: int = 50, steps_per_year: int = 365, seed: int = 25) -> dict:
+    """👼 天使の取り分。🎯 スコットランドの数字で 2 つの速さを合わせ（較正）、同じ式で他の気候を予測する。
+
+    検証できるのは「式どおりに動くか」（閉じた式・成分ごとの保存・dt によらない）で、物理としての正しさではない。
+    湿度で度数の上下が入れ替わる・その湿度 RH*・40 % を切る年数は、較正に使っていない出力。"""
+    checks, runs, summary = [], {}, {}
+    rates = angel_rates()
+    rh_star = crossover_rh(rates)
+    climates = {k: {**c, "f": (1.0 if k == "scotland" else fit_temperature(rates, c["rh"], c["loss"]))}
+                for k, c in CLIMATES.items()}
+    net = angel_cask(rates, climates, steps_per_year=steps_per_year)
+    res = net.run(years * YEAR, sample_every=steps_per_year)
+    v0 = CASK["volume"]
+    checks.append(check("conserve:species", "⚖️", res["parts_error_q"] == {"ethanol": 0, "water": 0},
+                        value=res["parts_error_q"], note="成分ごとの総量（樽 + 空）が 0 ulp"))
+    for name, c in climates.items():
+        ser = _cask_series(res, name)
+        y1 = ser[1]
+        loss1 = 1.0 - y1[1] / v0
+        e_t, w_t = cask_state(years, rates, c["rh"], c["f"])
+        p = res["parts_q"][name]
+        e_s, w_s = from_q(p["ethanol"]), from_q(p["water"])
+        rising = ser[-1][2] > CASK["fill_abv"]
+        checks += [
+            close(f"{name}:closed-form", c["icon"] + "📐", e_s, e_t, 1e-8, note=f"{years} 年後のエタノール = n0·e^(−f·k_e·t)"),
+            close(f"{name}:closed-form-water", c["icon"] + "📐", w_s, w_t, 1e-8, note="水 = n0·e^(−f·k_w(RH)·t)"),
+            close(f"{name}:loss-1y", c["icon"] + "🎯", loss1, c["loss"], 1e-6,
+                  note="1 年目の体積の減り（🎯 較正どおりか。これは合わせた数なので予測ではない）"),
+            check(f"{name}:abv-direction", c["icon"] + ("📈" if c["rh"] < rh_star else "📉"),
+                  rising == (c["rh"] < rh_star), value=round(ser[-1][2], 3), expected=CASK["fill_abv"],
+                  note=f"湿度 {c['rh']:.0%} が RH* = {rh_star:.1%} より{'低い → 度数が上がる' if c['rh'] < rh_star else '高い → 度数が下がる'}（🔮 予測）"),
+        ]
+        runs[name] = [{"year": round(t, 6), "liters": v * 1e3, "abv": a} for t, v, a in ser]
+        summary[name] = {"rh": c["rh"], "f": c["f"], "loss_1y": loss1, "abv_1y": y1[2], "abv_end": ser[-1][2],
+                         "liters_end": ser[-1][1] * 1e3, "source": c["src"]}
+    sc = _cask_series(res, "scotland")
+    checks.append(close("scotland:abv-1y", "🏴🎯", sc[0][2] - sc[1][2], SCOTLAND["abv_drop"], 1e-6,
+                        note="1 年目の度数の下がり 0.5 点（🎯 較正どおり）"))
+    # 📉 本場の向き: スコットランドは下がり、ケンタッキー（上の階）は上がる（alcoholprofessor・vinepair の向き）
+    checks += [
+        check("sign:scotland-falls", "🏴📉", summary["scotland"]["abv_end"] < CASK["fill_abv"],
+              value=summary["scotland"]["abv_end"], note="湿ったスコットランドでは度数が下がる（出典どおりの向き）"),
+        check("sign:kentucky-rises", "🔥📈", summary["kentucky-top"]["abv_end"] > CASK["fill_abv"],
+              value=summary["kentucky-top"]["abv_end"], note="乾いた上の階では度数が上がる（湿度 45 % は仮定）"),
+        check("sign:same-warehouse", "🧱📉", summary["kentucky-ground"]["abv_end"] < summary["kentucky-top"]["abv_end"],
+              value=[summary["kentucky-ground"]["abv_end"], summary["kentucky-top"]["abv_end"]],
+              note="同じ蔵でも湿った下の階ほど度数が低い（vinepair の向き）"),
+    ]
+    # 🎯 RH*: その湿度の樽は度数が動かない（温度の倍率を変えても）
+    flat = {}
+    for f in (1.0, 3.0):
+        net_f = angel_cask(rates, {"flat": {"rh": rh_star, "f": f}}, steps_per_year=52)
+        r_f = net_f.run(30 * YEAR, sample_every=52)
+        ser = _cask_series(r_f, "flat")
+        flat[f"x{f:g}"] = max(abs(a - CASK["fill_abv"]) for _t, _v, a in ser)
+        checks.append(check(f"rh-star:f{f:g}", "⚖️", flat[f"x{f:g}"] < 1e-6, value=flat[f"x{f:g}"], tol=1e-6,
+                            note=f"RH* = {rh_star:.2%} の樽は 30 年たっても度数が {CASK['fill_abv']} % のまま（温度 ×{f:g}）"))
+    # ⏳ 40 % を切るまで（閉じた式の二分法 vs シミュレーション）
+    t40 = years_to_abv(SCOTCH_MIN_ABV, rates, SCOTLAND["rh"])
+    t40_sim = next((t for t, _v, a in sc if a < SCOTCH_MIN_ABV), None)
+    checks.append(check("scotland:years-to-40", "⏳", t40 is not None and t40_sim is not None and 0 <= t40_sim - t40 < 1.0,
+                        value=t40_sim, expected=t40, tol=1.0,
+                        note="スコッチの下限 40 % を切る年（シミュレーションは 1 年ごとに見るので 1 年以内の遅れ）"))
+    # 🎲 湿度を A×10^-1 で振る: 度数の上下は RH* との大小で決まる
+    sweep = []
+    for item in random_scales(seed, 6, n_min=1, n_max=1, digits=2):
+        rh = item["value"]
+        e1, w1 = cask_state(10.0, rates, rh)
+        up = abv(e1, w1) > CASK["fill_abv"]
+        sweep.append({"rh": rh, "abv_10y": abv(e1, w1)})
+        checks.append(check(f"sweep:rh{item['label']}", "🎲", up == (rh < rh_star), value=round(abv(e1, w1), 3),
+                            note=f"湿度 {rh:.0%}: RH* より{'低い → 上がる' if rh < rh_star else '高い → 下がる'}"))
+    # 🎲 刻みによらない（厳密離散化）: 1 年を A×10^N 等分（N = 1〜2）しても 20 年後が閉じた式どおり
+    for item in random_scales(seed + 1, 3, n_min=-2, n_max=-1, digits=2):
+        spy = max(1, int(item["value"]))
+        r_d = angel_cask(rates, {"scotland": climates["scotland"]}, steps_per_year=spy).run(20 * YEAR)
+        p = r_d["parts_q"]["scotland"]
+        val = abv(from_q(p["ethanol"]), from_q(p["water"]))
+        checks.append(close(f"dt:{spy}/yr", "🧮", val, abv(*cask_state(20.0, rates, SCOTLAND["rh"])), 1e-9,
+                            note=f"1 年を {spy} 等分しても 20 年後の度数が閉じた式どおり（e^(−k·dt) の厳密離散化）"))
+    # 🪵 木の吸い込み（任意）: 1 年目だけ多く減り、そのあと年 2 % に落ち着く
+    soak = angel_soak(rates)
+    checks += [
+        close("soak:first-year", "🪵🎯", soak["loss_1y"], SOAK["first_year_loss"], 1e-6,
+              note="1 年目の減り 3.75 %（🎯 puninwine の 3.5〜4 % の真ん中に capacity を合わせた）"),
+        check("soak:settles", "🪵🔮", abs(soak["loss_2y"] - SCOTLAND["loss"]) < 0.002, value=soak["loss_2y"],
+              expected=SCOTLAND["loss"], tol=0.002, note="2 年目は木が満ちて年 2 % 近くに戻る（🔮 予測）"),
+        check("soak:conserve", "⚖️", soak["parts_error_q"] == {"ethanol": 0, "water": 0}, value=soak["parts_error_q"],
+              note="樽 + 木 + 空で成分ごとに 0 ulp"),
+    ]
+    summary.update({"rates_per_year": rates, "rh_star": rh_star, "years_to_40": t40, "years_to_40_sim": t40_sim,
+                    "liters_at_40": (mix_volume(*cask_state(t40, rates, SCOTLAND["rh"])) * 1e3) if t40 else None,
+                    "rh_sweep": sweep, "soak": soak, "rh_star_flat": flat})
+    return {"params": {"cask": CASK, "scotland": SCOTLAND, "climates": CLIMATES, "years": years,
+                       "steps_per_year": steps_per_year,
+                       "soak": SOAK, "seed": seed},
+            "summary": summary, "runs": runs, "checks": checks}
+
+
+SOAK = {"first_year_loss": 0.0375, "tau_years": 0.25}  # 🎯 1 年目 3.5〜4 %（puninwine）の真ん中 / 📝 木が満ちるまで約 3 か月
+
+
+def angel_soak(rates: dict) -> dict:
+    """木の吸い込みの capacity [mol] を 1 年目の減り 3.75 % に合わせ（二分法）、2 年目の減りを出す。"""
+    climate = {"scotland": {"rh": SCOTLAND["rh"], "f": 1.0}}
+    v0 = CASK["volume"]
+
+    def run(cap: float) -> dict:
+        net = angel_cask(rates, climate, steps_per_year=52, soak={"capacity": cap, "tau_years": SOAK["tau_years"]})
+        res = net.run(2 * YEAR, sample_every=52)
+        ser = _cask_series(res, "scotland")
+        return {"loss_1y": 1.0 - ser[1][1] / v0, "loss_2y": 1.0 - ser[2][1] / ser[1][1], "res": res}
+
+    lo, hi = 0.0, 1000.0
+    for _ in range(60):
+        mid = 0.5 * (lo + hi)
+        lo, hi = (mid, hi) if run(mid)["loss_1y"] < SOAK["first_year_loss"] else (lo, mid)
+    cap = 0.5 * (lo + hi)
+    out = run(cap)
+    ne0, nw0 = moles_for_abv(CASK["fill_abv"], CASK["volume"])
+    return {"capacity_mol": cap, "capacity_liters": cap / (ne0 + nw0) * CASK["volume"] * 1e3,
+            "loss_1y": out["loss_1y"], "loss_2y": out["loss_2y"], "parts_error_q": out["res"]["parts_error_q"]}
+
+
 # --- 登録簿 ---------------------------------------------------------------
 
 EXPERIMENTS = {
@@ -2245,6 +2471,7 @@ EXPERIMENTS = {
     "E22": ("water-clock", "🏺", "水時計（断面が高さで変わる器: 4 次の放物面なら水位が一定の速さで下がる）", e22_water_clock),
     "E23": ("inertia-limits", "🚧", "慣性が要る題材（U 字管の揺れ・ダム決壊・水撃）は再現しない — 外れ方を数で記す",
             e23_inertia_limits),
+    "E25": ("angels-share", "👼", "天使の取り分（湿度で度数の上下が入れ替わる・40 % を切る年数）", e25_angels_share),
 }
 SLUGS = {slug: eid for eid, (slug, *_rest) in EXPERIMENTS.items()}
 
@@ -2300,7 +2527,8 @@ def fluid_aliases() -> dict[str, str]:
 SCENE_ICONS = {"🏛": "moniac-rig", "🥢": "somen-flume", "🎋": "flume", "🫙": "flume-hopper", "🌊": "dam-break",
                "🕳": "moniac-drain", "🧊": "cold-water", "🪵": "bamboo-wear", "🍜": "noodle-length",
                "🧱": "noodle-clog", "🍽": "chopsticks", "🌧": "rain-runoff", "🎍": "shishi-odoshi",
-               "🍷": "pythagorean-cup", "🫗": "mariotte", "🏺": "water-clock", "🚧": "inertia-limits"}
+               "🍷": "pythagorean-cup", "🫗": "mariotte", "🏺": "water-clock", "🚧": "inertia-limits",
+               "👼": "angels-share"}
 
 
 def fluid_arg(text: str) -> str:
@@ -2309,7 +2537,7 @@ def fluid_arg(text: str) -> str:
 
 
 def scene_arg(text: str) -> str:
-    """draw の場面: 名前でも 🏛️ 🥢 🎋 🫙 🌊 🕳️ 🧊 🪵 🍜 🧱 🍽️ 🌧️ 🎍 🍷 🫗 🏺 🚧 でもよい。"""
+    """draw の場面: 名前でも 🏛️ 🥢 🎋 🫙 🌊 🕳️ 🧊 🪵 🍜 🧱 🍽️ 🌧️ 🎍 🍷 🫗 🏺 🚧 👼 でもよい。"""
     return SCENE_ICONS.get(_plain(text), text)
 
 
@@ -2455,6 +2683,14 @@ def rig_section(scene: str, fluid: str = "water", temp_c: float | None = None, m
         # ダム決壊（勾配 1 %）。水位は奥の壁から下がり始め、先端は尖らずにだらだら伸びる（Ritter とは別物）
         net, _info = dam_break(0.1, slope=1e-2, dt=0.02, fluid=fluid)
         return net.run(3.0, sample_every=3), ["bed"]
+    if scene == "angels-share":  # 👼 4 つの蔵の樽が 30 年かけて減っていく（台湾は速く、スコットランドはゆっくり）
+        rates = angel_rates()
+        climates = {k: {**c, "f": (1.0 if k == "scotland" else fit_temperature(rates, c["rh"], c["loss"]))}
+                    for k, c in CLIMATES.items()}
+        res = angel_cask(rates, climates, steps_per_year=12).run(30 * YEAR, sample_every=12)
+        for row in res["series"]:
+            row["t"] = round(row["t"] / YEAR, 6)  # ⏱️ は年で出す
+        return res, list(CLIMATES)
     raise KeyError(f"unknown rig scene {scene!r}")
 
 
@@ -2465,7 +2701,7 @@ def _from(res: dict, t0: float) -> dict:
 
 RIG_SCENES = ("moniac-rig", "somen-flume", "noodle-length", "noodle-clog", "chopsticks", "cold-water",
               "bamboo-wear", "rain-runoff", "shishi-odoshi", "pythagorean-cup", "mariotte", "water-clock",
-              "inertia-limits")
+              "inertia-limits", "angels-share")
 
 
 def _visc(args) -> dict:
@@ -2531,7 +2767,7 @@ def build_parser() -> argparse.ArgumentParser:
                          allow_abbrev=False)
     scenes = RIG_SCENES + pw.SECTION_CASES + pw.SCENES
     drw.add_argument("scene", type=scene_arg, choices=scenes,
-                     help="場面（名前か 🏛️ 🥢 🍜 🧱 🍽️ 🧊 🪵 🌧️ 🎍 🍷 🫗 🏺 🚧 🎋 🫙 🌊 🕳️）")
+                     help="場面（名前か 🏛️ 🥢 🍜 🧱 🍽️ 🧊 🪵 🌧️ 🎍 🍷 🫗 🏺 🚧 👼 🎋 🫙 🌊 🕳️）")
     drw.add_argument("block", nargs="?", type=block_arg,
                      help="流体のブロック・アイコン（🟦 🟨 🟧 🟩 🟪 / 💧 🍶 🧴 🟢 ☠️）か、塗りたい好きな絵文字")
     drw.add_argument("--view", choices=("frames", "frame", "files"), default="frames",
