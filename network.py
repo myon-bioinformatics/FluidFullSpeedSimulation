@@ -200,6 +200,58 @@ def _law_valve(net, ln, n):
     return qmul(qmul(net.nodes[ln["src"]]["v"], ln["k"]), o)
 
 
+@register_law("boil")
+def _law_boil(net, ln, n):
+    """🔥 単式蒸留の釜: 熱 power [W] で 1 ステップに P·dt / λ(y) mol の蒸気をつくり、気液平衡の y で
+    エタノールと水に分けて dst（受け器）へ送る。成分モード（ethanol・water、モル）専用。"""
+    from fluids import latent_heat, vle_y
+    parts = net.nodes[ln["src"]]["parts"]
+    ne, nw = parts["ethanol"], parts["water"]
+    if ne + nw <= 0 or n < ln["start_step"] or (ln["until_step"] is not None and n >= ln["until_step"]):
+        ln["_want"] = {}
+        return 0
+    x = ne / (ne + nw)
+    y = vle_y(x)
+    vapor = to_q(ln["power"] * net.dt / latent_heat(y))
+    e = qmul(vapor, to_q(y))
+    ln["last_x"], ln["last_y"] = x, y
+    if ln["cuts"]:
+        _cut(net, ln, n, y)
+    ln["_want"] = {"ethanol": e, "water": vapor - e}
+    return vapor
+
+
+def _cut(net, ln, n, y):
+    """✂️ 蒸留の切り替え: 流れ出る留液の度数（running ABV）か、その受け器にたまった体積で、次の受け器へ移る。"""
+    from fluids import abv, mix_volume
+    running = abv(y, 1.0 - y)
+    ln["last_abv"] = running
+    while ln["cut_index"] < len(ln["cuts"]) - 1:
+        cut = ln["cuts"][ln["cut_index"]]
+        rec = net.nodes[cut["to"]]["parts"]
+        done = False
+        if "abv_below" in cut and running < cut["abv_below"]:
+            done = True
+        if "volume" in cut and mix_volume(from_q(rec["ethanol"]), from_q(rec["water"])) >= cut["volume"]:
+            done = True
+        if not done:
+            break
+        cut.setdefault("ended", n * net.dt)
+        ln["cut_index"] += 1
+        ln["cuts"][ln["cut_index"]].setdefault("started", n * net.dt)
+    ln["dst"] = ln["cuts"][ln["cut_index"]]["to"]
+
+
+@register_law("evaporate")
+def _law_evaporate(net, ln, n):
+    """👼 成分ごとの 1 次の抜け: 成分 s は 1 ステップに parts_s·(1 − e^(−k_s·dt)) だけ出ていく（厳密離散化）。
+    rates は {成分: k [1/s]}。成分モード専用。"""
+    parts = net.nodes[ln["src"]]["parts"]
+    out = {sp: qmul(parts[sp], g) for sp, g in ln["gains"].items()}
+    ln["_want"] = out
+    return sum(out.values())
+
+
 @register_law("float_valve")
 def _law_float_valve(net, ln, n):
     u = net.head_q(ln["sensor"])
@@ -271,7 +323,10 @@ def _law_mariotte(net, ln, n):
 
 class Network:
     def __init__(self, dt: float, fluid: str = "water", g: float = G, temp_c: float | None = None,
-                 mu: float | None = None, mu_scale: float | None = None):
+                 mu: float | None = None, mu_scale: float | None = None, species=None, volume_of=None):
+        """species を渡すと成分モード（🍷）: 各水槽が成分ごとの量（Q 整数、単位は法則に任せる。蒸留ではモル）を持ち、
+        v はその合計。普通の法則が返す量は、出す側の成分の比で整数のまま分ける。成分ごとの量を返す法則
+        （boil・evaporate）もある。volume_of(parts) は水位（断面一定の水槽）に使う体積 [m³]。"""
         if dt <= 0:
             raise ValueError("dt must be positive")
         self.dt = dt
@@ -286,6 +341,11 @@ class Network:
         self.catchers: list[dict] = []
         self._groups: tuple[int, dict] | None = None
         self.last_flow: list[int] = []  # 前のステップに各管で動いた量（Q）
+        self.species = tuple(species) if species else None
+        if self.species is not None and len(set(self.species)) != len(self.species):
+            raise ValueError("species must be unique")
+        self.volume_of = volume_of
+        self.last_parts: list[dict] = []
 
     # --- 節点 -----------------------------------------------------------
     def _node(self, name: str, **data) -> dict:
@@ -295,13 +355,29 @@ class Network:
         return data
 
     def tank(self, name: str, area: float | None = None, head: float = 0.0, volume: float | None = None,
-             profile=None, samples: int = 512) -> "Network":
+             profile=None, samples: int = 512, parts: dict | None = None) -> "Network":
         """水槽。area 一定か、profile で高さにより断面が変わる器（🏺 水時計のような形）。
 
         profile は ``[[h, A(h)], ...]``（間は直線）か、Python の関数 ``A(h)``（spec からは表だけ）。
         0 から h_max まで samples 個に刻んで体積 V(h) を台形で積み上げ、V → h の表（Q 整数の Cam）で
         水位を引く。h_max を超えた分は一番上の断面で伸ばす。表の刻みの粗さは結果の profile_samples で分かる。
         """
+        if self.species is not None:  # 🍷 成分モード: parts（成分 → 量）で中身を決める
+            if profile is not None or head or volume is not None:
+                raise ValueError("in species mode give parts=, not head/volume/profile")
+            if area is None or area <= 0:
+                raise ValueError("area must be positive")
+            parts = parts or {}
+            unknown = set(parts) - set(self.species)
+            if unknown:
+                raise ValueError(f"unknown species: {sorted(unknown)}")
+            pq = {sp: to_q(parts.get(sp, 0.0)) for sp in self.species}
+            if any(v < 0 for v in pq.values()):
+                raise ValueError("parts must be >= 0")
+            self._node(name, kind="tank", area=area, area_q=to_q(area), v=sum(pq.values()), profile=None, parts=pq)
+            return self
+        if parts is not None:
+            raise ValueError("parts= needs Network(species=...)")
         if profile is None:
             if area is None or area <= 0:
                 raise ValueError("area must be positive")
@@ -463,6 +539,8 @@ class Network:
         if src == dst:
             raise ValueError("src and dst must differ")
         steps = int(round(delay / self.dt))
+        if steps and self.species is not None:
+            raise ValueError("delays are not supported in species mode yet")
         link = {
             "kind": kind, "src": src, "dst": dst, "delay": steps * self.dt, "delay_steps": steps,
             "line": DelayLine(steps - 1) if steps else None,
@@ -558,6 +636,42 @@ class Network:
                           sensor=sensor, cam=None if cam is None else Cam(cam),
                           table=None if cam is None else [list(map(float, p)) for p in cam],
                           stages=stages, k_link=lag_gain(self.dt, link_tau), z=[h0] * stages, last_opening=0)
+
+    def boil(self, src: str, dst: str | None = None, *, power: float, start: float = 0.0, until: float | None = None,
+             cuts=None) -> dict:
+        """🔥 釜で熱 power [W] を加えて蒸気を dst へ（凝縮して受け器にたまる）。成分 ethanol・water（モル）が要る。
+
+        cuts で蒸留の切り替え（✂️ 前留・本留・後留）: ``[{"to": 受け器, "volume": m³}, {"to": …, "abv_below": %}, {"to": …}]``。
+        今の受け器の体積が volume に届くか、流れ出る留液の度数が abv_below を切ったら次へ移る。最後の受け器で止まる。
+        """
+        if self.species is None or not {"ethanol", "water"} <= set(self.species):
+            raise ValueError("boil needs Network(species=('ethanol', 'water'))")
+        if power <= 0:
+            raise ValueError("power must be positive")
+        cuts = [dict(c) for c in (cuts or [])]
+        for c in cuts:
+            if c.get("to") not in self.nodes:
+                raise ValueError(f"unknown cut receiver {c.get('to')!r}")
+            if set(c) - {"to", "volume", "abv_below"}:
+                raise ValueError("cut keys are to, volume, abv_below")
+        if cuts:
+            cuts[0]["started"] = start
+            dst = cuts[0]["to"]
+        if dst is None:
+            raise ValueError("give dst or cuts")
+        return self._link("boil", src, dst, 0.0, power=power, start_step=int(round(start / self.dt)),
+                          until_step=None if until is None else int(round(until / self.dt)), last_x=None, last_y=None,
+                          last_abv=None, cuts=cuts, cut_index=0)
+
+    def evaporate(self, src: str, dst: str, *, rates: dict) -> dict:
+        """👼 成分ごとの 1 次の抜け（rates = {成分: k [1/s]}）。樽の木を通って空へ逃げる天使の取り分など。"""
+        if self.species is None:
+            raise ValueError("evaporate needs Network(species=...)")
+        unknown = set(rates) - set(self.species)
+        if unknown or any(k < 0 for k in rates.values()):
+            raise ValueError("rates must be known species with k >= 0")
+        gains = {sp: (lag_gain(self.dt, 1.0 / k) if k > 0 else 0) for sp, k in rates.items()}
+        return self._link("evaporate", src, dst, 0.0, rates=dict(rates), gains=gains)
 
     def float_valve(self, src: str, dst: str, *, sensor: str, setpoint: float, gain: float, qmax: float,
                     stages: int = 1, tau: float = 1.0, delay: float = 0.0) -> dict:
@@ -661,6 +775,10 @@ class Network:
     def head_q(self, name: str) -> int:
         nd = self.nodes[name]
         if nd["kind"] == "tank":
+            if "parts" in nd:  # 🍷 成分モード: 体積は volume_of（なければ量そのものを体積とみなす）
+                if self.volume_of is None:
+                    return qdiv(nd["v"], nd["area_q"])
+                return to_q(self.volume_of({k: from_q(v) for k, v in nd["parts"].items()}) / nd["area"])
             if nd["profile"] is None:
                 return qdiv(nd["v"], nd["area_q"])
             v = nd["v"]
@@ -701,6 +819,8 @@ class Network:
                     req[i] = req[i] * have // want
                 # 床で余った端数は最大の管へ（足りない水槽は空になるまで出し切る）
                 req[max(idx, key=lambda i: req[i])] += have - sum(req[i] for i in idx)
+        if self.species is not None:
+            return self._step_species(n, req)
         for i, ln in enumerate(self.links):
             self.nodes[ln["src"]]["v"] -= req[i]
             ln["flow_sum"] += req[i]
@@ -719,6 +839,52 @@ class Network:
             self._move_tracers(n, req)
         self.last_flow = req
         return req
+
+    def _step_species(self, n: int, req: list[int]) -> list[int]:
+        """🍷 成分モードの 1 ステップ。法則が成分ごとの量（ln["_want"]）を置いていればそれを、なければ
+        合計 req を出す側の成分の比で床で分ける。成分ごとに足りなければ整数のまま按分する。
+        移した成分をそのまま足すので、成分ごとの総量が 1 ulp も変わらない。"""
+        want = []
+        for i, ln in enumerate(self.links):
+            explicit = ln.pop("_want", None)
+            if explicit is not None:
+                want.append({sp: max(int(explicit.get(sp, 0)), 0) for sp in self.species})
+                continue
+            src = self.nodes[ln["src"]]
+            v = src["v"]
+            want.append({sp: (req[i] * q // v if v > 0 else 0) for sp, q in src["parts"].items()})
+        for src, idx in self._by_src().items():
+            parts = self.nodes[src]["parts"]
+            for sp in self.species:
+                need = sum(want[i][sp] for i in idx)
+                if need > parts[sp]:
+                    for i in idx:
+                        want[i][sp] = want[i][sp] * parts[sp] // need
+        moved = []
+        for i, ln in enumerate(self.links):
+            src, dst = self.nodes[ln["src"]], self.nodes[ln["dst"]]
+            total = 0
+            for sp, q in want[i].items():
+                src["parts"][sp] -= q
+                dst["parts"][sp] += q
+                total += q
+            src["v"] -= total
+            dst["v"] += total
+            ln["flow_sum"] += total
+            ln.setdefault("parts_sum", {sp: 0 for sp in self.species})
+            for sp, q in want[i].items():
+                ln["parts_sum"][sp] += q
+            if total and ln["first_flow_step"] is None:
+                ln["first_flow_step"] = n
+                ln["first_arrival_step"] = n
+            moved.append(total)
+        self.last_flow = moved
+        self.last_parts = want
+        return moved
+
+    def parts_total(self) -> dict[str, int]:
+        """成分ごとの総量（Q）。"""
+        return {sp: sum(nd["parts"][sp] for nd in self.nodes.values()) for sp in self.species}
 
     def _move_tracers(self, n: int, req: list[int]) -> None:
         """先入れ先出し。先にいた水（credit）を流出で減らし、0 を切ったステップ内の位置 f まで時刻を補間する。
@@ -901,6 +1067,8 @@ class Network:
         if sample_every is None:
             sample_every = max(1, steps // 200)
         total0 = self.total_q()
+        parts0 = self.parts_total() if self.species is not None else None
+        parts_worst = {sp: 0 for sp in self.species} if self.species is not None else None
         worst = 0
         series = []
         traces = {name: [] for name in trace}
@@ -908,6 +1076,10 @@ class Network:
         for n in range(steps):
             last = self.step(n)
             worst = max(worst, abs(self.total_q() - total0))
+            if parts0 is not None:
+                now_parts = self.parts_total()
+                for sp in self.species:
+                    parts_worst[sp] = max(parts_worst[sp], abs(now_parts[sp] - parts0[sp]))
             for name in trace:
                 traces[name].append(self.head(name))
             if (n + 1) % sample_every == 0 or n + 1 == steps:
@@ -916,6 +1088,9 @@ class Network:
                 for prefix, ch in self.channels.items():
                     row[f"h:{prefix}"] = [self.head(c) for c in ch["cells"]]
                 row.update({f"q:{i}": from_q(qdiv(q, self.dt_q)) for i, q in enumerate(last)})
+                if self.species is not None:
+                    for k in tank_names:
+                        row[f"parts:{k}"] = {sp: from_q(q) for sp, q in self.nodes[k]["parts"].items()}
                 bodies = {tr["name"]: self.body(tr) for tr in self.tracers
                           if tr["length"] > 0 and tr["state"] == "node"}
                 if bodies:
@@ -925,6 +1100,9 @@ class Network:
             "fluid": self.fluid.key, "temp_c": self.fluid.temp_c, "dt": self.dt, "steps": steps, "series": series, "trace": traces,
             "final": series[-1] if series else {}, "total_q": total0, "conservation_error_q": worst,
             "volumes_q": {k: nd["v"] for k, nd in self.nodes.items()},
+            "species": list(self.species) if self.species is not None else None,
+            "parts_q": {k: dict(nd["parts"]) for k, nd in self.nodes.items() if "parts" in nd},
+            "parts_error_q": parts_worst,
             "profile_samples": {k: nd["samples"] for k, nd in self.nodes.items()
                                 if nd["kind"] == "tank" and nd["profile"] is not None},
             "links": [self._link_summary(i, ln) for i, ln in enumerate(self.links)],
@@ -948,6 +1126,10 @@ class Network:
                "volume_moved_q": ln["flow_sum"]}
         if ln["kind"] == "spill":
             out["max_outer"] = ln["max_outer"]
+        if ln["kind"] == "boil":
+            out.update(last_x=ln["last_x"], last_y=ln["last_y"], last_abv=ln["last_abv"], cuts=ln["cuts"])
+        if "parts_sum" in ln:
+            out["parts_moved_q"] = dict(ln["parts_sum"])
         if ln["kind"] == "tip":
             out.update(tips=[dict(t) for t in ln["tips"]], t_dump=ln["t_dump"], dump_rate=ln["dump_rate"])
         if ln["kind"] == "siphon":
@@ -999,9 +1181,10 @@ def ch_depth(ln: dict, net: "Network") -> float:
 
 # --- JSON の仕様から組む --------------------------------------------------
 
-LINK_BUILDERS = ("pipe", "orifice", "weir", "cam", "pump", "valve", "float_valve", "tip", "siphon", "mariotte")
-SPEC_KEYS = {"dt", "fluid", "temp_c", "mu", "mu_scale", "tanks", "channels", "flumes", "rains", "links", "tracers",
-             "t_end", "trace", "sample_every"}
+LINK_BUILDERS = ("pipe", "orifice", "weir", "cam", "pump", "valve", "float_valve", "tip", "siphon", "mariotte", "boil",
+                 "evaporate")
+SPEC_KEYS = {"dt", "fluid", "temp_c", "mu", "mu_scale", "species", "tanks", "channels", "flumes", "rains", "links",
+             "tracers", "t_end", "trace", "sample_every"}
 
 
 def build(spec: dict) -> Network:
@@ -1022,8 +1205,13 @@ def build(spec: dict) -> Network:
     extra = set(spec) - SPEC_KEYS
     if extra:
         raise ValueError(f"unknown spec keys: {sorted(extra)}")
+    species = spec.get("species")
+    volume_of = None
+    if species and set(species) == {"ethanol", "water"}:  # 🍷 エタノール・水なら密度表で体積を出す
+        from fluids import mix_volume
+        volume_of = lambda p: mix_volume(p["ethanol"], p["water"])
     net = Network(spec.get("dt", 0.1), spec.get("fluid", "water"), temp_c=spec.get("temp_c"), mu=spec.get("mu"),
-                  mu_scale=spec.get("mu_scale"))
+                  mu_scale=spec.get("mu_scale"), species=species, volume_of=volume_of)
     for t in spec.get("tanks", []):
         net.tank(**t)
     for c in spec.get("channels", []):

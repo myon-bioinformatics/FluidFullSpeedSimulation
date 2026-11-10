@@ -31,6 +31,7 @@ from fluids import overland_equilibrium, overland_power_law, overland_recession,
 from fluids import G, poiseuille_head, poiseuille_tau, torricelli_empty_time, torricelli_head, transport_delay
 from fluids import mariotte_constant_time, mariotte_flow, siphon_drain_time, siphon_drain_time_with_inflow, siphon_flow
 from fluids import tip_period
+from fluids import AZEOTROPE_X, abv, bubble_t, mix_volume, mole_fraction, moles_for_abv, rayleigh_log, vle_y
 from network import Network, critical_gain, inverse_table, jsonable, peak_to_peak, register_law, settling_time, window
 import pixelwater as pw
 
@@ -2218,6 +2219,160 @@ def e23_inertia_limits(seed: int = 0, dt_frac: float = 0.02) -> dict:
             "summary": summary, "runs": runs, "checks": checks}
 
 
+# --- E24 ワインの蒸留（⚗️ 単式蒸留・コニャック式の 2 回蒸留） ------------------------------
+
+STILL = {"wine_abv": 12.0, "wine_volume": 0.025, "power": 5000.0, "brouillis_cut": 5.0, "heads_fraction": 0.01,
+         "heart_cut": 60.0, "secondes_cut": 5.0}
+SPECIES = ("ethanol", "water")
+
+
+def _vol(parts: dict) -> float:
+    return mix_volume(parts["ethanol"], parts["water"])
+
+
+def still_network(ethanol: float, water: float, *, dt: float = 1.0, power: float = STILL["power"],
+                  receivers=("receiver",), cuts=None, fluid: str = "water") -> Network:
+    """⚗️ 釜（pot）と受け器。中身はエタノール・水のモル数。cuts を渡すと受け器を切り替える（前留・本留・後留）。"""
+    net = Network(dt, fluid, species=SPECIES, volume_of=_vol)
+    net.tank("pot", 0.1, parts={"ethanol": ethanol, "water": water})
+    for r in receivers:
+        net.tank(r, 0.05)
+    if cuts:
+        net.boil("pot", power=power, cuts=cuts)
+    else:
+        net.boil("pot", receivers[0], power=power)
+    return net
+
+
+def _fraction(res: dict, name: str) -> dict:
+    p = res["parts_q"][name]
+    e, w = from_q(p["ethanol"]), from_q(p["water"])
+    return {"ethanol": e, "water": w, "litres": mix_volume(e, w) * 1e3, "abv": abv(e, w) if e + w > 0 else 0.0}
+
+
+def _parts_exact(res: dict, start: dict) -> bool:
+    """受け器と釜の成分の合計が、入れた量と Q 整数で一致するか。"""
+    return all(sum(nd[sp] for nd in res["parts_q"].values()) == start[sp] for sp in SPECIES)
+
+
+def e24_distillation(dt_list=(4.0, 1.0, 0.25), seed: int = 24) -> dict:
+    """⚗️ ワインを釜で沸かす単式蒸留を、Rayleigh 式（ln W0/W = ∫ dx/(y − x)、Rayleigh 卿がエタノールと水で調べた形）と
+    比べる。気液平衡は Perry's の表（101.3 kPa）、度数は 20 °C の密度表で換算（混ぜると縮む）。
+    そのうえでコニャック式の 2 回蒸留（初留 → 本留で前留・ハート・セコンド・後留に切り分け）を回し、
+    公表されている度数（初留 28〜32 %、ハート約 70 %）と照らす。"""
+    checks, runs, summary = [], {}, {}
+    ne, nw = moles_for_abv(STILL["wine_abv"], STILL["wine_volume"])
+    w0, x0 = ne + nw, mole_fraction(ne, nw)
+
+    # 📐 Rayleigh 式: 釜に残る量と組成の関係。dt を 1/4 にすると誤差も 1/4（前進 Euler の 1 次）
+    conv = {}
+    for dt in dt_list:
+        net = still_network(ne, nw, dt=dt)
+        res = net.run(3600.0, sample_every=max(1, int(60 / dt)))
+        pot = _fraction(res, "pot")
+        x = mole_fraction(pot["ethanol"], pot["water"])
+        w_ray = w0 * math.exp(-rayleigh_log(x, x0))
+        conv[dt] = abs(pot["ethanol"] + pot["water"] - w_ray) / w_ray
+        checks.append(check(f"rayleigh:dt{dt:g}:species", "⚖️", res["parts_error_q"] == {"ethanol": 0, "water": 0},
+                            value=res["parts_error_q"], note="エタノールと水がそれぞれ 0 ulp で保存"))
+        if dt == 1.0:
+            runs["rayleigh"] = res["series"]
+            rows = res["series"]
+            xs = [mole_fraction(r["parts:pot"]["ethanol"], r["parts:pot"]["water"]) for r in rows]
+            temps = [bubble_t(x_) for x_ in xs]
+            running = [abv(vle_y(x_), 1.0 - vle_y(x_)) for x_ in xs]
+            summary["rayleigh"] = {"x_end": x, "pot_left_mol": pot["ethanol"] + pot["water"], "rayleigh_mol": w_ray,
+                                   "t_start": temps[0], "t_end": temps[-1], "running_abv_start": running[0],
+                                   "running_abv_end": running[-1]}
+    errs = [conv[dt] for dt in dt_list]
+    orders = [math.log(errs[i] / errs[i + 1]) / math.log(dt_list[i] / dt_list[i + 1]) for i in range(len(errs) - 1)]
+    checks += [
+        check("rayleigh:error", "📐", errs[-1] <= 1e-4, value=errs[-1], tol=1e-4,
+              note=f"釜に残る量 W と Rayleigh 式の W のずれ（dt = {dt_list[-1]:g} s）"),
+        check("rayleigh:order", "📐", all(0.8 <= o <= 1.2 for o in orders), value=[round(o, 3) for o in orders],
+              expected=1.0, note="dt を 1/4 にするとずれも約 1/4（前進 Euler の 1 次）"),
+        check("pot:temperature-rises", "🌡️", all(a <= b + 1e-12 for a, b in zip(temps, temps[1:])),
+              value=[round(temps[0], 2), round(temps[-1], 2)], note="釜の沸点はエタノールが抜けるほど上がる（表の沸点）"),
+        check("running:abv-falls", "📉", all(a >= b - 1e-12 for a, b in zip(running, running[1:])),
+              value=[round(running[0], 2), round(running[-1], 2)], note="流れ出る留液の度数は下がっていく"),
+    ]
+    summary["convergence"] = {"dt": {str(dt): conv[dt] for dt in dt_list}, "order": orders}
+
+    # 🎲 火力を A×10^3 W で振っても Rayleigh の関係は同じ（時間だけが 1/火力で縮む）
+    sweep = {}
+    for item in random_scales(seed, 3, n_min=-3, n_max=-3, digits=2):
+        p_w = item["value"]
+        net = still_network(ne, nw, dt=1.0, power=p_w)
+        t_end = 3600.0 * STILL["power"] / p_w
+        res = net.run(t_end, sample_every=max(1, int(t_end / 50)))
+        pot = _fraction(res, "pot")
+        x = mole_fraction(pot["ethanol"], pot["water"])
+        err = abs(pot["ethanol"] + pot["water"] - w0 * math.exp(-rayleigh_log(x, x0))) / (pot["ethanol"] + pot["water"])
+        sweep[item["label"]] = {"t_end": t_end, "rayleigh_error": err, "x_end": x}
+        checks.append(check(f"sweep:{item['label']}", "🎲", err <= 2e-3, value=err, tol=2e-3,
+                            note=f"火力 {item['label']} W でも Rayleigh 式どおり（時間は {t_end:.0f} s）"))
+    summary["power_sweep"] = sweep
+
+    # 🫧 共沸点: y = x なので、蒸留しても組成が変わらない
+    na, nwa = AZEOTROPE_X * 300.0, (1.0 - AZEOTROPE_X) * 300.0
+    net = still_network(na, nwa, dt=1.0)
+    res = net.run(600.0)  # 600 s で釜の約 1/4 を蒸発させる（空にはしない）
+    pot, rec = _fraction(res, "pot"), _fraction(res, "receiver")
+    checks += [
+        close("azeotrope:pot", "🫧", mole_fraction(pot["ethanol"], pot["water"]), AZEOTROPE_X, 1e-9,
+              note="共沸点（モル分率 0.8943）の液は蒸留しても組成が変わらない"),
+        close("azeotrope:distillate", "🫧", rec["abv"], abv(na, nwa), 1e-6, note="留液の度数 = 釜の度数（これ以上は濃くならない）"),
+    ]
+    summary["azeotrope"] = {"abv": abv(na, nwa), "distillate_abv": rec["abv"]}
+
+    # 🍇 初留（première chauffe）: ワインを、流れ出る度数が brouillis_cut を切るまで受ける
+    start = {sp: to_q(v) for sp, v in (("ethanol", ne), ("water", nw))}
+    net = still_network(ne, nw, dt=1.0, receivers=("brouillis", "tails1"),
+                        cuts=[{"to": "brouillis", "abv_below": STILL["brouillis_cut"]}, {"to": "tails1"}])
+    res1 = net.run(6000.0, sample_every=60)
+    b = _fraction(res1, "brouillis")
+    t1 = res1["links"][0]["cuts"][0].get("ended")
+    checks += [
+        check("premiere:brouillis-abv", "🍇", 28.0 <= b["abv"] <= 32.0, value=b["abv"], expected=30.0, tol=2.0,
+              note=f"初留の度数が公表の 28〜32 %（流れ出る度数 {STILL['brouillis_cut']:g} % で切った場合）"),
+        check("premiere:exact", "⚖️", _parts_exact(res1, start), note="受け器 + 釜 = 入れたワイン（成分ごとに Q 整数で一致）"),
+    ]
+    runs["premiere"] = res1["series"]
+    cut_table = {}
+    for cut in (2.0, 3.0, 5.0, 8.0):
+        r = still_network(ne, nw, dt=1.0, receivers=("b", "t"), cuts=[{"to": "b", "abv_below": cut}, {"to": "t"}]).run(
+            6000.0, sample_every=600)
+        fb = _fraction(r, "b")
+        cut_table[f"{cut:g}"] = {"abv": fb["abv"], "litres": fb["litres"]}
+    summary["premiere"] = {"brouillis": b, "cut_time": t1, "volume_ratio": b["litres"] / (STILL["wine_volume"] * 1e3),
+                           "cut_table": cut_table}
+
+    # 🥃 本留（bonne chauffe）: 初留を釜へ戻し、前留（量で 1 %）→ ハート（60 % を切るまで）→ セコンド → 後留
+    heads_v = STILL["heads_fraction"] * b["litres"] * 1e-3
+    net = still_network(b["ethanol"], b["water"], dt=1.0, receivers=("heads", "heart", "secondes", "tails"),
+                        cuts=[{"to": "heads", "volume": heads_v}, {"to": "heart", "abv_below": STILL["heart_cut"]},
+                              {"to": "secondes", "abv_below": STILL["secondes_cut"]}, {"to": "tails"}])
+    start2 = {sp: to_q(b[sp]) for sp in SPECIES}
+    res2 = net.run(6000.0, sample_every=60)
+    fr = {k: _fraction(res2, k) for k in ("heads", "heart", "secondes", "tails")}
+    checks += [
+        check("bonne:heart-abv", "🥃", 68.0 <= fr["heart"]["abv"] <= 72.0, value=fr["heart"]["abv"], expected=70.0,
+              tol=2.0, note="ハートの度数が公表の 68〜72 %（60 % を切ったらセコンドへ、の切り方そのまま）"),
+        check("bonne:order", "🪜", fr["heads"]["abv"] > fr["heart"]["abv"] > fr["secondes"]["abv"] > fr["tails"]["abv"],
+              value=[round(fr[k]["abv"], 1) for k in ("heads", "heart", "secondes", "tails")],
+              note="前留 > ハート > セコンド > 後留 の順に薄くなる"),
+        check("bonne:exact", "⚖️", _parts_exact(res2, start2), note="4 つの受け器 + 釜 = 入れた初留（成分ごとに Q 整数で一致）"),
+        check("bonne:species", "⚖️", res2["parts_error_q"] == {"ethanol": 0, "water": 0}, value=res2["parts_error_q"],
+              note="成分ごとに 0 ulp"),
+    ]
+    runs["bonne"] = res2["series"]
+    yield_ratio = STILL["wine_volume"] * 1e3 / fr["heart"]["litres"]
+    summary["bonne"] = {k: v for k, v in fr.items()} | {"cuts": res2["links"][0]["cuts"],
+                                                         "wine_litres_per_heart_litre": yield_ratio}
+    return {"params": {**STILL, "dt_list": list(dt_list), "seed": seed}, "summary": summary, "runs": runs,
+            "checks": checks}
+
+
 # --- 登録簿 ---------------------------------------------------------------
 
 EXPERIMENTS = {
@@ -2245,6 +2400,7 @@ EXPERIMENTS = {
     "E22": ("water-clock", "🏺", "水時計（断面が高さで変わる器: 4 次の放物面なら水位が一定の速さで下がる）", e22_water_clock),
     "E23": ("inertia-limits", "🚧", "慣性が要る題材（U 字管の揺れ・ダム決壊・水撃）は再現しない — 外れ方を数で記す",
             e23_inertia_limits),
+    "E24": ("distillation", "⚗️", "ワインの蒸留（Rayleigh 式・共沸点・コニャック式の 2 回蒸留）", e24_distillation),
 }
 SLUGS = {slug: eid for eid, (slug, *_rest) in EXPERIMENTS.items()}
 
@@ -2300,7 +2456,8 @@ def fluid_aliases() -> dict[str, str]:
 SCENE_ICONS = {"🏛": "moniac-rig", "🥢": "somen-flume", "🎋": "flume", "🫙": "flume-hopper", "🌊": "dam-break",
                "🕳": "moniac-drain", "🧊": "cold-water", "🪵": "bamboo-wear", "🍜": "noodle-length",
                "🧱": "noodle-clog", "🍽": "chopsticks", "🌧": "rain-runoff", "🎍": "shishi-odoshi",
-               "🍷": "pythagorean-cup", "🫗": "mariotte", "🏺": "water-clock", "🚧": "inertia-limits"}
+               "🍷": "pythagorean-cup", "🫗": "mariotte", "🏺": "water-clock", "🚧": "inertia-limits",
+               "⚗": "distillation"}
 
 
 def fluid_arg(text: str) -> str:
@@ -2309,7 +2466,7 @@ def fluid_arg(text: str) -> str:
 
 
 def scene_arg(text: str) -> str:
-    """draw の場面: 名前でも 🏛️ 🥢 🎋 🫙 🌊 🕳️ 🧊 🪵 🍜 🧱 🍽️ 🌧️ 🎍 🍷 🫗 🏺 🚧 でもよい。"""
+    """draw の場面: 名前でも 🏛️ 🥢 🎋 🫙 🌊 🕳️ 🧊 🪵 🍜 🧱 🍽️ 🌧️ 🎍 🍷 🫗 🏺 🚧 ⚗️ でもよい。"""
     return SCENE_ICONS.get(_plain(text), text)
 
 
@@ -2451,6 +2608,12 @@ def rig_section(scene: str, fluid: str = "water", temp_c: float | None = None, m
         for name in ("clepsydra", "cylinder", "cone"):
             net.orifice(name, "sea", area=a, cd=CLOCK["cd"])
         return net.run(h0 / k, sample_every=1), ["clepsydra", "cylinder", "cone"]
+    if scene == "distillation":  # ⚗️ 釜が減り、前留・ハート・セコンド・後留の受け器が順に溜まる
+        ne, nw = moles_for_abv(30.0, 0.010)
+        net = still_network(ne, nw, dt=2.0, receivers=("heads", "heart", "secondes", "tails"),
+                            cuts=[{"to": "heads", "volume": 1e-4}, {"to": "heart", "abv_below": STILL["heart_cut"]},
+                                  {"to": "secondes", "abv_below": STILL["secondes_cut"]}, {"to": "tails"}])
+        return net.run(3000.0, sample_every=15), ["pot", "heads", "heart", "secondes", "tails"]
     if scene == "inertia-limits":
         # ダム決壊（勾配 1 %）。水位は奥の壁から下がり始め、先端は尖らずにだらだら伸びる（Ritter とは別物）
         net, _info = dam_break(0.1, slope=1e-2, dt=0.02, fluid=fluid)
@@ -2465,7 +2628,7 @@ def _from(res: dict, t0: float) -> dict:
 
 RIG_SCENES = ("moniac-rig", "somen-flume", "noodle-length", "noodle-clog", "chopsticks", "cold-water",
               "bamboo-wear", "rain-runoff", "shishi-odoshi", "pythagorean-cup", "mariotte", "water-clock",
-              "inertia-limits")
+              "inertia-limits", "distillation")
 
 
 def _visc(args) -> dict:
@@ -2531,7 +2694,7 @@ def build_parser() -> argparse.ArgumentParser:
                          allow_abbrev=False)
     scenes = RIG_SCENES + pw.SECTION_CASES + pw.SCENES
     drw.add_argument("scene", type=scene_arg, choices=scenes,
-                     help="場面（名前か 🏛️ 🥢 🍜 🧱 🍽️ 🧊 🪵 🌧️ 🎍 🍷 🫗 🏺 🚧 🎋 🫙 🌊 🕳️）")
+                     help="場面（名前か 🏛️ 🥢 🍜 🧱 🍽️ 🧊 🪵 🌧️ 🎍 🍷 🫗 🏺 🚧 ⚗️ 🎋 🫙 🌊 🕳️）")
     drw.add_argument("block", nargs="?", type=block_arg,
                      help="流体のブロック・アイコン（🟦 🟨 🟧 🟩 🟪 / 💧 🍶 🧴 🟢 ☠️）か、塗りたい好きな絵文字")
     drw.add_argument("--view", choices=("frames", "frame", "files"), default="frames",

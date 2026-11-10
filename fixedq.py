@@ -149,6 +149,6 @@ def random_scales(seed: int, count: int, n_min: int = 1, n_max: int = 6, digits:
         n = rng.randint(n_min, n_max)
         a_txt = f"{a_int // lo}.{a_int % lo:0{digits - 1}d}" if digits > 1 else str(a_int)
         a = float(a_txt)
-        out.append({"A": a, "N": n, "a": a, "exp": -n, "value": float(f"{a_txt}e-{n}"),
-                    "label": f"{a_txt}×10^-{n}"})
+        out.append({"A": a, "N": n, "a": a, "exp": -n, "value": float(f"{a_txt}e{-n}"),
+                    "label": f"{a_txt}×10^{-n}"})
     return out
