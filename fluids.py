@@ -370,6 +370,85 @@ def side_spill(cell_length: float, h_outer: float, rim: float, cd: float = 0.62,
     return cd * (2.0 / 3.0) * cell_length * math.sqrt(2.0 * g) * over ** 1.5
 
 
+# --- 斜面に降る雨（運動波）の閉じた式 ---------------------------------------------
+
+def plan_width(section: Section) -> float:
+    """雨を受ける平面の幅。長方形は幅そのもの、半円は口の幅 2r（縁まで満ちた竹が受ける幅）。"""
+    return section.size if section.shape == "rect" else 2.0 * section.size
+
+
+def wave_celerity(section: Section, h: float, slope: float, law: str, *, nu: float, n_manning: float = 0.010,
+                  beta: float | None = None, g: float = G, rel: float = 1e-4) -> float:
+    """運動波の速さ c = dQ/dA = (dQ/dh) / B(h)。dQ/dh は中心差分（刻み h·rel）。"""
+    if h <= 0:
+        return 0.0
+    dh = h * rel
+    qp = channel_flow(section, h + dh, slope, law, nu=nu, n_manning=n_manning, beta=beta, g=g)
+    qm = channel_flow(section, h - dh, slope, law, nu=nu, n_manning=n_manning, beta=beta, g=g)
+    return (qp - qm) / (2.0 * dh) / section.top_width(h)
+
+
+def overland_equilibrium(section: Section, intensity: float, length: float, slope: float, law: str, *, nu: float,
+                         h_max: float, n_manning: float = 0.010, beta: float | None = None, g: float = G) -> dict:
+    """一様な雨 i が長さ L の斜面に降るときの定常（運動波、Henderson & Wooding 1964）。
+
+    特性線に沿って dh/dt = i、dx/dt = c(h) なので、上流端（x = 0、h = 0）から出た特性線は
+    x(t) = Q(i·t) / (i·B) を進む。これが L に届く時刻が平衡到達時間 t_e で、そのとき出口の水深は
+    h_e（Q(h_e) = i·B·L）。よって t_e = h_e / i。流量の形 Q(h) は何でもよい（べき乗則に限らない）。
+    戻り値: Q_e（定常流出）、h_e、t_e、B（雨を受ける幅）。
+    """
+    b = plan_width(section)
+    q_e = intensity * b * length
+    h_e = normal_depth(section, q_e, slope, law, nu=nu, h_max=h_max, n_manning=n_manning, beta=beta, g=g)
+    return {"Q_e": q_e, "h_e": h_e, "t_e": h_e / intensity, "B": b}
+
+
+def overland_rise(section: Section, intensity: float, t: float, slope: float, law: str, *, nu: float,
+                  n_manning: float = 0.010, beta: float | None = None, g: float = G) -> float:
+    """立ち上がり（t < t_e）: 出口の水深は h = i·t、流量は Q(i·t)。べき乗則なら α(i·t)^m。"""
+    return channel_flow(section, intensity * t, slope, law, nu=nu, n_manning=n_manning, beta=beta, g=g)
+
+
+def overland_recession(section: Section, intensity: float, length: float, slope: float, law: str, t_after: float, *,
+                       nu: float, h_max: float, n_manning: float = 0.010, beta: float | None = None,
+                       g: float = G) -> float:
+    """雨がやんでから t_after 後の出口の流量（定常から始まる減衰、Kibler & Woolhiser 1970 の式 19–21）。
+
+    雨がやむと特性線に沿って h は変わらず x = x0 + c(h)·t_after。出口に届く特性線は、定常の分布
+    Q(h) = i·B·x0 から出たものなので、Q(h)/(i·B) + c(h)·t_after = L を h について二分法で解く
+    （左辺は h について単調増加）。
+    """
+    b = plan_width(section)
+    eq = overland_equilibrium(section, intensity, length, slope, law, nu=nu, h_max=h_max, n_manning=n_manning,
+                              beta=beta, g=g)
+    kw = {"nu": nu, "n_manning": n_manning, "beta": beta, "g": g}
+
+    def reach(h: float) -> float:
+        return channel_flow(section, h, slope, law, **kw) / (intensity * b) + wave_celerity(
+            section, h, slope, law, **kw) * t_after
+
+    lo, hi = 0.0, eq["h_e"]
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        lo, hi = (mid, hi) if reach(mid) < length else (lo, mid)
+    return channel_flow(section, 0.5 * (lo + hi), slope, law, **kw)
+
+
+def overland_power_law(slope: float, law: str, *, nu: float, n_manning: float = 0.010, beta: float = 3.0,
+                       g: float = G) -> tuple[float, float]:
+    """広い平面（R ≈ h）のべき乗則 q = α·h^m（単位幅あたり）。Manning: α = √S/n、m = 5/3。層流: α = g·S/(β·ν)、m = 3。"""
+    if law == "manning":
+        return math.sqrt(slope) / n_manning, 5.0 / 3.0
+    if law == "laminar":
+        return g * slope / (beta * nu), 3.0
+    raise ValueError("law must be 'manning' or 'laminar'")
+
+
+def overland_t_e_power_law(intensity: float, length: float, alpha: float, m: float) -> float:
+    """広い平面の平衡到達時間 t_e = (L / (α·i^(m−1)))^(1/m)（Woolhiser & Liggett 1967 の形）。"""
+    return (length / (alpha * intensity ** (m - 1.0))) ** (1.0 / m)
+
+
 __all__ = [
     "FLUIDS", "Fluid", "G", "REAL_FLUIDS", "RE_LAMINAR", "TEMP_TABLES", "fluid_table", "get_fluid", "table_value",
     "temperature_range",
@@ -378,4 +457,6 @@ __all__ = [
     "Section", "channel_flow", "channel_reynolds", "hydraulic_radius", "normal_depth",
     "fall_time", "lip_flow", "lip_head", "side_spill", "superelevation",
     "ORIFICE_DELTA", "PLACEHOLDER_MU_SCALE", "orifice_cd", "viscous_orifice",
+    "overland_equilibrium", "overland_power_law", "overland_recession", "overland_rise", "overland_t_e_power_law",
+    "plan_width", "wave_celerity",
 ]

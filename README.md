@@ -68,7 +68,8 @@ commit・blob・sha256 は `vendor.lock.json` に固定。更新は親の `vendo
 | 〰️ | `pipe` | 細管（Hagen–Poiseuille）。速さは動粘度 ν で決まる |
 | 🕳️ | `orifice` | 小孔（Torricelli）。流体によらない |
 | 🪜 | `weir` / `cam` | 長方形・三角の堰、水位 → 流量の表（特殊形状のスリット） |
-| ⛽ | `pump` | 一定流量（`until` まで） |
+| ⛽ | `pump` | 一定流量（`start` から `until` まで） |
+| 🌧️ | `rain` | 樋の全区間に一様な雨（区間ごとのポンプ。流量 = 強さ × 平面の幅 × 区間長）。spec では `rains` |
 | 🎈 | `float_valve` | 浮き弁。測った水位が遅れの段を通って弁を開く |
 | 🚰 | `valve` | 弁つきの出口（MONIAC の弁）。開き具合は一定か、別の水槽の浮き → カムで決まる |
 | ⏳ | `delay` | どの管にも付く輸送の遅れ。管の中の水も総量に数える |
@@ -96,6 +97,7 @@ commit・blob・sha256 は `vendor.lock.json` に固定。更新は親の `vendo
 | E15 🧊 | `cold-water` | 水温表（0–40 °C）: 出典間の幅、10 °C の細い流れは等流水深の比どおり深く（×1.08）遅い（×1.12）、縁の越流水深と引っかかりは変わらない、Manning の竹はビット単位で同じ |
 | E16 🪵 | `bamboo-wear` | 竹の傷み: 割れ目の漏れ = Cd·a·√(2gh)、床に落ちたのは漏れた分だけ（ulp まで）、節の削り残しの手前のたまり = 節 + 越流水深、細い流れではうどん（2 mm）だけ節で引っかかる |
 | E17 🍯 | `viscosity` | 粘度のつまみ: 層流の樋の水深は閉じた式どおり動き、粘いほどそうめんが遅く着く。継ぎ目のたまり・Manning の竹・Cd 一定の小孔はビット単位で同じ。`viscous=True` の小孔は Re が下がると Cd が下がり（低い Re で δ·√Re）抜け方が遅くなる。☠️ Poison Water（×5）の水深 |
+| E18 🌧️ | `rain-runoff` | 斜面に降る雨を運動波の閉じた式と比べる: 定常 Q_e = i·B·L と h_e、95 % 到達時刻・立ち上がり Q(i·t)・減衰の特性線解との相対誤差、区間を倍にすると誤差が約半分（1 次の収束）、dt を半分にすると Q(t_e/2) の誤差が半分、Manning は 🍶 でもビット単位で同じ、層流は t_e ∝ ν^(1/3) |
 | E22 🏺 | `water-clock` | 水時計: 半径 ∝ h^(1/4) の器なら水位が一定の速さで下がり 12 等分の目盛りが等間隔（ずれ 7e-5）、同じ半径の筒は目盛りが 23:…:1 に詰まる、円すいはその間。dt を 1/4 にするとずれも 1/4（1 次）、表の刻みは頭打ち。出口が細い管（Q ∝ h）だと 🏺 でも筒と同じ形に戻る |
 
 どの実験も ⚖️ 総量の保存（ずれ 0 ulp）と、層流の前提（Re）・Courant 数などの前提条件を一緒に確かめる。
@@ -184,6 +186,29 @@ uv run python fluidfullspeedsimulation.py draw moniac-drain --fluid ethanol --sc
 | 🍶 ethanol | 0–40 °C | μ: chemeurope Ethanol data page（CHERIC）、ρ: Lange の直線。Kaye & Laby（0 °C 1.873・30 °C 0.983 mPa·s）とは 3〜9 % ずれる |
 | 🧴 methanol | 0–25 °C | [Anton Paar Wiki](https://wiki.anton-paar.com/en/methanol/)（Kaye & Laby ほか） |
 
+## 🌧️ 斜面に降る雨（精度比べ）
+
+幅 1 m・長さ 30 m・勾配 5 % の板に一様な雨（Manning: 360 mm/h、層流: 10.8 mm/h）。運動波の閉じた式は流量の形 Q(h) を問わない:
+特性線に沿って dh/dt = i、dx/dt = c(h) = dQ/dA なので、出口の水深は t_e = h_e/i（Q(h_e) = i·B·L）まで h = i·t、
+流量は Q(i·t)。やんだ後は Q(h)/(i·B) + c(h)·t = L を h について解く（`fluids.overland_*`）。
+
+| 区間数 | dt [s] | 95 % 到達時刻 | 立ち上がり（0.2〜0.8 t_e） | 減衰（0.5〜2 t_e 後） | Q(t_e/2) |
+|---|---|---|---|---|---|
+| 10 | 0.1 | 25 % | 4.1 % | 25 % | 0.72 % |
+| 20 | 0.1 | 14 % | 1.7 % | 13 % | 0.69 % |
+| 40 | 0.1 | 7.3 % | 1.7 % | 6.2 % | 0.69 % |
+| 80 | 0.1 | 3.4 % | 1.7 % | 2.9 % | 0.69 % |
+| 20 | 0.05 | 14 % | 1.3 % | 13 % | 0.35 % |
+
+- 📉 区間に分ける誤差（Δx）: 上流側の区間ほど水がたまりにくく先端がなまる → 95 % 到達は遅れる側にずれ、区間を倍にすると約半分（1 次）
+- ⏲️ ステップに分ける誤差（dt）: 雨はそのステップの流出を決めた後に入るので水深が dt だけ遅れる → Q(t_e/2) の誤差 ≈ m·dt/(t_e/2)（m = 5/3）。区間数には依らず、dt を半分にすると半分
+- 🔁 定常（Q_e・h_e）は区間数によらず 1e-3 以内。降った量 = 受け皿 + 板に残る水（ulp まで）
+- 📐 広い平面のべき乗則 q = α·h^m（Manning: α = √S/n、m = 5/3。層流: α = gS/(3ν)、m = 3）の t_e = (L/(α·i^(m−1)))^(1/m) は、R ≈ h とみなす分（2h/B）だけずれる
+
+```bash
+uv run python fluidfullspeedsimulation.py draw 🌧️ --frames 4 --rows 6   # 雨が行き渡り（下流ほど深い）、やむと上流から引く
+```
+
 ## 🍯 粘度のつまみ
 
 - `get_fluid(key, temp_c, mu=…, mu_scale=…)` / `Network(dt, fluid, temp_c=…, mu=…, mu_scale=…)` / spec の `"mu"`・`"mu_scale"` / `draw --mu`（mPa·s）・`--viscosity-scale`
@@ -204,6 +229,7 @@ uv run python fluidfullspeedsimulation.py draw moniac-drain --fluid ethanol --sc
 - 管の遅れは初期水位の流速で決めた栓流。トレーサーは先入れ先出し（水槽では平均滞留時間に当たる）
 - 層流の樋は v = gSR²/(βν)（β: 長方形 3・半円 2）の近似
 - 🥢 継ぎ目のたまりは手前の 1 セルにまとめる（上流へのせき上げは解かない）。曲がりの持ち上がりは Δh = v²B/(gR) の近似
+- 🌧️ 板の雨は運動波（慣性・圧力勾配なし）と比べる。浸透・表面張力・雨滴の衝撃は入れていない。区間に分ける誤差は 1 次なので、先端の時刻を 1 % にするには 300 区間ほど要る
 - 🧊 越流（継ぎ目・節）の式は粘度によらないので、冷やしても引っかかりは変わらない。実際は越流水深が mm 程度だと粘性・表面張力で Cd が下がり、冷水の方が引っかかりやすい可能性があるが入れていない
 - 🎋 割れ目は Cd 0.61（薄い縁の穴）。竹の厚み（数 mm）を通る短い管とみれば 0.82 程度まで上がる（E16 の summary に両方）。mm の水深では表面張力で漏れが止まることもあるが入れていない
 - 🍜 麺の太さは目安（機械製麺の区分: そうめん < 1.3 mm ≤ ひやむぎ < 1.7 mm）。引っかかりは「越流水深 < 太さ」だけで決める
@@ -223,6 +249,9 @@ uv run python fluidfullspeedsimulation.py draw moniac-drain --fluid ethanol --sc
 - [chem-casts: Water viscosity table](https://chem-casts.com/data-tables/water-viscosity-data-table)
 - [Sci. Rep. 13, 2023: 鋭いふちの小孔は Re < 10,000 で流量係数が大きく変わる](https://www.nature.com/articles/s41598-023-42451-0)
 - [Int. J. Fluid Power: 流量係数は低い Re で √Re に比例、高い Re で一定（Merritt 1967、δ ≈ 0.2）](https://journals.riverpublishers.com/index.php/IJFP/article/download/617/355/1531)
+- [Kibler & Woolhiser 1970: The kinematic cascade as a hydrologic model（Colorado State Univ. Hydrology Paper 39。特性線 dx/dt = αN·h^(N−1)・dh/dt = q、減衰 x = x0 + c(h0)(t − t0)、Henderson & Wooding 1964 が斜面に初めて運動波を使ったとの記載）](https://core.ac.uk/download/354408861.pdf)
+- [Woolhiser & Liggett 1967: Unsteady, one-dimensional flow over a plane — the rising hydrograph（運動波の数 k）](https://scilit.net/publications/510266709445471b2defde9b7156e398)
+- [Ponce ほか: Generalized conceptual modeling of dimensionless overland flow hydrographs（運動波は拡散を持たない、Wooding 1965・Woolhiser & Liggett 1967）](https://ponce.sdsu.edu/generalized_conceptual_modeling_of_dimensionless_overland_flow_hydrographs.html)
 - [Torricelli's law — Wikipedia（clepsydra problem: 半径 ∝ h^(1/4) で水位が一定に下がる）](https://en.wikipedia.org/wiki/Torricelli%27s_law)
 - [Høyrup 1998, Roskilde: 古代の水時計の出口は細い管で層流（Poiseuille）になりうるため、4 次の放物面でも一定には下がらない](https://rucforsk.ruc.dk/ws/files/4340180/1998_Waterclock_MS.pdf)
 - [ふるなび: そうめんとひやむぎの違い（食品表示基準の太さ区分）](https://furunavi.jp/discovery/knowledge_food/202504-somen_hiyamugi/)
