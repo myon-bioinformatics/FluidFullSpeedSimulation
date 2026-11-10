@@ -71,6 +71,7 @@ commit・blob・sha256 は `vendor.lock.json` に固定。更新は親の `vendo
 | ⛽ | `pump` | 一定流量（`until` まで） |
 | 🎈 | `float_valve` | 浮き弁。測った水位が遅れの段を通って弁を開く |
 | 🚰 | `valve` | 弁つきの出口（MONIAC の弁）。開き具合は一定か、別の水槽の浮き → カムで決まる |
+| 🎍 | `tip` / `siphon` / `mariotte` | 溜まる → 閾値 → 一気に: 鹿威しの筒、ピタゴラスの杯のサイフォン、マリオットびんの出口（E19〜E21） |
 | ⏳ | `delay` | どの管にも付く輸送の遅れ。管の中の水も総量に数える |
 | 🍜 | `tracer` | 流れに乗って運ばれる物（そうめん・葉っぱ）。先入れ先出しで節点を渡る。太さ `size` があると、縁の越流水深が浅いあいだ引っかかる |
 | 🔌 | `register_law` | 管の法則を足す口。spec の `law` からもそのまま使える |
@@ -96,6 +97,9 @@ commit・blob・sha256 は `vendor.lock.json` に固定。更新は親の `vendo
 | E15 🧊 | `cold-water` | 水温表（0–40 °C）: 出典間の幅、10 °C の細い流れは等流水深の比どおり深く（×1.08）遅い（×1.12）、縁の越流水深と引っかかりは変わらない、Manning の竹はビット単位で同じ |
 | E16 🪵 | `bamboo-wear` | 竹の傷み: 割れ目の漏れ = Cd·a·√(2gh)、床に落ちたのは漏れた分だけ（ulp まで）、節の削り残しの手前のたまり = 節 + 越流水深、細い流れではうどん（2 mm）だけ節で引っかかる |
 | E17 🍯 | `viscosity` | 粘度のつまみ: 層流の樋の水深は閉じた式どおり動き、粘いほどそうめんが遅く着く。継ぎ目のたまり・Manning の竹・Cd 一定の小孔はビット単位で同じ。`viscous=True` の小孔は Re が下がると Cd が下がり（低い Re で δ·√Re）抜け方が遅くなる。☠️ Poison Water（×5）の水深 |
+| E19 🎍 | `shishi-odoshi` | 鹿威し: 周期 = V_tip/q + t_dump（2 ステップまで）、clack の間隔は毎回同じ、落ちた量 = 傾いた瞬間の体積 + 傾いている間の注ぎ込み（0 ulp）、受け皿に入ったのは落ちた分だけ。q を A×10^-N で振り 1 周期 1000 ステップで同じ結論 |
+| E20 🍷 | `pythagorean-cup` | ピタゴラスの杯: 頂まで溜まるまでサイフォンは流れない、注ぎ込みなしの吸い切る時間 = 2A/(Cd·a·√2g)·(√(h_crest+h_drop) − √h_drop)、吸い口まで吸い切って残り 0 ulp、注ぎ込みありの周期 = A·h_crest/q + RK4 の参照値（3 ステップまで）、吸い切ったあと再び働く |
+| E21 🫗 | `mariotte` | マリオットびん: 空気管の下端が水面より下のあいだ流量 Q = Cd·a·√(2g·h_air) で一定（整数で毎ステップ同じ）、水位は直線で下がる、一定のまま流れる時間 = (h0 − h_air)·A/Q、下端から先は Torricelli の曲線（0.1 mm まで） |
 | E22 🏺 | `water-clock` | 水時計: 半径 ∝ h^(1/4) の器なら水位が一定の速さで下がり 12 等分の目盛りが等間隔（ずれ 7e-5）、同じ半径の筒は目盛りが 23:…:1 に詰まる、円すいはその間。dt を 1/4 にするとずれも 1/4（1 次）、表の刻みは頭打ち。出口が細い管（Q ∝ h）だと 🏺 でも筒と同じ形に戻る |
 
 どの実験も ⚖️ 総量の保存（ずれ 0 ulp）と、層流の前提（Re）・Courant 数などの前提条件を一緒に確かめる。
@@ -191,6 +195,22 @@ uv run python fluidfullspeedsimulation.py draw moniac-drain --fluid ethanol --sc
 - 粘度が効くのは ν の入る式だけ: 細管（Hagen–Poiseuille）、層流の樋、管の遅れ、ドット絵の横の広がり。小孔・堰・継ぎ目の縁・Manning は効かない
 - 粘い液で小孔を使うなら `orifice(..., viscous=True)`: Re = v·d/ν から Cd = Cd∞·tanh(δ·√Re / Cd∞)（δ = 0.2）を毎ステップ解く。低い Re で δ·√Re（Merritt の層流の傾き）、高い Re で Cd∞ = 0.61。どちらでも結果に Re と `viscous_regime`（Re < 1e4）を残す
 
+## 🎍🍷🫗 溜まる → 閾値 → 一気に（E19〜E21）
+
+同じ「溜まって、ある線を越えると一気に動く」を、答えの分かっている 3 つの器で確かめる。部品は `tip`・`siphon`・`mariotte` の法則（`register_law`）で、spec の `law` からも組める。
+
+| | 器 | 閾値 | 閉じた式 |
+|---|---|---|---|
+| 🎍 | 鹿威し `tip(v_tip, t_dump, dump_rate)` | 筒の体積が V_tip | 周期 T = V_tip/q + t_dump。傾いている間の注ぎ込みも一緒に落ちる。戻りは時間で決める（力学は解かない） |
+| 🍷 | ピタゴラスの杯 `siphon(h_crest, h_drop, area, cd, h_intake)` | 水面が管の頂 | 流量 Cd·a·√(2g·(h + h_drop))。吸い口まで吸い切って止まり（このステップで残りを超えて要求したら、残りだけ流して止める）、また頂まで溜まるのを待つ |
+| 🫗 | マリオットびん `mariotte(area, h_air, cd)` | 水面が空気管の下端 | 下端より上は水頭 h_air で一定の Q = Cd·a·√(2g·h_air)。下端より下はふつうの Torricelli |
+
+```bash
+uv run python fluidfullspeedsimulation.py draw 🎍 --frames 10 --rows 4   # 筒がのこぎり歯、受け皿が階段
+uv run python fluidfullspeedsimulation.py draw 🍷 --frames 8             # 杯が頂で吸い切られる
+uv run python fluidfullspeedsimulation.py draw 🫗 🟩                     # びんは直線で下がり、下端から鈍る
+```
+
 ## 🏺 断面が高さで変わる器
 
 - `tank(name, profile=[[h, A(h)], …])`（間は直線）か `tank(name, h_max, profile=A)`（Python の関数）。0 から h_max まで `samples`（既定 512）に刻んで体積 V(h) を台形で積み上げ、V → h の表（Q 整数の Cam）で水位を引く。h_max の上は一番上の断面で伸ばす
@@ -207,6 +227,9 @@ uv run python fluidfullspeedsimulation.py draw moniac-drain --fluid ethanol --sc
 - 🧊 越流（継ぎ目・節）の式は粘度によらないので、冷やしても引っかかりは変わらない。実際は越流水深が mm 程度だと粘性・表面張力で Cd が下がり、冷水の方が引っかかりやすい可能性があるが入れていない
 - 🎋 割れ目は Cd 0.61（薄い縁の穴）。竹の厚み（数 mm）を通る短い管とみれば 0.82 程度まで上がる（E16 の summary に両方）。mm の水深では表面張力で漏れが止まることもあるが入れていない
 - 🍜 麺の太さは目安（機械製麺の区分: そうめん < 1.3 mm ≤ ひやむぎ < 1.7 mm）。引っかかりは「越流水深 < 太さ」だけで決める
+- 🎍 鹿威しの傾き・戻りは瞬間（傾いている時間 t_dump は与える値）。重心の移動や筒の慣性、落ちる水のはねは解かない
+- 🍷 サイフォンは「頂に届けば働く」とみなす（呼び水・管に残る空気・気泡の混入は入れない）。Cd は管の損失をまとめた 1 つの係数。注ぎ込みありの排水時間は閉じた式にならないので RK4 の参照値と比べる
+- 🫗 マリオットびんは密閉を仮定し、空気の出入りの抵抗・水面の泡立ちは入れない。空気管の下端を切った瞬間に Torricelli へ切り替える
 
 ## 🗺️ この先
 
@@ -215,6 +238,10 @@ uv run python fluidfullspeedsimulation.py draw moniac-drain --fluid ethanol --sc
 - 🟩 Node 側の鏡合わせ実装（BigInt で同じ整数列になるか）
 
 ## 📚 出典
+
+- [Shishi-odoshi — Wikipedia](https://en.wikipedia.org/wiki/Shishi-odoshi)（添水: 竹の筒に水が溜まると傾いて空になり、戻るときに石を打つ）
+- [Pythagorean cup — Wikipedia](https://en.wikipedia.org/wiki/Pythagorean_cup)（水面が中の管の頂を越えるとサイフォンが働き、杯の中身を吸い切る）
+- [Mariotte's bottle — Wikipedia](https://en.wikipedia.org/wiki/Mariotte%27s_bottle)、[UC Davis: How a Mariotte bottle works](https://lawr.ucdavis.edu/classes/ssc100/Mariotte_bottle.htm)（空気管の下端が大気圧になり、出口を押す水頭は水位によらず一定）
 
 - [Phillips Machine — Wikipedia](https://en.wikipedia.org/wiki/Phillips_Machine)（1949、Lancaster 爆撃機の余剰部品、約 2% の精度、Financephalograph）
 - [Ethanol (data page) — Wikipedia](https://en.wikipedia.org/wiki/Ethanol_(data_page))

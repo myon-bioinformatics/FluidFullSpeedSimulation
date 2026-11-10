@@ -16,6 +16,10 @@ MONIAC は「水が流れ落ちる様子」の手本。部品は物理のまま�
 - ``lip``（継ぎ目の縁を越える堰）/ ``spill``（曲がりの外側から横へあふれる）
 - ``pump``（一定流量）/ ``float_valve``（浮き弁。測った水位が遅れの段を通って弁を開く）
 - ``valve``（弁つきの出口。開き具合は一定か、別の水槽の浮き → カムで決まる。MONIAC の弁）
+- ``tip``（🎍 鹿威し: 溜まると傾いて一気に落とす）/ ``siphon``（🍷 ピタゴラスの杯: 頂に届くと吸い切る）
+  / ``mariotte``（🫗 マリオットびん: 空気管の下端まで流量が一定）
+- ``tip``（🎍 鹿威し: 溜まると傾いて一気に落とす）/ ``siphon``（🍷 ピタゴラスの杯: 頂に届くと吸い切る）
+  / ``mariotte``（🫗 マリオットびん: 空気管の下端まで流量が一定）
 - どの管にも ``delay``（輸送の遅れ）を付けられる。管の中の水も総量に数える
 
 運ばれる物 ``tracer``（そうめん・葉っぱ・浮き）: 入った節点に先にいた水が全部出たら、いちばん多く
@@ -203,6 +207,65 @@ def _law_float_valve(net, ln, n):
         u = ln["z"][i]
     q = clamp(qmul(ln["gain"], ln["setpoint"] - u), 0, ln["qmax"])
     return qmul(q, net.dt_q)
+
+
+@register_law("tip")
+def _law_tip(net, ln, n):
+    """🎍 鹿威し（添水）: 筒の体積が v_tip に届いた瞬間に傾き、dump_steps ステップのあいだ中身を落とす
+    （dump_amount が None なら一度に全部、あれば 1 ステップにその量まで）。そのあいだに注ぎ込んだ分も一緒に落ちる。
+    傾いている時間が過ぎたら戻る（戻りは力学を解かず、時間で決める）。"""
+    v = net.nodes[ln["src"]]["v"]
+    if ln["tipped_left"] == 0:
+        if ln["dump_from"] is not None:  # 戻った直後: 前の傾きで落ちた量を締める
+            ln["tips"][-1]["dumped_q"] = ln["flow_sum"] - ln["dump_from"]
+            ln["tips"][-1]["left_q"] = v
+            ln["dump_from"] = None
+        if v < ln["v_tip"]:
+            return 0
+        ln["tips"].append({"t": n * net.dt, "volume_q": v, "dumped_q": None, "left_q": None})
+        ln["tipped_left"] = ln["dump_steps"]
+        ln["dump_from"] = ln["flow_sum"]
+    ln["tipped_left"] -= 1
+    return v if ln["dump_amount"] is None else min(v, ln["dump_amount"])
+
+
+@register_law("siphon")
+def _law_siphon(net, ln, n):
+    """🍷 サイフォン（ピタゴラスの杯）: 水面が管の頂（h_crest）に届くと流れ始め、水面と出口（底より h_drop 下）の
+    高さの差で Torricelli の流量。水面が吸い口（h_intake）まで下がると空気が入って止まり、また頂まで溜まるのを待つ。
+    止まる判定は「このステップで吸い口まで吸い切る」こと（要求が残りを超えたら、残りだけ流して止める）。"""
+    v = net.nodes[ln["src"]]["v"]
+    h = net.head_q(ln["src"])
+    if not ln["primed"]:
+        if h < ln["crest"]:
+            return 0
+        ln["primed"] = True
+        ln["primes"].append(n * net.dt)
+    avail = max(v - ln["intake_v"], 0)
+    out = qmul(ln["coef"], qsqrt(h + ln["drop"]))
+    if out >= avail:
+        ln["primed"] = False
+        ln["breaks"].append({"t": (n + 1) * net.dt, "left_q": v - avail})
+        return avail
+    return out
+
+
+@register_law("mariotte")
+def _law_mariotte(net, ln, n):
+    """🫗 マリオットびん: 空気管の下端（出口より h_air 上）が水面より下にあるあいだ、出口を押す水頭は h_air で一定
+    （管の下端が大気圧になるため）。水面が下端より下がると、ふつうの Torricelli（水頭 = 水面）になる。"""
+    v = net.nodes[ln["src"]]["v"]
+    h = net.head_q(ln["src"])
+    if h <= 0:
+        return 0
+    if h >= ln["h_air"]:
+        out = ln["const_out"]
+        ln["const_steps"] += 1
+    else:
+        if ln["falling_from"] is None:
+            ln["falling_from"] = n * net.dt
+        out = qmul(ln["coef"], qsqrt(h))
+    return min(out, v)
 
 
 class Network:
@@ -485,6 +548,42 @@ class Network:
         return self._link("float_valve", src, dst, delay, sensor=sensor, setpoint=to_q(setpoint),
                           gain=to_q(gain), qmax=to_q(qmax), k=lag_gain(self.dt, tau), z=[h0] * stages,
                           stages=stages, tau=tau)
+
+    def tip(self, src: str, dst: str, *, v_tip: float, t_dump: float | None = None, dump_rate: float | None = None,
+            delay: float = 0.0) -> dict:
+        """🎍 鹿威しの筒。v_tip [m³] 溜まると傾き、t_dump 秒（省くと 1 ステップ）のあいだ dump_rate [m³/s]
+        （省くと一度に全部）で落とす。"""
+        if v_tip <= 0:
+            raise ValueError("v_tip must be positive")
+        dump_steps = 1 if t_dump is None else max(1, int(round(t_dump / self.dt)))
+        if dump_rate is not None and dump_rate <= 0:
+            raise ValueError("dump_rate must be positive")
+        return self._link("tip", src, dst, delay, v_tip=to_q(v_tip), dump_steps=dump_steps, t_dump=dump_steps * self.dt,
+                          dump_amount=None if dump_rate is None else qmul(to_q(dump_rate), self.dt_q),
+                          dump_rate=dump_rate, tipped_left=0, dump_from=None, tips=[])
+
+    def siphon(self, src: str, dst: str, *, h_crest: float, h_drop: float = 0.0, area: float, cd: float = 0.6,
+               h_intake: float = 0.0, delay: float = 0.0) -> dict:
+        """🍷 サイフォン。頂 h_crest、出口は底より h_drop 下、管の断面 area、Cd は損失をまとめた係数（既定 0.6）、
+        吸い口の高さ h_intake（既定 0 = 底まで吸い切る）。src は水槽。"""
+        if self.nodes[src]["kind"] != "tank":
+            raise ValueError("siphon needs a tank as src")
+        if h_crest <= h_intake or h_intake < 0 or h_drop < 0 or area <= 0:
+            raise ValueError("siphon needs h_crest > h_intake >= 0, h_drop >= 0, area > 0")
+        return self._link("siphon", src, dst, delay, crest=to_q(h_crest), drop=to_q(h_drop),
+                          intake_v=qmul(to_q(h_intake), self.nodes[src]["area_q"]), h_crest=h_crest, h_drop=h_drop,
+                          h_intake=h_intake, tube_area=area, cd=cd,
+                          coef=to_q(cd * area * math.sqrt(2.0 * self.g) * self.dt), primed=False, primes=[], breaks=[])
+
+    def mariotte(self, src: str, dst: str, *, area: float, h_air: float, cd: float = 0.61, delay: float = 0.0) -> dict:
+        """🫗 マリオットびんの出口。小孔の断面 area、空気管の下端は出口より h_air 上。src は水槽。"""
+        if self.nodes[src]["kind"] != "tank":
+            raise ValueError("mariotte needs a tank as src")
+        if h_air <= 0 or area <= 0:
+            raise ValueError("mariotte needs h_air > 0 and area > 0")
+        coef = to_q(cd * area * math.sqrt(2.0 * self.g) * self.dt)
+        return self._link("mariotte", src, dst, delay, coef=coef, orifice_area=area, cd=cd, h_air=to_q(h_air),
+                          h_air_m=h_air, const_out=qmul(coef, qsqrt(to_q(h_air))), const_steps=0, falling_from=None)
 
     # --- 運ばれる物 -------------------------------------------------------
     def tracer(self, name: str, node: str, release: float = 0.0, stop=(), size: float = 0.0, length: float = 0.0,
@@ -828,6 +927,13 @@ class Network:
                "volume_moved_q": ln["flow_sum"]}
         if ln["kind"] == "spill":
             out["max_outer"] = ln["max_outer"]
+        if ln["kind"] == "tip":
+            out.update(tips=[dict(t) for t in ln["tips"]], t_dump=ln["t_dump"], dump_rate=ln["dump_rate"])
+        if ln["kind"] == "siphon":
+            out.update(primes=list(ln["primes"]), breaks=[dict(b) for b in ln["breaks"]], primed=ln["primed"])
+        if ln["kind"] == "mariotte":
+            out.update(constant_flow=from_q(qdiv(ln["const_out"], self.dt_q)), constant_time=ln["const_steps"] * self.dt,
+                       falling_from=ln["falling_from"])
         if ln["kind"] == "pipe":
             h = from_q(ln["max_head"])
             v = ln["radius"] ** 2 * self.g * h / (8.0 * self.fluid.nu * ln["length"])
@@ -871,7 +977,7 @@ def ch_depth(ln: dict, net: "Network") -> float:
 
 # --- JSON の仕様から組む --------------------------------------------------
 
-LINK_BUILDERS = ("pipe", "orifice", "weir", "cam", "pump", "valve", "float_valve")
+LINK_BUILDERS = ("pipe", "orifice", "weir", "cam", "pump", "valve", "float_valve", "tip", "siphon", "mariotte")
 SPEC_KEYS = {"dt", "fluid", "temp_c", "mu", "mu_scale", "tanks", "channels", "flumes", "links", "tracers", "t_end", "trace", "sample_every"}
 
 
