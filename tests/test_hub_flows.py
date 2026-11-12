@@ -191,6 +191,66 @@ class Outlets(unittest.TestCase):
         b = ffs.outlet_network([[1.0]], tau=30.0, dt=0.5, outlets="independent").run(60.0)
         self.assertEqual(a["volumes_q"], b["volumes_q"])
 
+    def test_uniform_inflows_pump_fed_and_combined_tank_are_exact(self):
+        import math as m
+        import network
+        for item in random_scales(293, 4, n_min=0, n_max=2):
+            h = min(item["value"], 0.5)
+            tau, dt = 20.0, 20.0 * h
+            steps = max(1, round(2.0 / h))
+            t = steps * dt
+            got = {}
+            for mode in network.INFLOW_MODES:
+                net = network.Network(dt=dt, inflows=mode)
+                net.tank("sea", 1.0, volume=1e6).tank("b", 1.0).tank("s", 1.0)
+                net.pump("sea", "b", rate=3.0)
+                net.valve("b", "s", tau=tau)
+                res = net.run(t)
+                got[mode] = from_q(res["volumes_q"]["b"]) / (3.0 * tau * -m.expm1(-t / tau)) - 1.0
+                self.assertEqual(res["conservation_error_q"], 0)
+            with self.subTest(dt_over_tau=item["label"]):
+                self.assertAlmostEqual(got["uniform"], 0.0, places=9)
+                self.assertAlmostEqual(got["end"], h / -m.expm1(-h) - 1.0, places=9)  # 入った量が半ステップ減りそこねる
+            # 入るポンプ + 弁 3 本 + 出るポンプ: V∞ + (V0 − V∞)·e^(−K·t)
+            net = network.Network(dt=dt)
+            net.tank("sea", 1.0, volume=1e6).tank("p", 1.0, volume=100.0).tank("gone", 1.0)
+            net.pump("sea", "p", rate=2.0)
+            for j, share in enumerate((0.6, 0.3, 0.1)):
+                net.tank(f"o{j}", 1.0)
+                net.valve("p", f"o{j}", tau=tau / share)
+            net.pump("p", "gone", rate=0.5)
+            res = net.run(t)
+            settle = (2.0 - 0.5) * tau
+            with self.subTest(combined=item["label"]):
+                self.assertAlmostEqual(from_q(res["volumes_q"]["p"]) / (settle + (100.0 - settle) * m.exp(-t / tau)), 1.0, places=9)
+                self.assertEqual(res["conservation_error_q"], 0)
+
+    def test_uniform_inflows_fill_an_empty_tank_and_keep_totals_in_a_ring(self):
+        import network
+        net = network.Network(dt=4.0)
+        net.tank("a", 1.0, volume=128.0).tank("b", 1.0)
+        net.valve("a", "b", tau=16.0)
+        net.valve("b", "a", tau=8.0)
+        total = net.total_q()
+        for n in range(200):
+            net.step(n)
+            self.assertEqual(net.total_q(), total)
+            self.assertGreaterEqual(min(net.nodes["a"]["v"], net.nodes["b"]["v"]), 0)
+        # 行き渡った後の取り分は滞在時間の比（16 : 8）
+        self.assertAlmostEqual(from_q(net.nodes["a"]["v"]) / 128.0, 16.0 / 24.0, places=9)
+
+    def test_inflow_mode_switch(self):
+        import network
+        with self.assertRaises(ValueError):
+            network.Network(dt=1.0, inflows="sometimes")
+        spec = {"dt": 2.0, "t_end": 40.0, "tanks": [{"name": "a", "area": 1.0, "volume": 128.0},
+                                                      {"name": "b", "area": 1.0}, {"name": "c", "area": 1.0}],
+                "links": [{"law": "valve", "src": "a", "dst": "b", "tau": 20.0},
+                          {"law": "valve", "src": "b", "dst": "c", "tau": 10.0}]}
+        left = {mode: network.simulate({**spec, "inflows": mode})["volumes_q"]["b"] for mode in network.INFLOW_MODES}
+        self.assertEqual(network.simulate(spec)["volumes_q"]["b"], left["uniform"])  # 既定は uniform
+        self.assertGreater(left["end"], left["uniform"])  # 終わりに足す扱いは下の槽が多く出る
+
     def test_short_gifs_play_slower(self):
         self.assertEqual(pw._section_delays(40), [80] + [10] * 38 + [200])
         self.assertEqual(pw._section_delays(8), [80] + [30] * 6 + [200])

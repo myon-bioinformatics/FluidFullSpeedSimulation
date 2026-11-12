@@ -2628,13 +2628,13 @@ def hub_names(kind: str) -> dict:
             "outside": out}
 
 
-def hub_network(kind: str, *, dt: float | None = None, **over) -> Network:
+def hub_network(kind: str, *, dt: float | None = None, inflows: str = "uniform", **over) -> Network:
     """💴 🪙 ⛏️ の配管。源 → 拠点は issue（一定の速さ、ポンプ）か tau_feed（残りに比例、弁）。
     拠点 → 腕（tau_arm、遅れ delay_arm）、拠点 → 外（tau_out）、腕 → 外（tau_sat）、外 → 源（tau_back）。
     None の管は付けない。弁は 1 ステップに 1 − e^(−dt/τ) の割合（厳密離散化）。"""
     p = {**HUB_FLOWS[kind], **over}
     nm = hub_names(kind)
-    net = Network(dt=p["dt"] if dt is None else dt)
+    net = Network(dt=p["dt"] if dt is None else dt, inflows=inflows)
     net.tank(nm["source"], 1.0, volume=p["source_volume"])
     for hub, arm in zip(nm["hubs"], nm["arms"]):
         net.tank(hub, 1.0).tank(arm, 1.0)
@@ -2676,40 +2676,67 @@ def hub_caps(kind: str) -> dict:
 
 
 def hub_steady(kind: str, *, dt: float | None = None, **over) -> dict:
-    """行き渡った後の量（閉じた式）。どの槽も「入ってくる速さ × 滞在時間」。
+    """行き渡った後の量（閉じた式）。どの槽も「入ってくる速さ × 滞在時間」= J/K。
 
-    dt を渡すと離散の定常: 出口の合計の速さ K を (1 − e^(−K·dt))/dt に置き換える（エンジンは槽ごとに 1 ステップを
-    厳密に解くので、出口が何本あっても合計の速さだけで決まり、出口どうしは速さの比で分かれる）。
-    💴 は入ってくる速さが issue で決まる（有限の初期残高が足りる範囲で循環させ、新規発行はしない）。🪙 は総量 G が決まっていて、源の残り m が
-    G = m·(1 + 源から出る速さ × 一巡りの滞在時間) を満たす（取り分は滞在時間の比で、速さにはよらない）。
+    dt を渡すと離散の定常（エンジンの既定 outlets="exact"・inflows="uniform" の 1 ステップをそのまま解いたもの）。
+    槽に実際に入る速さ J と、同じステップの中で数える速さ I（上の槽が後から増やした分は数えない。遅れの管を通った分は
+    全部数える）を分けて持つ: 槽の量 = (J − I·θ)·dt/Φ、Φ = 1 − e^(−K·dt)、θ = 1 − Φ/(K·dt)。出る量は速さの比で分かれ、
+    直結の管で下の槽が数えるのは (J − I·θ) の分だけ。I = J の槽（上がポンプ・遅れの管）は J/K と厳密に一致する。
+    💴 は入ってくる速さが issue で決まる（有限の初期残高が足りる範囲で循環させ、新規発行はしない）。🪙 は総量 G が決まっていて、全体の流れの速さを
+    G = Σ槽 + Σ管の中 から決める（取り分は滞在時間の比で、速さにはよらない）。
     """
     p = {**HUB_FLOWS[kind], **over}
     nm = hub_names(kind)
+    if p["tau_back"] is None:
+        raise ValueError("no steady state without a way back to the source")
 
-    def out_rate(k: float) -> float:  # 合計の速さ k で出ていく槽の、量 1 あたりに出る速さ
-        return k if dt is None else -math.expm1(-k * dt) / dt
+    def tank(rate_out: float, actual: float, counted: float) -> tuple[float, float]:
+        """(槽の量, 直結の下の槽が数える出る速さ)。出口の合計の速さ rate_out、入る速さ actual・数える速さ counted。"""
+        if dt is None:
+            return actual / rate_out, actual
+        big_l = rate_out * dt
+        phi = -math.expm1(-big_l)
+        base = actual - counted * (1.0 - phi / big_l)
+        return base * dt / phi, base
 
     r_arm, r_out, r_sat, r_back = (1.0 / p[k] if p[k] else 0.0 for k in ("tau_arm", "tau_out", "tau_sat", "tau_back"))
-    if r_back == 0.0:
-        raise ValueError("no steady state without a way back to the source")
-    hub_per = 1.0 / out_rate(r_arm + r_out)  # 拠点 1 つに、入る速さ 1 あたり溜まる量
-    to_arm = r_arm / (r_arm + r_out)  # 拠点から腕へ行く割合
-    per = {"feed_pipe": p["delay_feed"], "hub": hub_per, "arm_pipe": to_arm * p["delay_arm"],
-           "arm": to_arm / out_rate(r_sat), "outside": 1.0 / out_rate(r_back)}
+    to_arm = r_arm / (r_arm + r_out)
+    shares = p["shares"] if p["issue"] is not None else [(1.0 / t) / sum(1.0 / x for x in p["tau_feed"]) for t in p["tau_feed"]]
+
+    def solve(flow: float, feed_counted: float) -> dict:
+        """全体の流れの速さ flow（源から出る合計）と、源から拠点への直結で数えられる速さの合計 feed_counted。"""
+        out, town_actual, town_counted = {}, 0.0, 0.0
+        for share, hub, arm in zip(shares, nm["hubs"], nm["arms"]):
+            f = flow * share
+            f_counted = f if p["delay_feed"] or p["issue"] is not None else feed_counted * share
+            out[hub], hub_base = tank(r_arm + r_out, f, f_counted)
+            a = f * to_arm  # 腕へ行く速さ
+            out[arm], arm_base = tank(r_sat, a, a if p["delay_arm"] else hub_base * to_arm)
+            out[f"{hub}>{arm}"] = a * p["delay_arm"]
+            out[f"{nm['source']}>{hub}"] = f * p["delay_feed"]
+            town_actual += f
+            town_counted += hub_base * (1.0 - to_arm) + arm_base
+        out[nm["outside"]], back_base = tank(r_back, town_actual, town_counted)
+        out["_back"] = back_base
+        return out
+
     if p["issue"] is not None:
-        feeds = [p["issue"] * s for s in p["shares"]]
-        source = None
-    else:
-        r_feed = [1.0 / t for t in p["tau_feed"]]
-        source = p["source_volume"] / (1.0 + out_rate(sum(r_feed)) * sum(per.values()))
-        feeds = [source * out_rate(sum(r_feed)) * r / sum(r_feed) for r in r_feed]
-    out = {"feeds": feeds, "cycle_time": sum(per.values()), nm["outside"]: sum(feeds) * per["outside"]}
-    if source is not None:
-        out[nm["source"]] = source
-    for f, hub, arm in zip(feeds, nm["hubs"], nm["arms"]):
-        out.update({hub: f * per["hub"], arm: f * per["arm"], f"{hub}>{arm}": f * per["arm_pipe"],
-                    f"{nm['source']}>{hub}": f * per["feed_pipe"]})
-    return out
+        out = solve(p["issue"], p["issue"])
+        feeds = [p["issue"] * s for s in shares]
+    else:  # 🪙 源も槽: 入る速さ flow、数える速さは外の槽の (J − I·θ)。全部が flow に比例するので、総量から flow を決める
+        k_feed = sum(1.0 / t for t in p["tau_feed"])
+        unit = solve(1.0, 1.0)
+        for _ in range(8):  # 源が数える速さ → 源が直結で送る数える速さ → 外の槽 … を 1 巡りずつ（すぐ落ち着く）
+            source, feed_base = tank(k_feed, 1.0, unit["_back"])
+            unit = solve(1.0, feed_base)
+        source, _base = tank(k_feed, 1.0, unit["_back"])
+        flow = p["source_volume"] / (source + sum(v for k, v in unit.items() if k != "_back"))
+        out = {k: v * flow for k, v in unit.items()}
+        out[nm["source"]] = source * flow
+        feeds = [flow * s for s in shares]
+    out.pop("_back")
+    cycle = p["delay_feed"] + 1.0 / (r_arm + r_out) + to_arm * (p["delay_arm"] + 1.0 / r_sat) + 1.0 / r_back
+    return {"feeds": feeds, "cycle_time": cycle, **out}
 
 
 def bateman(rates, t: float, n0: float = 1.0) -> list[float]:
@@ -2749,9 +2776,9 @@ def _hub_checks(tag: str, kind: str, res: dict, dt: float, tol_exact: float, **o
     pipes = sum(v for k, v in exact.items() if ">" in k)
     checks = [
         check(f"{tag}steady:discrete", "🎯", worst_exact <= tol_exact, value=worst_exact, tol=tol_exact,
-              note="どの槽も 入る速さ × 滞在時間（離散の定常: 槽の出口の合計の速さ K を (1 − e^(−K·dt))/dt に）"),
+              note="どの槽も 入る速さ × 滞在時間（離散の定常: エンジンの 1 ステップをそのまま解いた式）"),
         check(f"{tag}steady:closed-form", "📐", worst_smooth <= dt * k_max, value=worst_smooth, tol=dt * k_max,
-              note="連続の式（速さ 1/τ）との差は刻みの 1 次（dt × いちばん速い槽の速さ まで）"),
+              note="連続の式（速さ 1/τ）との差（dt × いちばん速い槽の速さ まで。上がポンプ・遅れの管の槽は厳密）"),
         close(f"{tag}transit", "⏳", _in_transit(res), pipes, tol_exact, note="遅れの管の中 = 流れる速さ × 遅れ"),
         conserved(f"{tag}conserve", res),
     ]
@@ -2835,7 +2862,8 @@ def e27_gold_flow(seed: int = 27) -> dict:
     t_end = 1024.0
     res = hub_network(kind).run(t_end)
     checks, steady = _hub_checks("", kind, res, dt, 1e-9)
-    held = sum(steady["got"].values()) + steady["in_transit"]
+    # 槽 + 管の中の合計は整数（Q）で比べる（float で足すと、足し方の違いで最後の 1 桁が動く: Python 3.11 と 3.12 以降）
+    held = from_q(res["total_q"])
     share = steady["closed_form"][nm["source"]] / total
     checks += [
         check("total", "🪙", res["total_q"] == to_q(total) and held == total, value=held, expected=total, tol=0,
@@ -2881,7 +2909,7 @@ def e28_rare_metal(dt_list=(1.0, 0.5, 0.25), seed: int = 28) -> dict:
     k_feed = [1.0 / t for t in p["tau_feed"]]
     big_k, k_arm, k_sat = sum(k_feed), 1.0 / p["tau_arm"], 1.0 / p["tau_sat"]
     t_end = 240.0
-    checks, summary, errors = [], {}, []
+    checks, summary, errors, errors_end = [], {}, [], []
 
     def at(trace, t, dt):
         return trace[int(round(t / dt)) - 1]
@@ -2895,6 +2923,8 @@ def e28_rare_metal(dt_list=(1.0, 0.5, 0.25), seed: int = 28) -> dict:
         peak_ref = bateman([big_k, k_arm], s_peak, n0)[1]
         i_peak = max(range(len(hub)), key=hub.__getitem__)
         errors.append(rel_err(hub[i_peak], peak_ref))
+        old_hub = _metal_run(dt, t_end, inflows="end")[0]["trace"][nm["hubs"][0]]  # 入った量をステップの終わりに足す扱い
+        errors_end.append(rel_err(max(old_hub), peak_ref))
         if dt != dt_list[-1]:
             continue
         mine_worst = max(rel_err(at(tr[nm["source"]], t, dt), reserve * math.exp(-big_k * t)) for t in (30.0, 60.0, 120.0))
@@ -2920,10 +2950,15 @@ def e28_rare_metal(dt_list=(1.0, 0.5, 0.25), seed: int = 28) -> dict:
                    "peak_closed_form": peak_ref, "mine_left": at(tr[nm["source"]], t_end, dt),
                    "market": from_q(res["volumes_q"][nm["outside"]]), "afloat": _in_transit(res)}
         runs = {"rare-metal": res["series"]}
-    orders = [errors[i] / errors[i + 1] for i in range(len(errors) - 1)]
-    checks.append(check("order", "📏", all(1.6 <= r <= 2.4 for r in orders), value=orders, expected=2.0,
-                        note="刻みを半分にすると山の高さの誤差も半分（1 次）"))
+    orders = [errors_end[i] / errors_end[i + 1] for i in range(len(errors_end) - 1)]
+    checks += [
+        check("end:order", "📏", all(1.6 <= r <= 2.4 for r in orders), value=orders, expected=2.0,
+              note="入った量をステップの終わりに足す扱い（inflows=\"end\"）: 刻みを半分にすると山の高さの誤差も半分（1 次）"),
+        check("uniform:better", "🚰", all(a < b / 10.0 for a, b in zip(errors, errors_end)), value=errors,
+              expected=errors_end, note="既定（一定の速さで入ると見なす）: どの刻みでも山の高さの誤差が 1/10 以下"),
+    ]
     summary["peak_errors"] = dict(zip(map(str, dt_list), errors))
+    summary["peak_errors_end"] = dict(zip(map(str, dt_list), errors_end))
     for item in random_scales(seed, 3, n_min=-1, n_max=-1):  # 製錬の時定数 10〜99.9 日
         tau = item["value"]
         if abs(1.0 / tau - big_k) < 1e-3:  # 速さが重なると Bateman の式が割れる

@@ -45,6 +45,7 @@ from fluids import superelevation
 
 LAWS: dict[str, Callable] = {}
 OUTLET_MODES = ("exact", "independent")
+INFLOW_MODES = ("end", "uniform")
 PASSABLE: dict[str, Callable] = {}  # 運ばれる物がその管を通れるか（net, link, tracer）→ bool。無ければ常に通れる
 EJECT: dict[str, Callable] = {}  # 運ばれる物がその管へはじき出されるか（net, link, tracer）→ bool
 
@@ -325,7 +326,7 @@ def _law_mariotte(net, ln, n):
 class Network:
     def __init__(self, dt: float, fluid: str = "water", g: float = G, temp_c: float | None = None,
                  mu: float | None = None, mu_scale: float | None = None, species=None, volume_of=None,
-                 outlets: str = "exact"):
+                 outlets: str = "exact", inflows: str = "uniform"):
         """species を渡すと成分モード（🍷）: 各水槽が成分ごとの量（Q 整数、単位は法則に任せる。蒸留ではモル）を持ち、
         v はその合計。普通の法則が返す量は、出す側の成分の比で整数のまま分ける。成分ごとの量を返す法則
         （boil・evaporate）もある。volume_of(parts) は水位（断面一定の水槽）に使う体積 [m³]。"""
@@ -336,6 +337,11 @@ class Network:
         # 🚿 同じ槽から弁・ポンプが何本か出るときの取り方。exact = 槽ごとに 1 ステップを厳密に解く（既定）、
         # independent = どの弁もステップ最初の量を見て別々に取る（ずれを測るために残してある）
         self.outlets = outlets
+        if inflows not in INFLOW_MODES:
+            raise ValueError(f"inflows must be one of {INFLOW_MODES}")
+        # 🚰 槽に入ってくる量の扱い。end = 入った量はステップの終わりに足す（そのステップのあいだ減らない）、
+        # uniform = 1 ステップのあいだ一定の速さで入ると見なし、そのぶん弁から多く出す
+        self.inflows = inflows
         self.dt = dt
         self.dt_q = to_q(dt)
         # 🧊 temp_c を渡すと温度表で μ・ρ が動く。🍯 mu（Pa·s）か mu_scale（倍率）で粘度を直接変えられる
@@ -852,6 +858,46 @@ class Network:
                 rest -= req[i]
             req[valves[-1]] = rest
 
+    def _uniform_inflows(self, req: list[int]) -> None:
+        """🚰 このステップに届く量 I が、1 ステップのあいだ一定の速さで入ると見なす（dV/dt = −K·V + (I − P)/dt）。
+
+        入った量をステップの終わりに足すだけだと、そのステップのあいだ減らないので、下の槽は dt/(2·τ) ほど多くなる。
+        ここで、弁とポンプだけが出ている槽の弁の合計を V·Φ + (I − P)·(1 − Φ/L) まで増やす
+        （L = K·dt、Φ = 1 − e^(−L)、P = 出るポンプの量）。req はもう全部決まっている（出る量はステップ最初の量まで）ので、
+        I は実際に届く量。増やす分は I までなので槽は負にならず、総量は整数のまま変わらない。
+        増やした分が下の槽に届いても、下の槽の I には数えない（刻みの 2 次の差）。
+        上がポンプ（本当に一定の速さ）なら厳密、上が弁（減りながら入る）なら刻みの 2 次まで小さくなる。
+        """
+        arrivals: dict[str, int] = {}
+        for i, ln in enumerate(self.links):
+            arrive = req[i] if ln["line"] is None else ln["pending"]
+            if arrive:
+                arrivals[ln["dst"]] = arrivals.get(ln["dst"], 0) + arrive
+        base = list(req)
+        for src, idx in self._by_src().items():
+            inflow = arrivals.get(src, 0)
+            if inflow <= 0 or any(self.links[i]["kind"] not in ("valve", "pump") for i in idx):
+                continue
+            valves = [i for i in idx if self.links[i]["kind"] == "valve"]
+            weights = [from_q(self.links[i]["last_opening"]) * -math.log1p(-from_q(self.links[i]["k"])) for i in valves]
+            scale = sum(weights)
+            if scale <= 0.0:
+                continue
+            node = self.nodes[src]
+            through = to_q(1.0 + math.expm1(-scale) / scale)  # 入った量のうち、同じステップの中で弁から出る割合
+            pumped = sum(base[i] for i in idx if self.links[i]["kind"] == "pump")
+            if pumped and (node.get("outlets") or self.outlets) == "exact":
+                target = qmul(node["v"], to_q(-math.expm1(-scale))) + qmul(inflow - pumped, through)
+                extra = max(target, 0) - sum(base[i] for i in valves)
+            else:
+                extra = qmul(inflow, through)
+            rest = extra = min(max(extra, 0), inflow)
+            for i, w in zip(valves[:-1], weights):
+                part = min(qmul(extra, to_q(w / scale)), rest)
+                req[i] += part
+                rest -= part
+            req[valves[-1]] += rest
+
     # --- 1 ステップ -----------------------------------------------------
     def step(self, n: int) -> list[int]:
         if len(self.last_flow) != len(self.links):
@@ -869,6 +915,8 @@ class Network:
                 req[max(idx, key=lambda i: req[i])] += have - sum(req[i] for i in idx)
         if self.species is not None:
             return self._step_species(n, req)
+        if self.inflows == "uniform":
+            self._uniform_inflows(req)
         for i, ln in enumerate(self.links):
             self.nodes[ln["src"]]["v"] -= req[i]
             ln["flow_sum"] += req[i]
@@ -1232,7 +1280,7 @@ def ch_depth(ln: dict, net: "Network") -> float:
 LINK_BUILDERS = ("pipe", "orifice", "weir", "cam", "pump", "valve", "float_valve", "tip", "siphon", "mariotte", "boil",
                  "evaporate")
 SPEC_KEYS = {"dt", "fluid", "temp_c", "mu", "mu_scale", "species", "tanks", "channels", "flumes", "rains", "links",
-             "tracers", "t_end", "trace", "sample_every", "outlets"}
+             "tracers", "t_end", "trace", "sample_every", "outlets", "inflows"}
 
 
 def build(spec: dict) -> Network:
@@ -1260,7 +1308,7 @@ def build(spec: dict) -> Network:
         volume_of = lambda p: mix_volume(p["ethanol"], p["water"])
     net = Network(spec.get("dt", 0.1), spec.get("fluid", "water"), temp_c=spec.get("temp_c"), mu=spec.get("mu"),
                   mu_scale=spec.get("mu_scale"), species=species, volume_of=volume_of,
-                  outlets=spec.get("outlets", "exact"))
+                  outlets=spec.get("outlets", "exact"), inflows=spec.get("inflows", "uniform"))
     for t in spec.get("tanks", []):
         net.tank(**t)
     for c in spec.get("channels", []):
