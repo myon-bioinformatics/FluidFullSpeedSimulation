@@ -16,6 +16,7 @@ MONIAC（フィリップス・マシン）の物理部品（水槽＝積分器�
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import math
@@ -2870,36 +2871,156 @@ def _visc(args) -> dict:
     return {"mu": None if args.mu is None else args.mu * 1e-3, "mu_scale": args.viscosity_scale}
 
 
+FILE_ICONS = {"gif": "🎞️", "png": "🖼️", "json": "🧾"}
+
+
+def section_run(scene: str, fluid: str = "water", temp_c: float | None = None, mu: float | None = None,
+                mu_scale: float | None = None) -> tuple[dict, list[str]]:
+    """断面図で見る場面（試験台 RIG_SCENES と pixelwater の SECTION_CASES）を回す: (run の結果, 列)。"""
+    if scene in RIG_SCENES:
+        return rig_section(scene, fluid, temp_c, mu, mu_scale)
+    return pw.section_case(scene, fluid, mu=mu, mu_scale=mu_scale)
+
+
 def _draw(args) -> int:
-    if args.scene in RIG_SCENES:
-        if args.view == "files":
-            build_parser().error(f"{args.scene} は --view frames だけ")
-        res, cols = rig_section(args.scene, args.fluid, args.temp_c, **_visc(args))
-        print(pw.render_frames(pw.network_frames(res, cols, frames=args.frames, rows=args.rows,
+    files = args.view == "files"
+    if args.scene in RIG_SCENES or args.scene in pw.SECTION_CASES:
+        res, cols = section_run(args.scene, args.fluid, args.temp_c, **_visc(args))
+        if files:
+            rows = args.rows or pw.SECTION_GIF_ROWS
+            frames = args.frames or pw.SECTION_GIF_FRAMES
+            replay = {k: v for k, v in {"temp_c": args.temp_c, **_visc(args)}.items() if v is not None}
+            out = pw.draw_section(res, cols, args.scene, args.out_dir, frames=frames, rows=rows,
+                                  cap_mode=args.cap_mode, fill=args.fill, scale=args.scale,
+                                  formats=_formats(args), file_prefix=args.file_prefix,
+                                  file_suffix=args.file_suffix, plan=replay)
+            for kind, path in out["paths"].items():
+                print(f"{FILE_ICONS[kind]} {path}")
+            print(f"🎬 {out['frames']}  📐 {out['canvas']}  📏 ±{out['half_block']:.3g} m  "
+                  f"⚖️ {out['conservation_error_q']}")
+            return 0 if out["conservation_error_q"] == 0 else 1
+        frames = 1 if args.view == "frame" else args.frames or 6
+        print(pw.render_frames(pw.network_frames(res, cols, frames=frames, rows=args.rows or pw.SECTION_ROWS,
                                                  cap_mode=args.cap_mode, fill=args.fill)))
         return 0 if res["conservation_error_q"] == 0 else 1
-    if args.scene in pw.SECTION_CASES:
-        if args.view == "files":
-            build_parser().error(f"{args.scene} は --view frames だけ")
-        res, cols = pw.section_case(args.scene, args.fluid, **_visc(args))
-        print(pw.render_frames(pw.network_frames(res, cols, frames=args.frames, rows=args.rows,
-                                                 cap_mode=args.cap_mode, fill=args.fill)))
-        return 0 if res["conservation_error_q"] == 0 else 1
-    if args.view == "files":
-        formats = ("gif", "png") if args.format == "both" else (args.format,)
+    if files:
         out = pw.draw(args.scene, args.fluid, args.out_dir, ticks=args.ticks, seed=args.seed, scale=args.scale,
-                      frame_every=args.frame_every, formats=formats, file_prefix=args.file_prefix,
+                      frame_every=args.frame_every, formats=_formats(args), file_prefix=args.file_prefix,
                       file_suffix=args.file_suffix, **_visc(args))
-        icons = {"gif": "🎞️", "png": "🖼️", "json": "🧾"}
         for kind, path in out["paths"].items():
-            print(f"{icons[kind]} {path}")
+            print(f"{FILE_ICONS[kind]} {path}")
         print(f"🔢 {out['pixels']} px  🎬 {out['frames']}  📐 {out['canvas']}  ⏱️ {out['settle_tick']}  ⚖️ {out['count_error']}")
         return 0 if out["count_error"] == 0 else 1
     res = pw.run_pixels(args.scene, args.fluid, ticks=args.ticks, seed=args.seed, frame_every=args.frame_every,
                         **_visc(args))
-    frames = 1 if args.view == "frame" else args.frames
+    frames = 1 if args.view == "frame" else args.frames or 6
     print(pw.render_frames(pw.pixel_frames(res, frames=frames, fill=args.fill)))
     return 0 if res["count_error"] == 0 else 1
+
+
+def _formats(args) -> tuple[str, ...]:
+    return ("gif", "png") if args.format == "both" else (args.format,)
+
+
+# --- 🎞️ README のデモ（場面ごとに GIF 1 枚） ----------------------------------------
+
+# (場面, 流体, 塗り)。塗りは色だけ（物理は流体で決まる）。⚗️ はエタノールの 🟨、👼 は琥珀の 🟧 で塗る
+DEMOS = (("moniac-rig", "water", None), ("moniac-drain", "water", None), ("flume", "water", None),
+         ("flume-hopper", "water", None), ("somen-flume", "water", None), ("noodle-length", "water", None),
+         ("noodle-clog", "water", None), ("chopsticks", "water", None), ("cold-water", "water", None),
+         ("bamboo-wear", "water", None), ("rain-runoff", "water", None), ("shishi-odoshi", "water", None),
+         ("pythagorean-cup", "poison-water", None), ("mariotte", "water", None), ("water-clock", "water", None),
+         ("dam-break", "namekian-water", None), ("inertia-limits", "water", None), ("distillation", "water", "🟨"),
+         ("angels-share", "water", "🟧"))
+DEMOS_SCHEMA = "fluidfullspeedsimulation-demos/1"
+_NEEDS_VS16 = set("🏛🕳🍽🌧⚗")  # 絵文字で出すには U+FE0F が要るもの
+
+
+def scene_icon(scene: str) -> str:
+    icon = next((k for k, v in SCENE_ICONS.items() if v == scene), "🎞")
+    return icon + "️" if icon in _NEEDS_VS16 else icon
+
+
+def demo_gif(scene: str, fluid: str = "water", fill: str | None = None, *, scale: int = 8) -> tuple[bytes, dict]:
+    """デモの GIF 1 枚（既定の引数だけ）。断面図は 16 段・40 時刻、ドット絵は draw --view files と同じ。"""
+    if scene in pw.SCENES:
+        res = pw.run_pixels(scene, fluid)
+        data = pw.gif_bytes(res, scale=scale)
+        return data, {"frames": len(res["frames"]), "canvas": f"{res['width'] * scale}x{res['height'] * scale}",
+                      "kind": "pixel", "conserved": res["count_error"] == 0}
+    res, cols = section_run(scene, fluid)
+    view = pw.network_frames(res, cols, frames=pw.SECTION_GIF_FRAMES, rows=pw.SECTION_GIF_ROWS, fill=fill)
+    lay = pw.section_layout(view, scale)
+    return pw.section_gif_bytes(view, scale=scale), {
+        "frames": len(view["frames"]), "canvas": f"{lay['width']}x{lay['height']}", "kind": "section",
+        "columns": view["columns"], "t": [view["times"][0], view["times"][-1]],
+        "conserved": res["conservation_error_q"] == 0}
+
+
+def demo_ids() -> list[str]:
+    return [f"D{n:02d}" for n in range(1, len(DEMOS) + 1)]
+
+
+def demo_arg(text: str) -> str:
+    """--only: 'D01'・'d1'・場面の名前・場面の絵文字（🏛️ など）のどれでも D<NN> に直す。"""
+    k = _plain(text)
+    scene = SCENE_ICONS.get(k, k)
+    for did, (name, _fluid, _fill) in zip(demo_ids(), DEMOS):
+        if scene == name or k.upper() == did or (k[:1] in "dD" and k[1:].isdigit() and int(k[1:]) == int(did[1:])):
+            return did
+    return text
+
+
+def write_demos(out_dir: str = "docs/demos", *, check: bool = False, scale: int = 8, file_prefix: str = "",
+                file_suffix: str = "", only=None) -> dict:
+    """DEMOS を D01〜 の GIF に書く（名前は <prefix>D<NN>_<場面>_<流体><suffix>.gif、README から貼る）。
+
+    隣の demos.json に何をどう描いたかと bytes・sha256（only で一部だけ書いたときは、その分だけ差し替える）。
+    check=True なら書かずに、今の GIF とバイト単位で同じかだけ確かめる（README のデモがコードとずれていないか）。
+    only は D<NN> の列（既定は全部）。Node から ``--call write_demos`` で呼べる。
+    """
+    out = Path(out_dir)
+    wanted = None if only is None else {demo_arg(k) for k in only}
+    items = []
+    for did, (scene, fluid, fill) in zip(demo_ids(), DEMOS):
+        if wanted is not None and did not in wanted:
+            continue
+        n = int(did[1:])
+        data, info = demo_gif(scene, fluid, fill, scale=scale)
+        name = f"{file_prefix}D{n:02d}_{scene}_{fluid}{file_suffix}.gif"
+        path = out / name
+        status = "written"
+        if check:
+            status = "missing" if not path.exists() else "same" if path.read_bytes() == data else "differs"
+        else:
+            out.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        items.append({"id": f"D{n:02d}", "scene": scene, "icon": scene_icon(scene), "fluid": fluid, "fill": fill,
+                      "file": name, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(),
+                      "status": status, **info})
+    if not check:
+        mpath = out / f"{file_prefix}demos{file_suffix}.json"
+        kept = {}
+        if mpath.exists() and wanted is not None:
+            kept = {d["id"]: d for d in json.loads(mpath.read_text(encoding="utf-8")).get("demos", [])}
+        kept.update({it["id"]: {k: v for k, v in it.items() if k != "status"} for it in items})
+        manifest = {"schema": DEMOS_SCHEMA, "scale": scale, "demos": [kept[k] for k in sorted(kept)]}
+        mpath.write_text(json.dumps(jsonable(manifest), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    ok = all(it["conserved"] for it in items) and (not check or all(it["status"] == "same" for it in items))
+    return jsonable({"ok": ok, "out_dir": str(out), "demos": items})
+
+
+def _demos(args) -> int:
+    out = write_demos(args.out_dir, check=args.check, scale=args.scale, file_prefix=args.file_prefix,
+                      file_suffix=args.file_suffix, only=args.only)
+    if args.json:
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+        return 0 if out["ok"] else 1
+    marks = {"written": "🎞️", "same": "✅", "differs": "❌", "missing": "❓"}
+    for it in out["demos"]:
+        print(f"{marks[it['status']]} {it['id']} {it['icon']} {it['scene']:<16} {pw.EMOJI.get(it['fluid'], '🟦')} "
+              f"{it['file']}  📐 {it['canvas']}  🎬 {it['frames']}  📦 {it['bytes'] / 1024:.1f} KB")
+    return 0 if out["ok"] else 1
 
 
 def _positive(text: str) -> float:
@@ -2932,7 +3053,7 @@ def build_parser() -> argparse.ArgumentParser:
     drw.add_argument("block", nargs="?", type=block_arg,
                      help="流体のブロック・アイコン（🟦 🟨 🟧 🟩 🟪 / 💧 🍶 🧴 🟢 ☠️）か、塗りたい好きな絵文字")
     drw.add_argument("--view", choices=("frames", "frame", "files"), default="frames",
-                     help="frames = 時刻ごとの断面図 / frame = 最後の 1 枚 / files = GIF・PNG（ドット絵だけ）")
+                     help="frames = 時刻ごとの断面図 / frame = 最後の 1 枚 / files = GIF・PNG・受領記録 JSON")
     drw.add_argument("--fluid", type=fluid_arg, choices=ALL_FLUID_KEYS, default=None,
                      help="作動流体（キーか絵文字。🏷️ 仮置きも選べる。既定 water）")
     drw.add_argument("--fill", help="水のブロック（色は自由。既定は流体ごと: 🟦 水 🟨 エタノール 🟧 メタノール "
@@ -2941,8 +3062,10 @@ def build_parser() -> argparse.ArgumentParser:
     visc = drw.add_mutually_exclusive_group()
     visc.add_argument("--mu", type=_positive, help="🍯 粘度 mPa·s を直接（水は 1.0016、温度より後に効く）")
     visc.add_argument("--viscosity-scale", type=_positive, help="🍯 粘度を何倍にするか（例 5 でどろっと）")
-    drw.add_argument("--frames", type=int, default=6, help="並べる時刻の数")
-    drw.add_argument("--rows", type=int, default=pw.SECTION_ROWS, help="断面図の縦の段数（既定 8）")
+    drw.add_argument("--frames", type=int, default=None,
+                     help=f"並べる時刻の数（既定 6、断面図の files は {pw.SECTION_GIF_FRAMES}）")
+    drw.add_argument("--rows", type=int, default=None,
+                     help=f"断面図の縦の段数（既定 {pw.SECTION_ROWS}、files は {pw.SECTION_GIF_ROWS}）")
     drw.add_argument("--cap-mode", choices=pw.CAP_MODES, default="run-max",
                      help="縦いっぱいの水深: run-max = 走らせた中の最大 / rim = 樋の縁")
     drw.add_argument("--ticks", type=int, help="ドット絵のティック数（既定は場面ごと）")
@@ -2953,6 +3076,16 @@ def build_parser() -> argparse.ArgumentParser:
     drw.add_argument("--out-dir", default="build/pixel", help="書き出し先")
     drw.add_argument("--file-prefix", default="", help="ファイル名の頭に付ける文字列")
     drw.add_argument("--file-suffix", default="", help="ファイル名の末尾（拡張子の前）に付ける文字列")
+    dem = sub.add_parser("demos", help="🎞️ README のデモ GIF（場面ごとに 1 枚）を書く・--check で確かめる",
+                         allow_abbrev=False)
+    dem.add_argument("--out-dir", default="docs/demos", help="書き出し先（既定 docs/demos）")
+    dem.add_argument("--check", action="store_true", help="書かずに、今の GIF とバイト単位で同じか確かめる（違えば 1）")
+    dem.add_argument("--only", nargs="+", type=demo_arg, choices=demo_ids(), metavar="DEMO",
+                     help="一部だけ（D01・場面の名前・🏛️ などの絵文字）")
+    dem.add_argument("--scale", type=int, default=8, help="1 マスのピクセル数（既定 8）")
+    dem.add_argument("--file-prefix", default="", help="ファイル名の頭に付ける文字列")
+    dem.add_argument("--file-suffix", default="", help="ファイル名の末尾（拡張子の前）に付ける文字列")
+    dem.add_argument("--json", action="store_true", help="結果を JSON で出す")
     for sp in (run, ver):
         sp.add_argument("--json", action="store_true", help="結果を JSON で出す")
         sp.add_argument("--jsonl", metavar="PATH", help="プロッター記録を JSONL へ")
@@ -2996,6 +3129,8 @@ def main(argv=None) -> int:
         return 0
     if args.command == "draw":
         return _draw(args)
+    if args.command == "demos":
+        return _demos(args)
     results = [run_experiment(args.experiment)] if args.command == "run" else verify_all()["results"]
     if args.jsonl:
         write_jsonl(args.jsonl, results)

@@ -363,10 +363,13 @@ def png_bytes(res: dict, frame: int = -1, scale: int = 8) -> bytes:
     """パレット PNG（色番号 8 bit、フィルタ 0、zlib 9 で同じ入力なら同じバイト列）。"""
     if scale < 1:
         raise ValueError("scale must be >= 1")
-    rows = _scale(indices(res, frame), scale)
+    return _png(_scale(indices(res, frame), scale), [c[:3] for c in palette(res["fluid"])])
+
+
+def _png(rows: list[bytes], pal) -> bytes:
+    """色番号の行（1 行 = bytes）と RGB のパレットから PNG を組む（ドット絵・断面図で共通）。"""
     height, width = len(rows), len(rows[0])
-    raw = b"".join(b"\x00" + r for r in rows)
-    pal = [c[:3] for c in palette(res["fluid"])]
+    raw = b"".join(b"\x00" + bytes(r) for r in rows)
 
     def chunk(kind: bytes, data: bytes) -> bytes:
         return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
@@ -430,27 +433,42 @@ def gif_bytes(res: dict, scale: int = 8, delay_cs: int = 4, frames=None) -> byte
     if scale < 1:
         raise ValueError("scale must be >= 1")
     picks = range(len(res["frames"])) if frames is None else frames
-    grids = [indices(res, i) for i in picks]
+    return _gif([indices(res, i) for i in picks], [c[:3] for c in palette(res["fluid"])], scale=scale,
+                delays=delay_cs)
+
+
+def _gif(grids, pal, *, scale: int = 1, delays=4) -> bytes:
+    """色番号の格子（行 = list[int] か bytes）を重ねていく GIF（ドット絵・断面図で共通）。
+
+    全体の色表は 2^bits 色（bits = max(2, 色数の bit 長)。足りない分は黒で埋める）、LZW の最小符号長も bits。
+    delays は全フレーム共通の 1 つか、フレームごとの列（1/100 秒）。差分矩形は行ごとに最初と最後の違いで取る。
+    """
+    bits = max(2, (len(pal) - 1).bit_length())
+    table = [tuple(c[:3]) for c in pal] + [(0, 0, 0)] * ((1 << bits) - len(pal))
     h, w = len(grids[0]) * scale, len(grids[0][0]) * scale
-    pal = [c[:3] for c in palette(res["fluid"])]
-    out = bytearray(b"GIF89a" + struct.pack("<HHBBB", w, h, 0xF1, 0, 0))  # 全体の色表 4 色
-    out += b"".join(bytes(c) for c in pal)
+    out = bytearray(b"GIF89a" + struct.pack("<HHBBB", w, h, 0xF0 | (bits - 1), 0, 0))  # 全体の色表
+    out += b"".join(bytes(c) for c in table)
     out += b"\x21\xff\x0bNETSCAPE2.0\x03\x01\x00\x00\x00"  # 無限ループ
+    delays = [delays] * len(grids) if isinstance(delays, int) else list(delays)
+    if len(delays) != len(grids):
+        raise ValueError("one delay per frame")
     prev = None
-    for grid in grids:
+    for grid, delay in zip(grids, delays):
         if prev is None:
             x0, y0, x1, y1 = 0, 0, len(grid[0]), len(grid)
         else:
-            diff = [(x, y) for y, (a, b) in enumerate(zip(grid, prev)) for x in range(len(a)) if a[x] != b[x]]
-            if not diff:
-                diff = [(0, 0)]
-            xs, ys = [d[0] for d in diff], [d[1] for d in diff]
-            x0, y0, x1, y1 = min(xs), min(ys), max(xs) + 1, max(ys) + 1
+            ys = [y for y, (a, b) in enumerate(zip(grid, prev)) if a != b]
+            if ys:
+                firsts = [next(x for x, (p, q) in enumerate(zip(grid[y], prev[y])) if p != q) for y in ys]
+                lasts = [max(x for x, (p, q) in enumerate(zip(grid[y], prev[y])) if p != q) for y in ys]
+                x0, y0, x1, y1 = min(firsts), ys[0], max(lasts) + 1, ys[-1] + 1
+            else:
+                x0, y0, x1, y1 = 0, 0, 1, 1
         sub = [row[x0:x1] for row in grid[y0:y1]]
-        pix = b"".join(_scale(sub, scale))
-        out += b"\x21\xf9\x04" + struct.pack("<BHBB", 0x04, delay_cs, 0, 0)  # 処分しない（重ねる）
+        pix = b"".join(bytes(r) for r in sub) if scale == 1 else b"".join(_scale(sub, scale))
+        out += b"\x21\xf9\x04" + struct.pack("<BHBB", 0x04, delay, 0, 0)  # 処分しない（重ねる）
         out += b"\x2c" + struct.pack("<HHHHB", x0 * scale, y0 * scale, (x1 - x0) * scale, (y1 - y0) * scale, 0)
-        out += b"\x02" + _blocks(_lzw(pix, 2))
+        out += bytes([bits]) + _blocks(_lzw(pix, bits))
         prev = grid
     out += b"\x3b"
     return bytes(out)
@@ -563,13 +581,15 @@ RECEIPT_SCHEMA = "fluidfullspeedsimulation-pixel-water/1"
 
 
 def file_stem(scene: str, fluid: str, seed, ticks: int, out_dir: str | Path = ".", file_prefix: str = "",
-              file_suffix: str = "") -> Path:
+              file_suffix: str = "", *, conditions: str | None = None) -> Path:
     """意味のある名前で採番する: <prefix><場面>_<流体>_s<seed>_t<ティック>_r<NN><suffix>（拡張子なし）。
 
     並びは Ironmate の ``{mask}_{colorID}_{effect}_{size}`` と同じく条件を ``_`` でつなぐ。
     r<NN> は同じ条件で何回目の出力か（GIF・PNG・受領記録 JSON のどれかが既にあれば次の番号）。
+    conditions を渡すと s<seed>_t<ティック> の代わりにそれを使う（断面図は n<時刻の数>_h<段数>）。
     """
-    base = f"{file_prefix}{scene}_{fluid}_s{'alt' if seed is None else seed}_t{ticks:04d}"
+    cond = f"s{'alt' if seed is None else seed}_t{ticks:04d}" if conditions is None else conditions
+    base = f"{file_prefix}{scene}_{fluid}_{cond}"
     out = Path(out_dir)
     n = 1
     while any((out / f"{base}_r{n:02d}{file_suffix}.{ext}").exists() for ext in ("gif", "png", "json")):
@@ -625,6 +645,7 @@ EMPTY_BLOCK, WALL_BLOCK = "⬜", "⬛"
 CARRIED, IN_PIPE = "🍜", "⏳"  # 運ばれる物 / 管の中
 SECTION_CASES = ("flume", "flume-hopper")
 CAP_MODES = ("run-max", "rim")
+CELL_EMPTY, CELL_FILL, CELL_CARRIED, CELL_IN_PIPE = range(4)  # network_frames の "cells"（⬜ 🟦 🍜 ⏳）
 
 
 def fill_block(fluid: str) -> str:
@@ -753,18 +774,23 @@ def network_frames(res: dict, columns, *, frames: int | None = 6, rows: int = SE
     shown = []
     for r in _pick(len(times), frames):
         grid = [[empty] * len(cols) for _ in range(rows)]
+        code = [[CELL_EMPTY] * len(cols) for _ in range(rows)]
         for c, n in enumerate(counts[r]):
             for k in range(n):
                 grid[rows - 1 - k][c] = fill
+                code[rows - 1 - k][c] = CELL_FILL
         spots = [s_ for s_ in where[r] if s_ is not None]
         for body in series[r].get("bodies", {}).values():  # 長さのある麺は体の区間すべてに 🍜
             spots += [(names.index(cell), False) for cell in body if cell in names]
         for c, piped in spots:
             k = max(counts[r][c], 1) - 1  # 水面の段（空なら底）
             grid[rows - 1 - k][c] = in_pipe if piped else carried
-        shown.append({"t": times[r], "lines": ["".join(row) for row in grid], "counts": counts[r]})
-    return {"columns": names, "caps": cap, "rows": rows, "fill": fill, "times": times, "counts": counts,
-            "frames": shown, "arrivals": arrivals, "readback_error": worst,
+            code[rows - 1 - k][c] = CELL_IN_PIPE if piped else CELL_CARRIED
+        shown.append({"t": times[r], "lines": ["".join(row) for row in grid], "counts": counts[r], "cells": code})
+    return {"columns": names, "kinds": [kind for kind, _n, _r in cols],
+            "groups": [ref[0] if kind == "cell" else name for kind, name, ref in cols],
+            "fluid": res.get("fluid", "water"), "caps": cap, "rows": rows, "fill": fill, "times": times,
+            "counts": counts, "frames": shown, "arrivals": arrivals, "readback_error": worst,
             "half_block": max((c / (2 * rows) for c in cap if c > 0), default=0.0),
             "tracer_columns": [[None if s is None else s[0] for s in here] for here in where],
             "tracer_spans": [[(a, None if b == math.inf else b, p) for a, b, p in sp] for sp in spans]}
@@ -830,3 +856,171 @@ def render_frames(view: dict) -> str:
         out.append(f"⏱️ {fr['t']:.2f}")
         out += fr["lines"]
     return "\n".join(out)
+
+
+# --- 断面図を GIF・PNG に（1 段 = 1 マス。絵文字の断面図と同じ格子） ---------------
+
+SECTION_SCALE = 8  # 1 マスのピクセル数
+SECTION_GIF_ROWS = 16  # files のときの既定の段数
+SECTION_GIF_FRAMES = 40  # files のときの既定の時刻の数
+TANK_TILES = 4  # 水槽の列の幅（マス）。樋の区間・管は 1 マス
+SECTION_DELAYS = (80, 10, 200)  # 最初・途中・最後の表示時間（1/100 秒）。最後で一息置いてから繰り返す
+SECTION_RECEIPT_SCHEMA = "fluidfullspeedsimulation-section/1"
+# 色番号: 0 余白 / 1 空き（⬜）/ 2 流体 / 3 水面の段 / 4 🍜 / 5 管 / 6 時刻の帯
+S_BG, S_EMPTY, S_BODY, S_SURFACE, S_CARRIED, S_PIPE, S_BAR = range(7)
+EXTRA_BLOCKS = {"🟥": ("#F2483B", "#B32A20"), "🟫": ("#A86B3C", "#704524")}  # 流体でないブロックの色（自由）
+
+
+def block_color(fluid: str, fill: str | None = None) -> tuple[str, str]:
+    """塗る色 (main, shadow)。fill が 🟦 🟨 🟧 🟩 🟪 ならその流体の色 ID、🟥 🟫 は EXTRA_BLOCKS、
+    それ以外（好きな絵文字）は流体の色。"""
+    token = (fill or "").strip().replace("️", "")
+    for key, emoji in EMOJI.items():
+        if token == emoji:
+            return IRONMATE_BASE[FLUID_COLOR_ID[key]]
+    if token in EXTRA_BLOCKS:
+        return EXTRA_BLOCKS[token]
+    return IRONMATE_BASE[FLUID_COLOR_ID.get(fluid, "C02")]
+
+
+def section_palette(fluid: str, fill: str | None = None) -> list[tuple[int, int, int]]:
+    """断面図の 7 色（Ironmate の派生規則）。流体 = main・水面 = highlight・時刻の帯 = shadow、
+    🍜 は gold（塗りが gold なら lava）、管は stone。"""
+    main, shadow = block_color(fluid, fill)
+    body = derive_palette(main, shadow)
+    noodle = derive_palette(*IRONMATE_BASE["C03" if main == IRONMATE_BASE["C09"][0] else "C09"])
+    stone = derive_palette(*IRONMATE_BASE["C07"])
+    return [(255, 255, 255), (236, 238, 241), body[1][:3], body[3][:3], noodle[1][:3], stone[1][:3], body[2][:3]]
+
+
+def section_layout(view: dict, scale: int = SECTION_SCALE, tank_tiles: int = TANK_TILES) -> dict:
+    """列ごとの (x, 幅) ピクセル。組（樋・水槽・管）の間は 1 マス空け、周りに 1 マスの余白。
+    縦は 余白 + 段数 + 1 マス + 時刻の帯 + 余白（scale が 8 なら幅も高さも 8 の倍数）。"""
+    if scale < 2:
+        raise ValueError("scale must be >= 2")
+    spans, x, prev = [], scale, None
+    for kind, group in zip(view["kinds"], view["groups"]):
+        if prev is not None and group != prev:
+            x += scale
+        w = tank_tiles * scale if kind == "tank" else scale
+        spans.append((x, w))
+        x += w
+        prev = group
+    rows = view["rows"]
+    return {"spans": spans, "width": x + scale, "height": (rows + 4) * scale, "bar_y": (rows + 2) * scale}
+
+
+def section_pixels(view: dict, frame: int = -1, *, scale: int = SECTION_SCALE, gap: int = 1,
+                   tank_tiles: int = TANK_TILES, layout: dict | None = None) -> list[bytearray]:
+    """断面図の 1 時刻を色番号のピクセル行へ。1 段 = scale px（右と下の gap px は余白の色で、ブロックの継ぎ目）。
+
+    水面の段は highlight、🍜 は gold、⏳（管の中）は管の色の上に 🍜。管は底の段の下半分だけで、
+    つながる槽（src・dst が隣の列）まで伸ばす。下の帯は時刻（最初の時刻から最後の時刻までの割合）。
+    """
+    if not 0 <= gap < scale:
+        raise ValueError("gap must be in [0, scale)")
+    lay = layout or section_layout(view, scale, tank_tiles)
+    fr = view["frames"][frame]
+    rows, width = view["rows"], lay["width"]
+    px = [bytearray(width) for _ in range(lay["height"])]
+
+    def rect(x0: int, y0: int, x1: int, y1: int, color: int) -> None:
+        for y in range(y0, y1):
+            px[y][x0:x1] = bytes([color]) * (x1 - x0)
+
+    inner = scale - gap
+    names, kinds, groups, spans = view["columns"], view["kinds"], view["groups"], lay["spans"]
+    floor_y = scale + (rows - 1) * scale  # 底の段の上端
+    for c, (x, cw) in enumerate(spans):
+        if kinds[c] == "pipe":
+            src, dst = names[c].split(">", 1)
+            x0 = spans[c - 1][0] + spans[c - 1][1] - gap if c and groups[c - 1] == src else x
+            x1 = spans[c + 1][0] if c + 1 < len(spans) and dst in (names[c + 1], groups[c + 1]) else x + inner
+            rect(x0, floor_y + inner // 2, x1, floor_y + inner, S_PIPE)
+            if any(fr["cells"][r][c] == CELL_IN_PIPE for r in range(rows)):
+                rect(x, floor_y + inner // 2, x + inner, floor_y + inner, S_CARRIED)
+            continue
+        surface = rows - fr["counts"][c]
+        for r in range(rows):
+            cell = fr["cells"][r][c]
+            y = scale + r * scale
+            color = (S_SURFACE if r == surface else S_BODY) if cell == CELL_FILL else \
+                S_CARRIED if cell == CELL_CARRIED else S_PIPE if cell == CELL_IN_PIPE else S_EMPTY
+            rect(x, y, x + cw - gap, y + inner, color)
+            if cell == CELL_IN_PIPE:  # 管の中の 🍜（管の列が無いとき、行き先の底に）
+                m = max(1, inner // 4)
+                rect(x + m, y + m, x + cw - gap - m, y + inner - m, S_CARRIED)
+    t0, t1 = view["times"][0], view["times"][-1]
+    frac = 1.0 if t1 <= t0 else (fr["t"] - t0) / (t1 - t0)
+    bx0, bx1 = scale, width - scale - gap
+    bar_h = max(1, scale // 2)
+    by = lay["bar_y"] + (inner - bar_h) // 2
+    rect(bx0, by, bx1, by + bar_h, S_EMPTY)
+    rect(bx0, by, bx0 + int(frac * (bx1 - bx0) + 0.5), by + bar_h, S_BAR)
+    return px
+
+
+def _section_delays(n: int, delays=SECTION_DELAYS) -> list[int]:
+    first, mid, last = delays
+    out = [mid] * n
+    if n:
+        out[0], out[-1] = first, last
+    return out
+
+
+def section_gif_bytes(view: dict, *, scale: int = SECTION_SCALE, gap: int = 1, tank_tiles: int = TANK_TILES,
+                      delays=SECTION_DELAYS) -> bytes:
+    """network_frames の断面図をアニメーション GIF に（フレーム = 並べた時刻。8 色の表、差分矩形）。"""
+    lay = section_layout(view, scale, tank_tiles)
+    grids = [section_pixels(view, i, scale=scale, gap=gap, layout=lay) for i in range(len(view["frames"]))]
+    return _gif(grids, section_palette(view["fluid"], view["fill"]), delays=_section_delays(len(grids), delays))
+
+
+def section_png_bytes(view: dict, frame: int = -1, *, scale: int = SECTION_SCALE, gap: int = 1,
+                      tank_tiles: int = TANK_TILES) -> bytes:
+    """断面図の 1 時刻を PNG に（既定は最後の時刻）。"""
+    rows = section_pixels(view, frame, scale=scale, gap=gap, tank_tiles=tank_tiles)
+    return _png(rows, section_palette(view["fluid"], view["fill"]))
+
+
+def draw_section(res: dict, columns, scene: str, out_dir: str = "build/pixel", *,
+                 frames: int | None = SECTION_GIF_FRAMES, rows: int = SECTION_GIF_ROWS, cap_mode: str = "run-max",
+                 caps: dict | None = None, fill: str | None = None, scale: int = SECTION_SCALE,
+                 formats=("gif", "png"), file_prefix: str = "", file_suffix: str = "",
+                 plan: dict | None = None) -> dict:
+    """断面図の GIF（時刻を追う）と PNG（最後の時刻）を書き、隣に受領記録 <name>.json を置く（draw と同じ考え方）。
+
+    名前は <prefix><場面>_<流体>_n<時刻の数>_h<段数>_r<NN><suffix>。plan には呼んだ側の再現の引数
+    （水温・粘度など）を足す。
+    """
+    view = network_frames(res, columns, frames=frames, rows=rows, cap_mode=cap_mode, caps=caps, fill=fill)
+    fluid = view["fluid"]
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    stem = file_stem(scene, fluid, None, 0, out_dir, file_prefix, file_suffix,
+                     conditions=f"n{len(view['frames']):03d}_h{rows:02d}")
+    blobs = {}
+    if "gif" in formats:
+        blobs["gif"] = section_gif_bytes(view, scale=scale)
+    if "png" in formats:
+        blobs["png"] = section_png_bytes(view, -1, scale=scale)
+    paths, files = {}, {}
+    for kind, data in blobs.items():
+        p = stem.with_name(f"{stem.name}.{kind}")
+        p.write_bytes(data)
+        paths[kind] = str(p)
+        files[kind] = {"name": p.name, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+    lay = section_layout(view, scale)
+    receipt = {
+        "schema": SECTION_RECEIPT_SCHEMA, "files": files, "frames": len(view["frames"]),
+        "canvas": f"{lay['width']}x{lay['height']}",
+        "plan": {"scene": scene, "fluid": fluid, "frames": frames, "rows": rows, "cap_mode": cap_mode,
+                 "fill": view["fill"], "scale": scale, **(plan or {})},
+        "columns": view["columns"], "t": [view["times"][0], view["times"][-1]],
+        "readback_error": view["readback_error"], "half_block": view["half_block"],
+        "conservation_error_q": res.get("conservation_error_q"),
+    }
+    p = stem.with_name(f"{stem.name}.json")
+    p.write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    paths["json"] = str(p)
+    return {"paths": paths, **{k: receipt[k] for k in ("frames", "canvas", "readback_error", "half_block",
+                                                       "conservation_error_q")}}

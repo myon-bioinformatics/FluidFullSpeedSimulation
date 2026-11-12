@@ -1,2 +1,4 @@
 # Preserve locked vendor bytes on every operating system (lock digest checks).
 vendor/* -text
+*.gif binary
+*.png binary
