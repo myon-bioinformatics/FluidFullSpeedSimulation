@@ -1,0 +1,392 @@
+{
+  "schema": "web-ui-page/1",
+  "title": "🌊 FFSS 利用ガイド",
+  "theme": "auto",
+  "description": "FluidFullSpeedSimulation — 水・エタノール・メタノールなどの作動流体で、流れ・遅れ・検証を整数演算で回すシミュレーター。",
+  "blocks": [
+    {
+      "type": "badges",
+      "items": [
+        "🧮 整数演算（Q 固定小数点）",
+        "🧰 実行は標準ライブラリのみ",
+        "🐍 Python 3.11+"
+      ]
+    },
+    {
+      "type": "section",
+      "title": "📥 取得",
+      "blocks": [
+        {
+          "type": "output",
+          "text": "git clone https://github.com/myon-bioinformatics/FluidFullSpeedSimulation.git\ncd FluidFullSpeedSimulation\nuv sync --locked"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "title": "▶️ 実行",
+      "blocks": [
+        {
+          "type": "card",
+          "title": "🗂️ 実験の一覧",
+          "text": "",
+          "blocks": [
+            {
+              "type": "output",
+              "text": "$ python fluidfullspeedsimulation.py list\n🧮 E01 tank-integrator  水槽は積分器（整数で厳密）\n💧 E02 fluid-drain  流体ごとの排水（細管 / 小孔）\n⏳ E03 transport-delay  管を通る遅れ\n🪜 E04 weir  堰とカム（非線形の出口）\n🎈 E05 float-valve  浮き弁と遅れ\n🌐 E06 coupled-loop  2 台連結（遅延つきの環）\n…"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "🧪 流体の物性",
+          "text": "",
+          "blocks": [
+            {
+              "type": "output",
+              "text": "$ python fluidfullspeedsimulation.py fluids\n💧 🟦 water           ρ=998.21 kg/m³  μ=1.0016 mPa·s  ν=1.003 mm²/s\n🍶 🟨 ethanol         ρ=789.45 kg/m³  μ=1.2 mPa·s  ν=1.52 mm²/s\n🧴 🟧 methanol        ρ=791.1 kg/m³  μ=0.587 mPa·s  ν=0.742 mm²/s\n🟢 🟩 namekian-water  ρ=998.21 kg/m³  μ=0.80128 mPa·s  ν=0.8027 mm²/s  🏷️ 仮置き（粘度は水の 0.8 倍）\n☠️ 🟪 poison-water    ρ=998.21 kg/m³  μ=5.008 mPa·s  ν=5.017 mm²/s  🏷️ 仮置き（粘度は水の 5 倍）"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "🎋 1 本だけ回す",
+          "text": "名前でもアイコン（🥢 など）でも選べます。",
+          "blocks": [
+            {
+              "type": "output",
+              "text": "$ python fluidfullspeedsimulation.py run flume\n✅ E08 🎋 flume  38/38"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "✅ 全実験を検証",
+          "text": "終了コード 0 / 1。",
+          "blocks": [
+            {
+              "type": "output",
+              "text": "$ python fluidfullspeedsimulation.py verify"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "🎨 場面を描く",
+          "text": "GIF・PNG と受領記録 JSON を書きます。",
+          "blocks": [
+            {
+              "type": "output",
+              "text": "$ python fluidfullspeedsimulation.py draw 🥢 --view files"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "title": "🎞️ デモ",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "draw の場面を既定の引数で 1 枚ずつ（README と同じ GIF）。"
+        },
+        {
+          "type": "card",
+          "title": "D01 🏛️ moniac-rig",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D01_moniac-rig_water.gif",
+              "alt": "D01 moniac-rig"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "D02 🕳️ moniac-drain",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D02_moniac-drain_water.gif",
+              "alt": "D02 moniac-drain"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "D03 🎋 flume",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D03_flume_water.gif",
+              "alt": "D03 flume"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "D04 🫙 flume-hopper",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D04_flume-hopper_water.gif",
+              "alt": "D04 flume-hopper"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "D05 🥢 somen-flume",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D05_somen-flume_water.gif",
+              "alt": "D05 somen-flume"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "D06 🍜 noodle-length",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D06_noodle-length_water.gif",
+              "alt": "D06 noodle-length"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "D07 🧱 noodle-clog",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D07_noodle-clog_water.gif",
+              "alt": "D07 noodle-clog"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "D08 🍽️ chopsticks",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D08_chopsticks_water.gif",
+              "alt": "D08 chopsticks"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "D09 🧊 cold-water",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D09_cold-water_water.gif",
+              "alt": "D09 cold-water"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "D10 🪵 bamboo-wear",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D10_bamboo-wear_water.gif",
+              "alt": "D10 bamboo-wear"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "D11 🌧️ rain-runoff",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D11_rain-runoff_water.gif",
+              "alt": "D11 rain-runoff"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "D12 🎍 shishi-odoshi",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D12_shishi-odoshi_water.gif",
+              "alt": "D12 shishi-odoshi"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "D13 🍷 pythagorean-cup",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D13_pythagorean-cup_poison-water.gif",
+              "alt": "D13 pythagorean-cup"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "D14 🫗 mariotte",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D14_mariotte_water.gif",
+              "alt": "D14 mariotte"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "D15 🏺 water-clock",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D15_water-clock_water.gif",
+              "alt": "D15 water-clock"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "D16 🌊 dam-break",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D16_dam-break_namekian-water.gif",
+              "alt": "D16 dam-break"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "D17 🚧 inertia-limits",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D17_inertia-limits_water.gif",
+              "alt": "D17 inertia-limits"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "D18 ⚗️ distillation",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D18_distillation_water.gif",
+              "alt": "D18 distillation"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "D19 👼 angels-share",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D19_angels-share_water.gif",
+              "alt": "D19 angels-share"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "D20 💴 money-flow",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D20_money-flow_water.gif",
+              "alt": "D20 money-flow"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "D21 🪙 gold-flow",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D21_gold-flow_water.gif",
+              "alt": "D21 gold-flow"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "D22 ⛏️ rare-metal",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D22_rare-metal_water.gif",
+              "alt": "D22 rare-metal"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "D23 🚿 outlet-count",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D23_outlet-count_water.gif",
+              "alt": "D23 outlet-count"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "title": "🔗 リンク",
+      "blocks": [
+        {
+          "type": "links",
+          "items": [
+            {
+              "label": "📦 リポジトリ",
+              "href": "https://github.com/myon-bioinformatics/FluidFullSpeedSimulation"
+            },
+            {
+              "label": "📖 README",
+              "href": "https://github.com/myon-bioinformatics/FluidFullSpeedSimulation#readme"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
