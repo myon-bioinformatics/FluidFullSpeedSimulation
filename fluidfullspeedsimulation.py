@@ -2862,7 +2862,8 @@ def e27_gold_flow(seed: int = 27) -> dict:
     t_end = 1024.0
     res = hub_network(kind).run(t_end)
     checks, steady = _hub_checks("", kind, res, dt, 1e-9)
-    held = sum(steady["got"].values()) + steady["in_transit"]
+    # 槽 + 管の中の合計は整数（Q）で比べる（float で足すと、足し方の違いで最後の 1 桁が動く: Python 3.11 と 3.12 以降）
+    held = from_q(res["total_q"])
     share = steady["closed_form"][nm["source"]] / total
     checks += [
         check("total", "🪙", res["total_q"] == to_q(total) and held == total, value=held, expected=total, tol=0,
