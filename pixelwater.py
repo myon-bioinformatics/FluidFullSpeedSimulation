@@ -749,7 +749,7 @@ def network_frames(res: dict, columns, *, frames: int | None = 6, rows: int = SE
     times = [row["t"] for row in series]
     depths = [[None if kind == "pipe" else row[f"h:{ref[0]}"][ref[1]] if kind == "cell" else row[f"h:{ref}"]
                for kind, _n, ref in cols] for row in series]
-    cap = _caps(res, cols, depths, cap_mode, caps)
+    cap = _caps(res, cols, depths, cap_mode, caps or res.get("caps"))  # 結果が縦いっぱいを持っていればそれを使う
     counts = [[0 if d is None else blocks(d, cap[c], rows) for c, d in enumerate(line)] for line in depths]
     worst = 0.0
     for line, cnt in zip(depths, counts):
@@ -962,6 +962,7 @@ def section_pixels(view: dict, frame: int = -1, *, scale: int = SECTION_SCALE, g
 
 def _section_delays(n: int, delays=SECTION_DELAYS) -> list[int]:
     first, mid, last = delays
+    mid = max(mid, 240 // max(n, 1))  # 時刻が少ない GIF は 1 枚を長く（途中が全部で 2.4 秒より短くならない）
     out = [mid] * n
     if n:
         out[0], out[-1] = first, last
