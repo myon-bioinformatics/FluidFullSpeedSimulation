@@ -44,6 +44,7 @@ from fluids import viscous_orifice
 from fluids import superelevation
 
 LAWS: dict[str, Callable] = {}
+OUTLET_MODES = ("exact", "independent")
 PASSABLE: dict[str, Callable] = {}  # 運ばれる物がその管を通れるか（net, link, tracer）→ bool。無ければ常に通れる
 EJECT: dict[str, Callable] = {}  # 運ばれる物がその管へはじき出されるか（net, link, tracer）→ bool
 
@@ -323,12 +324,18 @@ def _law_mariotte(net, ln, n):
 
 class Network:
     def __init__(self, dt: float, fluid: str = "water", g: float = G, temp_c: float | None = None,
-                 mu: float | None = None, mu_scale: float | None = None, species=None, volume_of=None):
+                 mu: float | None = None, mu_scale: float | None = None, species=None, volume_of=None,
+                 outlets: str = "exact"):
         """species を渡すと成分モード（🍷）: 各水槽が成分ごとの量（Q 整数、単位は法則に任せる。蒸留ではモル）を持ち、
         v はその合計。普通の法則が返す量は、出す側の成分の比で整数のまま分ける。成分ごとの量を返す法則
         （boil・evaporate）もある。volume_of(parts) は水位（断面一定の水槽）に使う体積 [m³]。"""
         if dt <= 0:
             raise ValueError("dt must be positive")
+        if outlets not in OUTLET_MODES:
+            raise ValueError(f"outlets must be one of {OUTLET_MODES}")
+        # 🚿 同じ槽から弁・ポンプが何本か出るときの取り方。exact = 槽ごとに 1 ステップを厳密に解く（既定）、
+        # independent = どの弁もステップ最初の量を見て別々に取る（ずれを測るために残してある）
+        self.outlets = outlets
         self.dt = dt
         self.dt_q = to_q(dt)
         # 🧊 temp_c を渡すと温度表で μ・ρ が動く。🍯 mu（Pa·s）か mu_scale（倍率）で粘度を直接変えられる
@@ -355,13 +362,16 @@ class Network:
         return data
 
     def tank(self, name: str, area: float | None = None, head: float = 0.0, volume: float | None = None,
-             profile=None, samples: int = 512, parts: dict | None = None) -> "Network":
+             profile=None, samples: int = 512, parts: dict | None = None, outlets: str | None = None) -> "Network":
         """水槽。area 一定か、profile で高さにより断面が変わる器（🏺 水時計のような形）。
+        outlets はこの槽だけ出口の取り方を変える（"exact"・"independent"。既定は Network(outlets=...) のまま）。
 
         profile は ``[[h, A(h)], ...]``（間は直線）か、Python の関数 ``A(h)``（spec からは表だけ）。
         0 から h_max まで samples 個に刻んで体積 V(h) を台形で積み上げ、V → h の表（Q 整数の Cam）で
         水位を引く。h_max を超えた分は一番上の断面で伸ばす。表の刻みの粗さは結果の profile_samples で分かる。
         """
+        if outlets is not None and outlets not in OUTLET_MODES:
+            raise ValueError(f"outlets must be one of {OUTLET_MODES}")
         if self.species is not None:  # 🍷 成分モード: parts（成分 → 量）で中身を決める
             if profile is not None or head or volume is not None:
                 raise ValueError("in species mode give parts=, not head/volume/profile")
@@ -383,6 +393,7 @@ class Network:
                 raise ValueError("area must be positive")
             v = head * area if volume is None else volume
             self._node(name, kind="tank", area=area, area_q=to_q(area), v=to_q(v), profile=None)
+            self.nodes[name]["outlets"] = outlets
             return self
         if samples < 2:
             raise ValueError("samples must be >= 2")
@@ -805,11 +816,48 @@ class Network:
             self._groups = (len(self.links), groups)
         return self._groups[1]
 
+    def _exact_outlets(self, req: list[int]) -> None:
+        """🚿 弁とポンプだけが出ている槽を、1 ステップぶん厳密に解く（dV/dt = −K·V − q）。
+
+        弁はどれもステップ最初の量 V の k_i·開き具合 を取りたがる。別々に取ると、合計は厳密な 1 − e^(−K·dt) より
+        少し多い（n 本なら刻みの 1 次、(1 − 1/n) に比例して速く空く）。ここで弁の合計を (V + P/L)·Φ − P に置き直す:
+        L = K·dt = Σ 開き具合_i·dt/τ_i、Φ = 1 − e^(−L)、P = このステップのポンプの量（q·dt）。ポンプは P のまま。
+        弁どうしは速さ（開き具合/τ）の比で分け、端数は最後の弁へ（合計は整数で一致）。
+        弁が 1 本でポンプも無い槽は法則のまま（元から厳密）。槽ごとに tank(outlets=...) で切り替えられる。
+        槽と槽のあいだ（上の槽から入る量を同じステップの中で知らない）のずれは、ここでは直らない。
+        """
+        for src, idx in self._by_src().items():
+            node = self.nodes[src]
+            if (node.get("outlets") or self.outlets) != "exact":
+                continue
+            if any(self.links[i]["kind"] not in ("valve", "pump") for i in idx):
+                continue
+            valves = [i for i in idx if self.links[i]["kind"] == "valve" and req[i] > 0]
+            pumped = sum(req[i] for i in idx if self.links[i]["kind"] == "pump")
+            if not valves or (len(valves) == 1 and not pumped):
+                continue
+            # 速さ × dt = 開き具合 × dt/τ（dt/τ = −ln(1 − k)。k は弁を作ったときの厳密離散化ゲイン）
+            weights = [from_q(self.links[i]["last_opening"]) * -math.log1p(-from_q(self.links[i]["k"])) for i in valves]
+            scale = sum(weights)
+            if node["v"] <= 0 or scale <= 0.0:
+                continue
+            phi = to_q(-math.expm1(-scale))
+            if pumped:
+                total = qmul(node["v"] + to_q(from_q(pumped) / scale), phi) - pumped
+            else:
+                total = qmul(node["v"], phi)
+            rest = total = max(total, 0)
+            for i, w in zip(valves[:-1], weights):
+                req[i] = min(qmul(total, to_q(w / scale)), rest)
+                rest -= req[i]
+            req[valves[-1]] = rest
+
     # --- 1 ステップ -----------------------------------------------------
     def step(self, n: int) -> list[int]:
         if len(self.last_flow) != len(self.links):
             self.last_flow = [0] * len(self.links)
         req = [max(LAWS[ln["kind"]](self, ln, n), 0) for ln in self.links]
+        self._exact_outlets(req)
         # 出す側の水が足りなければ、その節点から出る管で整数のまま按分する
         for src, idx in self._by_src().items():
             want = sum(req[i] for i in idx)
@@ -1184,7 +1232,7 @@ def ch_depth(ln: dict, net: "Network") -> float:
 LINK_BUILDERS = ("pipe", "orifice", "weir", "cam", "pump", "valve", "float_valve", "tip", "siphon", "mariotte", "boil",
                  "evaporate")
 SPEC_KEYS = {"dt", "fluid", "temp_c", "mu", "mu_scale", "species", "tanks", "channels", "flumes", "rains", "links",
-             "tracers", "t_end", "trace", "sample_every"}
+             "tracers", "t_end", "trace", "sample_every", "outlets"}
 
 
 def build(spec: dict) -> Network:
@@ -1211,7 +1259,8 @@ def build(spec: dict) -> Network:
         from fluids import mix_volume
         volume_of = lambda p: mix_volume(p["ethanol"], p["water"])
     net = Network(spec.get("dt", 0.1), spec.get("fluid", "water"), temp_c=spec.get("temp_c"), mu=spec.get("mu"),
-                  mu_scale=spec.get("mu_scale"), species=species, volume_of=volume_of)
+                  mu_scale=spec.get("mu_scale"), species=species, volume_of=volume_of,
+                  outlets=spec.get("outlets", "exact"))
     for t in spec.get("tanks", []):
         net.tank(**t)
     for c in spec.get("channels", []):

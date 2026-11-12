@@ -121,7 +121,7 @@ class Outlets(unittest.TestCase):
         for item in random_scales(291, 3, n_min=1, n_max=2):
             a = item["value"]
             shares = [a, 0.75 * (1.0 - a), 0.25 * (1.0 - a)]
-            res = ffs.outlet_network([shares], tau=30.0, dt=0.5).run(60.0)
+            res = ffs.outlet_network([shares], tau=30.0, dt=0.5, outlets="independent").run(60.0)
             want = 128.0 * ffs.outlet_factor([s / 30.0 for s in shares], 0.5) ** 120
             with self.subTest(share=item["label"]):
                 self.assertAlmostEqual(from_q(res["volumes_q"]["pool-1"]), want, places=8)
@@ -131,9 +131,65 @@ class Outlets(unittest.TestCase):
         res, cols = ffs.rig_section("outlet-count")
         view = pw.network_frames(res, cols, frames=None, rows=16)
         self.assertEqual(ffs.scene_arg("🚿"), "outlet-count")
-        for fr in view["frames"]:
-            self.assertEqual(fr["counts"], sorted(fr["counts"], reverse=True))
-        self.assertGreater(view["frames"][1]["counts"][0], view["frames"][1]["counts"][-1])
+        for fr in view["frames"]:  # 別々に取る 1・2・4・8 本は階段、厳密に解く 8 本（5 列目）は 1 本と同じ
+            self.assertEqual(fr["counts"][:4], sorted(fr["counts"][:4], reverse=True))
+            self.assertEqual(fr["counts"][4], fr["counts"][0])
+        self.assertGreater(view["frames"][1]["counts"][0], view["frames"][1]["counts"][3])
+
+    def test_exact_outlets_for_any_count_split_and_step(self):
+        import math as m
+        for item in random_scales(292, 4, n_min=0, n_max=2):  # dt/τ = 0.001〜9.99 … 粗い刻みは 0.5 まで
+            h = min(item["value"], 0.5)
+            rng_shares = [[1.0], [0.5, 0.5], [0.7, 0.2, 0.1], [1 / 16] * 16]
+            steps = max(1, round(2.0 / h))
+            res = ffs.outlet_network(rng_shares, tau=30.0, dt=30.0 * h).run(steps * 30.0 * h)
+            want = 128.0 * m.exp(-steps * h)
+            with self.subTest(dt_over_tau=item["label"]):
+                for i in range(1, 5):
+                    self.assertAlmostEqual(from_q(res["volumes_q"][f"pool-{i}"]) / want, 1.0, places=9)
+                moved = [from_q(res["volumes_q"][f"out-3-{j}"]) for j in (1, 2, 3)]
+                for got, share in zip(moved, (0.7, 0.2, 0.1)):
+                    self.assertAlmostEqual(got / sum(moved), share, places=9)
+                self.assertEqual(res["conservation_error_q"], 0)
+
+    def test_exact_outlets_with_a_pump_and_when_the_tank_runs_short(self):
+        import math as m
+        tau, vol = 30.0, 128.0
+        for share, t in ((1 / 8, 60.0), (1 / 64, 15.0)):
+            q = vol / tau * share
+            want = (vol + q * tau) * m.exp(-t / tau) - q * tau
+            for n in (1, 2, 4):
+                res = ffs.outlet_network([[1.0 / n] * n], tau=tau, dt=0.5, pump_extra=share).run(t)
+                with self.subTest(share=share, n=n):
+                    self.assertAlmostEqual(from_q(res["volumes_q"]["pool-1"]) / want, 1.0, places=9)
+                    self.assertAlmostEqual(from_q(res["volumes_q"]["pumped-1"]), q * t, places=9)
+        res = ffs.outlet_network([[0.5, 0.5]], tau=tau, dt=0.5, pump_extra=2.0).run(60.0)  # 途中で空になる
+        self.assertEqual(res["volumes_q"]["pool-1"], 0)
+        self.assertEqual(res["conservation_error_q"], 0)
+
+    def test_outlet_mode_switch(self):
+        import network
+        with self.assertRaises(ValueError):
+            network.Network(dt=1.0, outlets="sometimes")
+        with self.assertRaises(ValueError):
+            network.Network(dt=1.0).tank("a", 1.0, outlets="sometimes")
+        shares = [[0.25] * 4, [0.25] * 4]
+        mixed = ffs.outlet_network(shares, tau=30.0, dt=0.5, modes=("independent", None)).run(60.0)
+        both = ffs.outlet_network(shares, tau=30.0, dt=0.5, outlets="independent", modes=(None, "exact")).run(60.0)
+        self.assertEqual(mixed["volumes_q"], both["volumes_q"])  # 槽ごとの指定が全体の指定より先
+        self.assertLess(mixed["volumes_q"]["pool-1"], mixed["volumes_q"]["pool-2"])
+        spec = {"dt": 0.5, "t_end": 60.0, "tanks": [{"name": "a", "area": 1.0, "volume": 128.0},
+                                                      {"name": "b", "area": 1.0}, {"name": "c", "area": 1.0}],
+                "links": [{"law": "valve", "src": "a", "dst": "b", "tau": 60.0},
+                          {"law": "valve", "src": "a", "dst": "c", "tau": 60.0}]}
+        left = {mode: network.simulate({**spec, "outlets": mode})["volumes_q"]["a"] for mode in network.OUTLET_MODES}
+        self.assertLess(left["independent"], left["exact"])
+        self.assertAlmostEqual(from_q(left["exact"]) / (128.0 * 0.1353352832366127), 1.0, places=9)
+
+    def test_single_valve_tanks_are_untouched_by_the_mode(self):
+        a = ffs.outlet_network([[1.0]], tau=30.0, dt=0.5).run(60.0)
+        b = ffs.outlet_network([[1.0]], tau=30.0, dt=0.5, outlets="independent").run(60.0)
+        self.assertEqual(a["volumes_q"], b["volumes_q"])
 
     def test_short_gifs_play_slower(self):
         self.assertEqual(pw._section_delays(40), [80] + [10] * 38 + [200])
