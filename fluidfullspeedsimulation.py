@@ -33,7 +33,7 @@ from fluids import G, poiseuille_head, poiseuille_tau, torricelli_empty_time, to
 from fluids import mariotte_constant_time, mariotte_flow, siphon_drain_time, siphon_drain_time_with_inflow, siphon_flow
 from fluids import tip_period
 from fluids import AZEOTROPE_X, abv, bubble_t, mix_volume, mole_fraction, moles_for_abv, rayleigh_log, vle_y
-from network import Network, critical_gain, inverse_table, jsonable, peak_to_peak, register_law, settling_time, window
+from network import OUTLET_MODES, Network, critical_gain, inverse_table, jsonable, peak_to_peak, register_law, settling_time, window
 import pixelwater as pw
 
 FLUID_KEYS = REAL_FLUIDS  # 実験で回す流体（仮置きの流体は入れない）
@@ -2678,31 +2678,31 @@ def hub_caps(kind: str) -> dict:
 def hub_steady(kind: str, *, dt: float | None = None, **over) -> dict:
     """行き渡った後の量（閉じた式）。どの槽も「入ってくる速さ × 滞在時間」。
 
-    dt を渡すと離散の定常（弁の速さ 1/τ を (1 − e^(−dt/τ))/dt に置き換えるだけ）。
-    💴 は残高が足りる範囲で入ってくる速さが issue で決まる（源から循環する）。🪙 は総量 G が決まっていて、源の残り m が
-    G = m·(1 + Σ 滞在時間/τ_feed) を満たす（取り分は滞在時間の比で、速さにはよらない）。
+    dt を渡すと離散の定常: 出口の合計の速さ K を (1 − e^(−K·dt))/dt に置き換える（エンジンは槽ごとに 1 ステップを
+    厳密に解くので、出口が何本あっても合計の速さだけで決まり、出口どうしは速さの比で分かれる）。
+    💴 は入ってくる速さが issue で決まる（刷った分だけ増える）。🪙 は総量 G が決まっていて、源の残り m が
+    G = m·(1 + 源から出る速さ × 一巡りの滞在時間) を満たす（取り分は滞在時間の比で、速さにはよらない）。
     """
     p = {**HUB_FLOWS[kind], **over}
     nm = hub_names(kind)
 
-    def rate(tau):
-        if tau is None:
-            return 0.0
-        return 1.0 / tau if dt is None else from_q(lag_gain(dt, tau)) / dt
+    def out_rate(k: float) -> float:  # 合計の速さ k で出ていく槽の、量 1 あたりに出る速さ
+        return k if dt is None else -math.expm1(-k * dt) / dt
 
-    r_arm, r_out, r_sat, r_back = (rate(p[k]) for k in ("tau_arm", "tau_out", "tau_sat", "tau_back"))
+    r_arm, r_out, r_sat, r_back = (1.0 / p[k] if p[k] else 0.0 for k in ("tau_arm", "tau_out", "tau_sat", "tau_back"))
     if r_back == 0.0:
         raise ValueError("no steady state without a way back to the source")
-    hub_per = 1.0 / (r_arm + r_out)  # 拠点 1 つに、入る速さ 1 あたり溜まる量
-    per = {"feed_pipe": p["delay_feed"], "hub": hub_per, "arm_pipe": hub_per * r_arm * p["delay_arm"],
-           "arm": hub_per * r_arm / r_sat, "outside": 1.0 / r_back}
+    hub_per = 1.0 / out_rate(r_arm + r_out)  # 拠点 1 つに、入る速さ 1 あたり溜まる量
+    to_arm = r_arm / (r_arm + r_out)  # 拠点から腕へ行く割合
+    per = {"feed_pipe": p["delay_feed"], "hub": hub_per, "arm_pipe": to_arm * p["delay_arm"],
+           "arm": to_arm / out_rate(r_sat), "outside": 1.0 / out_rate(r_back)}
     if p["issue"] is not None:
         feeds = [p["issue"] * s for s in p["shares"]]
         source = None
     else:
-        r_feed = [rate(t) for t in p["tau_feed"]]
-        source = p["source_volume"] / (1.0 + sum(r_feed) * sum(per.values()))
-        feeds = [source * r for r in r_feed]
+        r_feed = [1.0 / t for t in p["tau_feed"]]
+        source = p["source_volume"] / (1.0 + out_rate(sum(r_feed)) * sum(per.values()))
+        feeds = [source * out_rate(sum(r_feed)) * r / sum(r_feed) for r in r_feed]
     out = {"feeds": feeds, "cycle_time": sum(per.values()), nm["outside"]: sum(feeds) * per["outside"]}
     if source is not None:
         out[nm["source"]] = source
@@ -2740,7 +2740,8 @@ def _hub_checks(tag: str, kind: str, res: dict, dt: float, tol_exact: float, **o
     nm = hub_names(kind)
     p = {**HUB_FLOWS[kind], **over}
     exact, smooth = hub_steady(kind, dt=dt, **over), hub_steady(kind, **over)
-    tau_min = min(t for t in (p["tau_arm"], p["tau_out"], p["tau_sat"], p["tau_back"]) if t)
+    k_max = max(sum(1.0 / p[k] for k in ("tau_arm", "tau_out") if p[k]), 1.0 / p["tau_sat"], 1.0 / p["tau_back"],
+                sum(1.0 / t for t in p["tau_feed"]) if p["tau_feed"] else 0.0)  # いちばん速く空く槽
     names = [n for n in [nm["source"], *nm["hubs"], *nm["arms"], nm["outside"]] if n in exact]
     got = {n: from_q(res["volumes_q"][n]) for n in names}
     worst_exact = max(rel_err(got[n], exact[n]) for n in names)
@@ -2748,9 +2749,9 @@ def _hub_checks(tag: str, kind: str, res: dict, dt: float, tol_exact: float, **o
     pipes = sum(v for k, v in exact.items() if ">" in k)
     checks = [
         check(f"{tag}steady:discrete", "🎯", worst_exact <= tol_exact, value=worst_exact, tol=tol_exact,
-              note="どの槽も 入る速さ × 滞在時間（離散の定常: 弁の速さを (1 − e^(−dt/τ))/dt に）"),
-        check(f"{tag}steady:closed-form", "📐", worst_smooth <= dt / tau_min, value=worst_smooth, tol=dt / tau_min,
-              note="連続の式（速さ 1/τ）との差は刻みの 1 次（dt/τ まで）"),
+              note="どの槽も 入る速さ × 滞在時間（離散の定常: 槽の出口の合計の速さ K を (1 − e^(−K·dt))/dt に）"),
+        check(f"{tag}steady:closed-form", "📐", worst_smooth <= dt * k_max, value=worst_smooth, tol=dt * k_max,
+              note="連続の式（速さ 1/τ）との差は刻みの 1 次（dt × いちばん速い槽の速さ まで）"),
         close(f"{tag}transit", "⏳", _in_transit(res), pipes, tol_exact, note="遅れの管の中 = 流れる速さ × 遅れ"),
         conserved(f"{tag}conserve", res),
     ]
@@ -2901,11 +2902,9 @@ def e28_rare_metal(dt_list=(1.0, 0.5, 0.25), seed: int = 28) -> dict:
                           for s in (20.0, 40.0, 80.0, 160.0))
         feed = next(ln for ln in res["links"] if ln["dst"] == nm["hubs"][0])
         afloat = reserve * (math.exp(-big_k * (t_end - ship)) - math.exp(-big_k * t_end))
-        # 弁 1 本ずつは厳密でも、同じ槽から 3 本出ると合わせた減り方は刻みの 1 次ずれる（t·dt·K²/2 まで）
-        split_tol = lambda t: t * dt * big_k * big_k / 2.0  # noqa: E731
         checks += [
-            check("mine:exponential", "⛏️", mine_worst <= split_tol(120.0), value=mine_worst, tol=split_tol(120.0),
-                  note="産出国の残り = 埋蔵量 × e^(−Σt/τ_feed)（30・60・120 日。出口 3 本ぶん刻みの 1 次ずれる）"),
+            check("mine:exponential", "⛏️", mine_worst <= 1e-9, value=mine_worst, tol=1e-9,
+                  note="産出国の残り = 埋蔵量 × e^(−Σt/τ_feed)（30・60・120 日。出口が 3 本でも厳密: 🚿 E29）"),
             check("ship:arrival", "🚢", feed["first_arrival"] == ship, value=feed["first_arrival"], expected=ship, tol=0,
                   note="最初の船が着くのはちょうど 30 日後"),
             close("refiner:peak-time", "⛰️", (i_peak + 1) * dt, ship + s_peak, 4 * dt / (ship + s_peak),
@@ -2914,7 +2913,7 @@ def e28_rare_metal(dt_list=(1.0, 0.5, 0.25), seed: int = 28) -> dict:
                   note="そのときの在庫（Bateman の 2 段目、刻みの 1 次まで）"),
             check("maker:bateman", "🔩", maker_worst <= dt / p["tau_sat"], value=maker_worst, tol=dt / p["tau_sat"],
                   note="部品の加工国の在庫（Bateman の 3 段目、着いてから 20・40・80・160 日）"),
-            close("afloat", "🌊", _in_transit(res), afloat, split_tol(t_end), note="船の上にある量 = 過去 30 日に出た分"),
+            close("afloat", "🌊", _in_transit(res), afloat, 1e-9, note="船の上にある量 = 過去 30 日に出た分"),
             conserved("conserve", res),
         ]
         summary = {"peak_day": (i_peak + 1) * dt, "peak_day_closed_form": ship + s_peak, "peak": hub[i_peak],
@@ -2945,49 +2944,57 @@ def e28_rare_metal(dt_list=(1.0, 0.5, 0.25), seed: int = 28) -> dict:
             "checks": checks}
 
 
-# --- E29 出口の数（🚿 同じ槽から弁が n 本出ると、合わせた減り方が刻みの 1 次ずれる） ----------
+# --- E29 出口の数（🚿 同じ槽から弁が n 本出るとき: 別々に取るとずれる、槽ごとに厳密に解けばずれない） ----------
 
 OUTLETS = {"volume": 128.0, "tau": 30.0, "dt": 0.25, "t_end": 120.0, "counts": (1, 2, 3, 4, 8)}
-OUTLET_SCENE = {"tau": 8.0, "dt": 4.0, "t_end": 32.0, "counts": (1, 2, 4, 8)}  # 刻みをわざと粗くして、ずれを見える大きさに
+# 刻みをわざと粗くして、ずれを見える大きさに。列: 別々に取る 1・2・4・8 本 ｜ 厳密に解く 8 本
+OUTLET_SCENE = {"tau": 8.0, "dt": 4.0, "t_end": 32.0, "counts": (1, 2, 4, 8, 8),
+                "modes": ("independent",) * 4 + ("exact",)}
 
 
 def outlet_factor(rates, dt: float) -> float:
-    """弁が何本か出ている槽の、1 ステップ後に残る割合 1 − Σ(1 − e^(−k_i·dt))。
+    """弁が別々に取る槽（outlets="independent"）の、1 ステップ後に残る割合 1 − Σ(1 − e^(−k_i·dt))。
     どの弁もステップの最初の量を見て取るので、合わせると e^(−Σk_i·dt) より少し多く取る。"""
     return 1.0 - sum(1.0 - math.exp(-k * dt) for k in rates)
 
 
 def outlet_error(rates, dt: float, t: float) -> float:
-    """時刻 t の残りが厳密な e^(−Σk·t) から外れる割合の、刻みの 1 次の見積もり −t·dt·(K² − Σk_i²)/2。
+    """別々に取るとき、時刻 t の残りが厳密な e^(−Σk·t) から外れる割合の、刻みの 1 次の見積もり −t·dt·(K² − Σk_i²)/2。
     合計の速さ K を n 等分すると K² − Σk_i² = K²·(1 − 1/n)。1 本なら 0、本数を増やすと頭打ち。"""
     big_k = sum(rates)
     return -t * dt * (big_k * big_k - sum(k * k for k in rates)) / 2.0
 
 
 def outlet_network(shares_list, *, tau: float, dt: float, volume: float = OUTLETS["volume"],
-                   pump: bool = False) -> Network:
+                   pump: bool = False, outlets: str = "exact", modes=None, pump_extra: float = 0.0) -> Network:
     """槽 pool-1, pool-2, … を並べ、それぞれ shares（合計 1）の割合で出口を付ける。合計の時定数はどれも tau。
-    pump=True は弁の代わりに、一定の速さ volume/tau·share のポンプ（残りによらない）。"""
-    net = Network(dt=dt)
+    pump=True は弁の代わりに、一定の速さ volume/tau·share のポンプ（残りによらない）。
+    outlets は出口の取り方（"exact" = 槽ごとに厳密、"independent" = 別々）。modes で槽ごとに変えられる。
+    pump_extra > 0 なら、弁に加えて一定の速さ volume/tau·pump_extra のポンプも付ける（弁とポンプが混ざる槽）。"""
+    net = Network(dt=dt, outlets=outlets)
     for i, shares in enumerate(shares_list, 1):
-        net.tank(f"pool-{i}", 1.0, volume=volume)
+        net.tank(f"pool-{i}", 1.0, volume=volume, outlets=None if modes is None else modes[i - 1])
         for j, share in enumerate(shares, 1):
             net.tank(f"out-{i}-{j}", 1.0)
             if pump:
                 net.pump(f"pool-{i}", f"out-{i}-{j}", rate=volume / tau * share)
             else:
                 net.valve(f"pool-{i}", f"out-{i}-{j}", tau=tau / share)
+        if pump_extra:
+            net.tank(f"pumped-{i}", 1.0)
+            net.pump(f"pool-{i}", f"pumped-{i}", rate=volume / tau * pump_extra)
     return net
 
 
 def e29_outlet_count(seed: int = 29) -> dict:
-    """🚿 出口の数。弁 1 本ずつは厳密でも、同じ槽から n 本出ると合わせた減り方は刻みの 1 次ずれる（速く空く）。
-    ずれは (1 − 1/n) に比例して頭打ち、刻みを半分にすると半分。一定量で出すポンプは何本でもずれない。"""
+    """🚿 出口の数。弁を別々に取らせる（outlets="independent"）と、n 本で合わせた減り方が刻みの 1 次ずれる（速く空く）:
+    ずれは (1 − 1/n) に比例して頭打ち、刻みを半分にすると半分。エンジンの既定（outlets="exact"）は槽ごとに
+    1 ステップを厳密に解くので、何本でも、ポンプが混ざっても、ずれない。命題の判定は Aoi のサイクル3。"""
     p = OUTLETS
     vol, tau, dt, t_end = p["volume"], p["tau"], p["dt"], p["t_end"]
     equal = [[1.0 / n] * n for n in p["counts"]]
     checks, errors = [], {}
-    res = outlet_network(equal, tau=tau, dt=dt).run(t_end)
+    res = outlet_network(equal, tau=tau, dt=dt, outlets="independent").run(t_end)
     exact = vol * math.exp(-t_end / tau)
     steps = int(round(t_end / dt))
     for i, (n, shares) in enumerate(zip(p["counts"], equal), 1):
@@ -2995,36 +3002,71 @@ def e29_outlet_count(seed: int = 29) -> dict:
         rates = [s / tau for s in shares]
         errors[n] = got / exact - 1.0
         checks.append(close(f"n={n}:discrete", "🎯", got, vol * outlet_factor(rates, dt) ** steps, 1e-9,
-                            note="残り = 最初の量 × (1 − Σ(1 − e^(−k_i·dt)))^ステップ数"))
+                            note="別々に取る: 残り = 最初の量 × (1 − Σ(1 − e^(−k_i·dt)))^ステップ数"))
         if n == 1:
             checks.append(check("n=1:exact", "1️⃣", abs(errors[n]) <= 1e-9, value=errors[n], expected=0.0, tol=1e-9,
                                 note="出口が 1 本なら厳密（e^(−t/τ) どおり）"))
         else:
             checks.append(close(f"n={n}:first-order", "📐", errors[n], outlet_error(rates, dt, t_end), 0.02,
-                                note="ずれ = −t·dt·K²·(1 − 1/n)/2（速く空く側）"))
+                                note="別々に取る: ずれ = −t·dt·K²·(1 − 1/n)/2（速く空く側）"))
             checks.append(close(f"n={n}:ratio", "🚿", errors[n] / errors[2], (1.0 - 1.0 / n) / 0.5, 0.01,
                                 note="2 本のときとの比 = (1 − 1/n)/(1/2)"))
     checks.append(conserved("conserve", res))
-    half = outlet_network(equal, tau=tau, dt=dt / 2).run(t_end)
+    half = outlet_network(equal, tau=tau, dt=dt / 2, outlets="independent").run(t_end)
     order = {n: errors[n] / (from_q(half["volumes_q"][f"pool-{i}"]) / exact - 1.0)
              for i, n in enumerate(p["counts"], 1) if n > 1}
     checks.append(check("order", "📏", all(1.9 <= r <= 2.1 for r in order.values()), value=list(order.values()),
-                        expected=2.0, note="刻みを半分にするとずれも半分（1 次）"))
+                        expected=2.0, note="別々に取る: 刻みを半分にするとずれも半分（1 次）"))
     limit = -t_end * dt / (2.0 * tau * tau)
     checks.append(check("ceiling", "🧢", all(limit * 1.02 <= e <= 0.0 for e in errors.values()), value=min(errors.values()),
-                        expected=limit, note="何本に増やしても −t·dt·K²/2 は超えない（頭打ち）"))
+                        expected=limit, note="この刻みでは −t·dt·K²/2 を超えない（粗い刻み・多い本数では超える: Aoi の O5・O16）"))
     # 🎲 等分でない出口: 効くのは本数そのものではなく K² − Σk_i²（1 本に偏るほど小さい）
+    uneven = []
     for item in random_scales(seed, 3, n_min=1, n_max=2):  # 1 本目の割合 0.01〜0.999
         a = item["value"]
         shares = [a, (1.0 - a) / 2.0, (1.0 - a) / 2.0]
-        r = outlet_network([shares], tau=tau, dt=dt).run(t_end)
+        uneven.append(shares)
+        r = outlet_network([shares], tau=tau, dt=dt, outlets="independent").run(t_end)
         got = from_q(r["volumes_q"]["pool-1"]) / exact - 1.0
         rates = [s / tau for s in shares]
         tag = f"share={item['label']}:"
         checks += [close(f"{tag}first-order", "🎲📐", got, outlet_error(rates, dt, t_end), 0.02,
-                         note="等分でなくても −t·dt·(K² − Σk_i²)/2"),
+                         note="別々に取る: 等分でなくても −t·dt·(K² − Σk_i²)/2"),
                    conserved(f"{tag}conserve", r)]
-    # 💴 一定量で出すポンプ: 取る量が残りによらないので、何本に分けても同じ（槽が足りているあいだ）
+    # ✅ 既定（槽ごとに 1 ステップを厳密に解く）: 何本でも、等分でなくても、粗い刻みでも、ずれない
+    fixed = outlet_network(equal + uneven, tau=tau, dt=dt).run(t_end)
+    worst = max(abs(from_q(v) / exact - 1.0) for k, v in fixed["volumes_q"].items() if k.startswith("pool-"))
+    coarse_dt = tau / 2.0
+    coarse = outlet_network(equal, tau=tau, dt=coarse_dt).run(4 * tau)
+    coarse_worst = max(abs(from_q(v) / (vol * math.exp(-4.0)) - 1.0) for k, v in coarse["volumes_q"].items()
+                       if k.startswith("pool-"))
+    arrive = {k: from_q(v) for k, v in fixed["volumes_q"].items() if k.startswith(f"out-{len(equal) + 1}-")}
+    want = [s * (vol - exact) for s in uneven[0]]
+    split_worst = max(rel_err(arrive[f"out-{len(equal) + 1}-{j}"], w) for j, w in enumerate(want, 1))
+    checks += [
+        check("exact:any-count", "✅", worst <= 1e-9, value=worst, tol=1e-9,
+              note="既定の取り方: 1〜8 本の等分と、偏った 3 本 × 3 組で、残りは e^(−t/τ) どおり"),
+        check("exact:coarse", "✅🪨", coarse_worst <= 1e-9, value=coarse_worst, tol=1e-9,
+              note="刻みが時定数の半分でも厳密"),
+        check("exact:split", "✅🔱", split_worst <= 1e-9, value=split_worst, tol=1e-9,
+              note="出た量は速さの比で分かれる（偏った 3 本）"),
+        conserved("exact:conserve", fixed),
+    ]
+    # ✅💴 弁とポンプが混ざる槽: dV/dt = −K·V − q の解 (V0 + q/K)·e^(−K·t) − q/K
+    share_q, t_mix = 1.0 / 8.0, 2.0 * tau
+    q = vol / tau * share_q
+    mix_exact = (vol + q * tau) * math.exp(-t_mix / tau) - q * tau
+    mixed = {m: outlet_network([[0.5, 0.5]], tau=tau, dt=dt, outlets=m, pump_extra=share_q).run(t_mix)
+             for m in OUTLET_MODES}
+    mix_err = {m: from_q(r["volumes_q"]["pool-1"]) / mix_exact - 1.0 for m, r in mixed.items()}
+    checks += [
+        check("exact:with-pump", "✅💴", abs(mix_err["exact"]) <= 1e-9, value=mix_err["exact"], expected=0.0, tol=1e-9,
+              note="弁 2 本 + ポンプの槽も厳密"),
+        check("independent:with-pump", "💴", mix_err["independent"] < -1e-3, value=mix_err["independent"],
+              note="別々に取ると、弁とポンプのあいだでもずれる"),
+        conserved("exact:with-pump:conserve", mixed["exact"]),
+    ]
+    # 💴 一定量で出すポンプだけ: 取る量が残りによらないので、何本に分けても同じ（槽が足りているあいだ）
     pumped = outlet_network(equal, tau=tau, dt=dt, pump=True).run(tau / 2.0)
     left = [pumped["volumes_q"][f"pool-{i}"] for i in range(1, len(equal) + 1)]
     spread = max(left) - min(left)
@@ -3034,9 +3076,10 @@ def e29_outlet_count(seed: int = 29) -> dict:
         close("pump:half", "⏱️", from_q(left[0]), vol / 2.0, 1e-12, note="τ/2 でちょうど半分（速さ = 最初の量/τ）"),
         conserved("pump:conserve", pumped),
     ]
-    summary = {"errors": {str(n): e for n, e in errors.items()}, "ceiling": limit,
+    summary = {"independent_errors": {str(n): e for n, e in errors.items()}, "ceiling": limit,
                "tau_effective": {str(n): -dt / math.log(outlet_factor([1.0 / (n * tau)] * n, dt)) for n in p["counts"]},
-               "order": {str(n): r for n, r in order.items()}}
+               "order": {str(n): r for n, r in order.items()}, "exact_worst": worst, "exact_coarse_worst": coarse_worst,
+               "with_pump": mix_err}
     return {"params": {"outlets": p, "seed": seed}, "summary": summary, "runs": {"outlets": res["series"]}, "checks": checks}
 
 
@@ -3073,7 +3116,7 @@ EXPERIMENTS = {
             e26_money_flow),
     "E27": ("gold-flow", "🪙", "金に置き換える（総量が決まっている: 取り分は滞在時間の比、速く回しても増えない）", e27_gold_flow),
     "E28": ("rare-metal", "⛏️", "レアメタル（産出国 → 船 → 加工国 → 市場: Bateman の鎖、在庫の山の時刻と高さ）", e28_rare_metal),
-    "E29": ("outlet-count", "🚿", "出口の数（弁が n 本だと合わせた減り方が刻みの 1 次ずれる: (1 − 1/n) に比例して頭打ち、ポンプはずれない）",
+    "E29": ("outlet-count", "🚿", "出口の数（別々に取ると n 本で刻みの 1 次ずれる: (1 − 1/n) に比例。槽ごとに厳密に解く既定ではずれない）",
             e29_outlet_count),
 }
 SLUGS = {slug: eid for eid, (slug, *_rest) in EXPERIMENTS.items()}
@@ -3307,9 +3350,9 @@ def rig_section(scene: str, fluid: str = "water", temp_c: float | None = None, m
         res = net.run(days, sample_every=every)
         res["caps"] = hub_caps(kind)  # 縦いっぱいを槽どうしで揃える（どこにどれだけあるかを比べられる）
         return res, hub_columns(kind, net)
-    if scene == "outlet-count":  # 🚿 出口 1・2・4・8 本の槽を並べる（1 本が厳密。刻みを粗くしてずれを見せる）
+    if scene == "outlet-count":  # 🚿 別々に取る 1・2・4・8 本 ｜ 厳密に解く 8 本（刻みを粗くしてずれを見せる）
         o = OUTLET_SCENE
-        net = outlet_network([[1.0 / n] * n for n in o["counts"]], tau=o["tau"], dt=o["dt"])
+        net = outlet_network([[1.0 / n] * n for n in o["counts"]], tau=o["tau"], dt=o["dt"], modes=o["modes"])
         res = net.run(o["t_end"], sample_every=1)
         cols = [f"pool-{i}" for i in range(1, len(o["counts"]) + 1)]
         res["caps"] = dict.fromkeys(cols, OUTLETS["volume"])
