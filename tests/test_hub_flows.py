@@ -28,6 +28,19 @@ class Plumbing(unittest.TestCase):
                                     if ln["src"] != nm["outside"])))
         self.assertEqual(len(shapes), 2)  # 💴 🪙 は同じ形、⛏️ は拠点 → 外 の管が無いだけ
 
+    def test_money_source_is_finite_and_drawn_on_a_separate_scale(self):
+        initial = ffs.HUB_FLOWS["money"]["source_volume"]
+        res, cols = ffs.rig_section("money-flow")
+        self.assertLess(from_q(res["volumes_q"]["central-bank"]), initial)
+        self.assertEqual(res["total_q"], to_q(initial))
+        view = pw.network_frames(res, cols, frames=8, rows=16)
+        caps = dict(zip(view["columns"], view["caps"]))
+        self.assertGreater(caps["central-bank"], caps["town"])
+        self.assertEqual(caps["bank-a"], caps["town"])
+        small = ffs.hub_network("money", source_volume=0.0).run(1.0)
+        self.assertEqual(small["volumes_q"]["town"], 0)
+        self.assertTrue(all(link["volume_moved_q"] == 0 for link in small["links"]))
+
     def test_money_scales_with_issue_and_gold_does_not_scale_with_speed(self):
         for item in random_scales(260, 4, n_min=-1, n_max=2):
             q = item["value"]
