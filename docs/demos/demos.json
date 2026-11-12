@@ -665,6 +665,99 @@
         30.0
       ],
       "conserved": true
+    },
+    {
+      "id": "D20",
+      "scene": "money-flow",
+      "icon": "💴",
+      "fluid": "water",
+      "fill": "🟩",
+      "file": "D20_money-flow_water.gif",
+      "bytes": 13713,
+      "sha256": "9b43cdbef218fc14c186c4e50278f14dbd7ab0b3f96338a9797d378605d6941d",
+      "frames": 40,
+      "canvas": "376x160",
+      "kind": "section",
+      "columns": [
+        "central-bank",
+        "bank-a",
+        "bank-a>sec-a",
+        "sec-a",
+        "bank-b",
+        "bank-b>sec-b",
+        "sec-b",
+        "bank-c",
+        "bank-c>sec-c",
+        "sec-c",
+        "town"
+      ],
+      "t": [
+        0.5,
+        64.0
+      ],
+      "conserved": true
+    },
+    {
+      "id": "D21",
+      "scene": "gold-flow",
+      "icon": "🪙",
+      "fluid": "water",
+      "fill": "🟨",
+      "file": "D21_gold-flow_water.gif",
+      "bytes": 11153,
+      "sha256": "c9db99609696f3146b61edace54ae78ea7c4b31774477ce6a154fbc82d3107a7",
+      "frames": 40,
+      "canvas": "376x160",
+      "kind": "section",
+      "columns": [
+        "vault",
+        "bank-a",
+        "bank-a>sec-a",
+        "sec-a",
+        "bank-b",
+        "bank-b>sec-b",
+        "sec-b",
+        "bank-c",
+        "bank-c>sec-c",
+        "sec-c",
+        "town"
+      ],
+      "t": [
+        0.5,
+        64.0
+      ],
+      "conserved": true
+    },
+    {
+      "id": "D22",
+      "scene": "rare-metal",
+      "icon": "⛏️",
+      "fluid": "water",
+      "fill": "🟫",
+      "file": "D22_rare-metal_water.gif",
+      "bytes": 18732,
+      "sha256": "4b71da446a97b58d149c388dda4d63b3c5e36b3e36260d0a93107a0ead9be367",
+      "frames": 40,
+      "canvas": "376x160",
+      "kind": "section",
+      "columns": [
+        "mine",
+        "mine>refiner-a",
+        "refiner-a",
+        "maker-a",
+        "mine>refiner-b",
+        "refiner-b",
+        "maker-b",
+        "mine>refiner-c",
+        "refiner-c",
+        "maker-c",
+        "market"
+      ],
+      "t": [
+        2.0,
+        320.0
+      ],
+      "conserved": true
     }
   ]
 }

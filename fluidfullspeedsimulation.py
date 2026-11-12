@@ -2599,6 +2599,352 @@ def angel_soak(rates: dict) -> dict:
             "loss_1y": out["loss_1y"], "loss_2y": out["loss_2y"], "parts_error_q": out["res"]["parts_error_q"]}
 
 
+# --- E26〜E28 お金・金・レアメタル（💴 🪙 ⛏️ 同じ配管に、流す物だけ置き換える） ----------
+
+HUB_GROUPS = ("a", "b", "c")
+# 位置は 源 → 拠点 3 つ（それぞれ腕が 1 つ）→ 外（→ 源へ戻る）。時間の単位は日、量の単位は題材ごと（兆・t・kt）。
+# 💴 源 = 中央銀行（刷れるので底なしの水源、一定の速さで出す）/ 拠点 = メガ銀行 / 腕 = 同じグループの証券 / 外 = 市中
+# 🪙 源 = 金庫（総量が決まっている。出る量は残りに比例）ほかは 💴 と同じ
+# ⛏️ 源 = 産出国（埋蔵量が決まっている）/ 拠点 = 製錬する加工国 / 腕 = 部品にする加工国 / 外 = 市場（戻らない）
+HUB_FLOWS = {
+    "money": {"icon": "💴", "unit": "兆", "names": ("central-bank", "bank", "sec", "town"),
+              "source_volume": float(1 << 20), "issue": 0.5, "shares": (0.5, 0.25, 0.25), "tau_feed": None,
+              "delay_feed": 0.0, "tau_out": 16.0, "tau_arm": 16.0, "delay_arm": 2.0, "tau_sat": 16.0, "tau_back": 16.0,
+              "dt": 0.125},
+    "gold": {"icon": "🪙", "unit": "t", "names": ("vault", "bank", "sec", "town"),
+             "source_volume": 128.0, "issue": None, "shares": None, "tau_feed": (8.0, 16.0, 16.0),
+             "delay_feed": 0.0, "tau_out": 16.0, "tau_arm": 16.0, "delay_arm": 2.0, "tau_sat": 16.0, "tau_back": 16.0,
+             "dt": 0.125},
+    "rare-metal": {"icon": "⛏️", "unit": "kt", "names": ("mine", "refiner", "maker", "market"),
+                   "source_volume": 128.0, "issue": None, "shares": None, "tau_feed": (60.0, 120.0, 120.0),
+                   "delay_feed": 30.0, "tau_out": None, "tau_arm": 40.0, "delay_arm": 0.0, "tau_sat": 20.0,
+                   "tau_back": None, "dt": 0.25},
+}
+
+
+def hub_names(kind: str) -> dict:
+    src, hub, arm, out = HUB_FLOWS[kind]["names"]
+    return {"source": src, "hubs": [f"{hub}-{g}" for g in HUB_GROUPS], "arms": [f"{arm}-{g}" for g in HUB_GROUPS],
+            "outside": out}
+
+
+def hub_network(kind: str, *, dt: float | None = None, **over) -> Network:
+    """💴 🪙 ⛏️ の配管。源 → 拠点は issue（一定の速さ、ポンプ）か tau_feed（残りに比例、弁）。
+    拠点 → 腕（tau_arm、遅れ delay_arm）、拠点 → 外（tau_out）、腕 → 外（tau_sat）、外 → 源（tau_back）。
+    None の管は付けない。弁は 1 ステップに 1 − e^(−dt/τ) の割合（厳密離散化）。"""
+    p = {**HUB_FLOWS[kind], **over}
+    nm = hub_names(kind)
+    net = Network(dt=p["dt"] if dt is None else dt)
+    net.tank(nm["source"], 1.0, volume=p["source_volume"])
+    for hub, arm in zip(nm["hubs"], nm["arms"]):
+        net.tank(hub, 1.0).tank(arm, 1.0)
+    net.tank(nm["outside"], 1.0)
+    for i, (hub, arm) in enumerate(zip(nm["hubs"], nm["arms"])):
+        if p["issue"] is not None:
+            net.pump(nm["source"], hub, rate=p["issue"] * p["shares"][i], delay=p["delay_feed"])
+        else:
+            net.valve(nm["source"], hub, tau=p["tau_feed"][i], delay=p["delay_feed"])
+        net.valve(hub, arm, tau=p["tau_arm"], delay=p["delay_arm"])
+        if p["tau_out"] is not None:
+            net.valve(hub, nm["outside"], tau=p["tau_out"])
+        net.valve(arm, nm["outside"], tau=p["tau_sat"])
+    if p["tau_back"] is not None:
+        net.valve(nm["outside"], nm["source"], tau=p["tau_back"])
+    return net
+
+
+def hub_columns(kind: str, net: Network) -> list[str]:
+    """断面図の列: 源 ｜（遅れの管）拠点 ｜（遅れの管）腕 … ｜ 外。"""
+    nm = hub_names(kind)
+    piped = {(ln["src"], ln["dst"]) for ln in net.links if ln["delay_steps"]}
+    cols = [nm["source"]]
+    for hub, arm in zip(nm["hubs"], nm["arms"]):
+        cols += [f"{nm['source']}>{hub}"] * ((nm["source"], hub) in piped) + [hub]
+        cols += [f"{hub}>{arm}"] * ((hub, arm) in piped) + [arm]
+    return cols + [nm["outside"]]
+
+
+def hub_caps(kind: str) -> dict:
+    """断面図の縦いっぱい。🪙 ⛏️ は全部の槽を最初の総量に揃える（1 段 = 総量の 1/段数）。
+    💴 は源が底なしなので、源以外を「行き渡った後にいちばん多い槽」に揃える（源は走らせた中の最大のまま）。"""
+    p, nm = HUB_FLOWS[kind], hub_names(kind)
+    tanks = [*nm["hubs"], *nm["arms"], nm["outside"]]
+    if p["issue"] is None:
+        return dict.fromkeys([nm["source"], *tanks], p["source_volume"])
+    steady = hub_steady(kind)
+    return dict.fromkeys(tanks, max(steady[n] for n in tanks))
+
+
+def hub_steady(kind: str, *, dt: float | None = None, **over) -> dict:
+    """行き渡った後の量（閉じた式）。どの槽も「入ってくる速さ × 滞在時間」。
+
+    dt を渡すと離散の定常（弁の速さ 1/τ を (1 − e^(−dt/τ))/dt に置き換えるだけ）。
+    💴 は入ってくる速さが issue で決まる（刷った分だけ増える）。🪙 は総量 G が決まっていて、源の残り m が
+    G = m·(1 + Σ 滞在時間/τ_feed) を満たす（取り分は滞在時間の比で、速さにはよらない）。
+    """
+    p = {**HUB_FLOWS[kind], **over}
+    nm = hub_names(kind)
+
+    def rate(tau):
+        if tau is None:
+            return 0.0
+        return 1.0 / tau if dt is None else from_q(lag_gain(dt, tau)) / dt
+
+    r_arm, r_out, r_sat, r_back = (rate(p[k]) for k in ("tau_arm", "tau_out", "tau_sat", "tau_back"))
+    if r_back == 0.0:
+        raise ValueError("no steady state without a way back to the source")
+    hub_per = 1.0 / (r_arm + r_out)  # 拠点 1 つに、入る速さ 1 あたり溜まる量
+    per = {"feed_pipe": p["delay_feed"], "hub": hub_per, "arm_pipe": hub_per * r_arm * p["delay_arm"],
+           "arm": hub_per * r_arm / r_sat, "outside": 1.0 / r_back}
+    if p["issue"] is not None:
+        feeds = [p["issue"] * s for s in p["shares"]]
+        source = None
+    else:
+        r_feed = [rate(t) for t in p["tau_feed"]]
+        source = p["source_volume"] / (1.0 + sum(r_feed) * sum(per.values()))
+        feeds = [source * r for r in r_feed]
+    out = {"feeds": feeds, "cycle_time": sum(per.values()), nm["outside"]: sum(feeds) * per["outside"]}
+    if source is not None:
+        out[nm["source"]] = source
+    for f, hub, arm in zip(feeds, nm["hubs"], nm["arms"]):
+        out.update({hub: f * per["hub"], arm: f * per["arm"], f"{hub}>{arm}": f * per["arm_pipe"],
+                    f"{nm['source']}>{hub}": f * per["feed_pipe"]})
+    return out
+
+
+def bateman(rates, t: float, n0: float = 1.0) -> list[float]:
+    """1 次の段がつながった鎖（Bateman の式）。速さが全部違うとき、時刻 t に段 j にある量は
+    N_j = n0·Π_{i<j} λ_i · Σ_{i≤j} e^(−λ_i t) / Π_{l≤j, l≠i} (λ_l − λ_i)。t < 0 は 0。"""
+    out = []
+    for j in range(len(rates)):
+        if t < 0:
+            out.append(0.0)
+            continue
+        total = sum(math.exp(-rates[i] * t) / math.prod(rates[m] - rates[i] for m in range(j + 1) if m != i)
+                    for i in range(j + 1))
+        out.append(n0 * math.prod(rates[:j]) * total)
+    return out
+
+
+def bateman_peak_time(k1: float, k2: float) -> float:
+    """鎖の 2 段目が最大になる時刻 ln(k2/k1) / (k2 − k1)。"""
+    return math.log(k2 / k1) / (k2 - k1)
+
+
+def _in_transit(res: dict) -> float:
+    return from_q(res["total_q"] - sum(res["volumes_q"].values()))
+
+
+def _hub_checks(tag: str, kind: str, res: dict, dt: float, tol_exact: float, **over) -> tuple[list[dict], dict]:
+    """行き渡った後の量を、離散の定常（きつく）と連続の式（刻みの 1 次まで）に照らす。"""
+    nm = hub_names(kind)
+    p = {**HUB_FLOWS[kind], **over}
+    exact, smooth = hub_steady(kind, dt=dt, **over), hub_steady(kind, **over)
+    tau_min = min(t for t in (p["tau_arm"], p["tau_out"], p["tau_sat"], p["tau_back"]) if t)
+    names = [n for n in [nm["source"], *nm["hubs"], *nm["arms"], nm["outside"]] if n in exact]
+    got = {n: from_q(res["volumes_q"][n]) for n in names}
+    worst_exact = max(rel_err(got[n], exact[n]) for n in names)
+    worst_smooth = max(rel_err(got[n], smooth[n]) for n in names)
+    pipes = sum(v for k, v in exact.items() if ">" in k)
+    checks = [
+        check(f"{tag}steady:discrete", "🎯", worst_exact <= tol_exact, value=worst_exact, tol=tol_exact,
+              note="どの槽も 入る速さ × 滞在時間（離散の定常: 弁の速さを (1 − e^(−dt/τ))/dt に）"),
+        check(f"{tag}steady:closed-form", "📐", worst_smooth <= dt / tau_min, value=worst_smooth, tol=dt / tau_min,
+              note="連続の式（速さ 1/τ）との差は刻みの 1 次（dt/τ まで）"),
+        close(f"{tag}transit", "⏳", _in_transit(res), pipes, tol_exact, note="遅れの管の中 = 流れる速さ × 遅れ"),
+        conserved(f"{tag}conserve", res),
+    ]
+    return checks, {"got": got, "discrete": {n: exact[n] for n in names}, "closed_form": {n: smooth[n] for n in names},
+                    "in_transit": _in_transit(res), "cycle_time": smooth["cycle_time"]}
+
+
+def settlement(balance: float, *, pay: float = 1.0, back: float = 0.75, overlap: bool = False,
+               dt: float = 1.0 / 64) -> dict:
+    """🔁 銀行 a が b へ pay、b が a へ back を 1 日で払う。overlap=False は a が午前・b が午後（順番に決済）、
+    True は 1 日かけて同時（差し引き）。a の手元（balance）が足りないと、足りない分は払われない。"""
+    net = Network(dt=dt)
+    net.tank("bank-a", 1.0, volume=balance).tank("bank-b", 1.0, volume=4.0 * pay)
+    if overlap:
+        net.pump("bank-a", "bank-b", rate=pay, until=1.0)
+        net.pump("bank-b", "bank-a", rate=back, until=1.0)
+    else:
+        net.pump("bank-a", "bank-b", rate=2.0 * pay, until=0.5)
+        net.pump("bank-b", "bank-a", rate=2.0 * back, start=0.5, until=1.0)
+    return net.run(1.0, trace=["bank-a"])
+
+
+def e26_money_flow(seed: int = 26) -> dict:
+    """💴 架空の国のお金の流れ。中央銀行が一定の速さで出し、メガ銀行 → 証券（T+2 の遅れ）→ 市中 → 中央銀行へ戻る。
+    物価・金利・政策は入れない（配管だけ）。量は「出す速さ × 滞在時間」に落ち着き、出す速さに比例する。"""
+    kind, p = "money", HUB_FLOWS["money"]
+    nm = hub_names(kind)
+    dt = p["dt"]
+    net = hub_network(kind)
+    res = net.run(40 * p["tau_back"], trace=[nm["arms"][0]])
+    checks, steady = _hub_checks("", kind, res, dt, 1e-9)
+    arm_link = next(ln for ln in res["links"] if ln["src"] == nm["hubs"][0] and ln["dst"] == nm["arms"][0])
+    lag = arm_link["first_arrival"] - arm_link["first_flow"]
+    outside_cb = sum(v for k, v in steady["got"].items()) + steady["in_transit"]
+    smooth = hub_steady(kind)
+    checks += [
+        check("t+2", "📅", lag == p["delay_arm"], value=lag, expected=p["delay_arm"], tol=0,
+              note="銀行を出てから証券に届くまでちょうど 2 日（遅れの管）"),
+        close("stock", "💴", outside_cb, p["issue"] * smooth["cycle_time"], dt / 4.0,
+              note="中央銀行の外にある量 = 出す速さ × 一巡りの滞在時間（刻みの 1 次まで）"),
+    ]
+    summary = {"steady": steady, "t_plus": lag, "outside_central_bank": outside_cb}
+    for item in random_scales(seed, 3, n_min=-1, n_max=1):  # 出す速さ 0.1〜99.9 兆/日
+        q = item["value"]
+        r = hub_network(kind, issue=q).run(40 * p["tau_back"])
+        tag = f"issue={item['label']}:"
+        more, st = _hub_checks(tag, kind, r, dt, 1e-9, issue=q)
+        ratio = st["got"][nm["outside"]] / steady["got"][nm["outside"]]
+        checks += more[:1] + more[3:] + [close(f"{tag}linear", "🎲📈", ratio, q / p["issue"], 1e-9,
+                                               note="出す速さを変えると量も同じ倍率（刷った分だけ増える）")]
+    # 🔁 決済: 順番に払うなら手元は払う額だけ要る。同時（差し引き）なら 差額 + 1 ステップ分で足りる
+    pay, back, sdt = 1.0, 0.75, 1.0 / 64
+    full = settlement(pay)
+    need_net = (pay - back) + back * sdt
+    netted = settlement(need_net, overlap=True)
+    checks += [
+        check("gross:need", "🔁", full["links"][0]["volume_moved_q"] == to_q(pay) and min(full["trace"]["bank-a"]) == 0.0,
+              value=min(full["trace"]["bank-a"]), expected=0.0, tol=0,
+              note="順番に決済: 手元が払う額ちょうどなら全部払えて、途中で 0 に触れる"),
+        check("net:need", "🤝", netted["links"][0]["volume_moved_q"] == to_q(pay), value=need_net,
+              note="同時に決済: 手元は 差額 + 1 ステップ分で全部払える（順番なら払う額 1 が要る）"),
+    ]
+    for item in random_scales(seed + 1, 3, n_min=1, n_max=3):  # 足りない割合 x
+        x = item["value"]
+        short = settlement(pay * (1.0 - x))
+        paid = short["links"][0]["volume_moved_q"]
+        checks.append(check(f"short={item['label']}:unpaid", "🎲🕳️", paid == to_q(pay * (1.0 - x)),
+                            value=from_q(to_q(pay) - paid), expected=x * pay, tol=0,
+                            note="手元が足りないと、払われるのは手元の分ちょうど（残りは未決済）"))
+        checks.append(conserved(f"short={item['label']}:conserve", short))
+    summary["settlement"] = {"gross_need": pay, "net_need": need_net, "saved": pay - need_net}
+    return {"params": {"flow": p, "seed": seed}, "summary": summary, "runs": {"money": res["series"]}, "checks": checks}
+
+
+def e27_gold_flow(seed: int = 27) -> dict:
+    """🪙 同じ配管で、流す物を総量の決まった金に置き換える。源は刷れないので、出る量は金庫の残りに比例する。
+    行き渡った後の取り分は滞在時間の比だけで決まり、速く回しても総量は増えない。"""
+    kind, p = "gold", HUB_FLOWS["gold"]
+    nm = hub_names(kind)
+    dt, total = p["dt"], p["source_volume"]
+    t_end = 1024.0
+    res = hub_network(kind).run(t_end)
+    checks, steady = _hub_checks("", kind, res, dt, 1e-9)
+    held = sum(steady["got"].values()) + steady["in_transit"]
+    share = steady["closed_form"][nm["source"]] / total
+    checks += [
+        check("total", "🪙", res["total_q"] == to_q(total) and held == total, value=held, expected=total, tol=0,
+              note="槽 + 管の中の合計は最初の総量のまま（増えも減りもしない）"),
+        close("share", "⚖️", steady["got"][nm["source"]] / total, 1.0 / (1.0 + sum(1.0 / t for t in p["tau_feed"])
+                                                                         * steady["cycle_time"]), dt / 4.0,
+              note="金庫に残る割合 = 1 / (1 + Σ 一巡りの滞在時間/τ_feed)"),
+    ]
+    summary = {"steady": steady, "vault_share": share}
+    keys = ("tau_feed", "tau_out", "tau_arm", "tau_sat", "tau_back", "delay_arm")
+    for item in random_scales(seed, 3, n_min=0, n_max=0):  # 全部の時定数と遅れを c 倍（1〜9.99 倍ゆっくり）
+        c = item["value"]
+        over = {k: (tuple(c * t for t in p[k]) if isinstance(p[k], tuple) else c * p[k]) for k in keys}
+        r = hub_network(kind, **over).run(c * t_end)
+        got = {n: from_q(r["volumes_q"][n]) for n in steady["got"]}
+        worst = max(rel_err(got[n], steady["closed_form"][n]) for n in got)
+        tag = f"slow={item['label']}:"
+        checks += [
+            check(f"{tag}same-shares", "🎲⚖️", worst <= dt / 4.0, value=worst, tol=dt / 4.0,
+                  note="回る速さを変えても取り分は同じ（滞在時間の比だけで決まる）"),
+            conserved(f"{tag}conserve", r),
+        ]
+    for item in random_scales(seed + 1, 3, n_min=-2, n_max=-1):  # 外 → 金庫の時定数 10〜999 日
+        tau = item["value"]
+        r = hub_network(kind, tau_back=tau).run(max(t_end, 24 * tau))
+        more, _st = _hub_checks(f"tau_back={item['label']}:", kind, r, dt, 1e-9, tau_back=tau)
+        checks += more
+    return {"params": {"flow": p, "seed": seed}, "summary": summary, "runs": {"gold": res["series"]}, "checks": checks}
+
+
+def _metal_run(dt: float, t_end: float, **over) -> tuple[dict, dict]:
+    kind = "rare-metal"
+    nm = hub_names(kind)
+    res = hub_network(kind, dt=dt, **over).run(t_end, trace=[nm["source"], nm["hubs"][0], nm["arms"][0]])
+    return res, nm
+
+
+def e28_rare_metal(dt_list=(1.0, 0.5, 0.25), seed: int = 28) -> dict:
+    """⛏️ 産出国（埋蔵量が決まっている）→ 船 30 日 → 製錬する加工国 → 部品にする加工国 → 市場。
+    1 次の段の鎖なので Bateman の式が答え: 産出国は指数で減り、加工国の在庫は山を作ってから減る。"""
+    kind, p = "rare-metal", HUB_FLOWS["rare-metal"]
+    reserve, ship = p["source_volume"], p["delay_feed"]
+    k_feed = [1.0 / t for t in p["tau_feed"]]
+    big_k, k_arm, k_sat = sum(k_feed), 1.0 / p["tau_arm"], 1.0 / p["tau_sat"]
+    t_end = 240.0
+    checks, summary, errors = [], {}, []
+
+    def at(trace, t, dt):
+        return trace[int(round(t / dt)) - 1]
+
+    for dt in dt_list:
+        res, nm = _metal_run(dt, t_end)
+        tr = res["trace"]
+        hub, arm = tr[nm["hubs"][0]], tr[nm["arms"][0]]
+        n0 = reserve * k_feed[0] / big_k  # 加工国 a の取り分
+        s_peak = bateman_peak_time(big_k, k_arm)
+        peak_ref = bateman([big_k, k_arm], s_peak, n0)[1]
+        i_peak = max(range(len(hub)), key=hub.__getitem__)
+        errors.append(rel_err(hub[i_peak], peak_ref))
+        if dt != dt_list[-1]:
+            continue
+        mine_worst = max(rel_err(at(tr[nm["source"]], t, dt), reserve * math.exp(-big_k * t)) for t in (30.0, 60.0, 120.0))
+        maker_worst = max(rel_err(at(arm, ship + s, dt), bateman([big_k, k_arm, k_sat], s, n0)[2])
+                          for s in (20.0, 40.0, 80.0, 160.0))
+        feed = next(ln for ln in res["links"] if ln["dst"] == nm["hubs"][0])
+        afloat = reserve * (math.exp(-big_k * (t_end - ship)) - math.exp(-big_k * t_end))
+        # 弁 1 本ずつは厳密でも、同じ槽から 3 本出ると合わせた減り方は刻みの 1 次ずれる（t·dt·K²/2 まで）
+        split_tol = lambda t: t * dt * big_k * big_k / 2.0  # noqa: E731
+        checks += [
+            check("mine:exponential", "⛏️", mine_worst <= split_tol(120.0), value=mine_worst, tol=split_tol(120.0),
+                  note="産出国の残り = 埋蔵量 × e^(−Σt/τ_feed)（30・60・120 日。出口 3 本ぶん刻みの 1 次ずれる）"),
+            check("ship:arrival", "🚢", feed["first_arrival"] == ship, value=feed["first_arrival"], expected=ship, tol=0,
+                  note="最初の船が着くのはちょうど 30 日後"),
+            close("refiner:peak-time", "⛰️", (i_peak + 1) * dt, ship + s_peak, 4 * dt / (ship + s_peak),
+                  note="加工国の在庫が最大になる時刻 = 船の遅れ + ln(k2/k1)/(k2 − k1)"),
+            close("refiner:peak", "📦", hub[i_peak], peak_ref, dt / p["tau_arm"],
+                  note="そのときの在庫（Bateman の 2 段目、刻みの 1 次まで）"),
+            check("maker:bateman", "🔩", maker_worst <= dt / p["tau_sat"], value=maker_worst, tol=dt / p["tau_sat"],
+                  note="部品の加工国の在庫（Bateman の 3 段目、着いてから 20・40・80・160 日）"),
+            close("afloat", "🌊", _in_transit(res), afloat, split_tol(t_end), note="船の上にある量 = 過去 30 日に出た分"),
+            conserved("conserve", res),
+        ]
+        summary = {"peak_day": (i_peak + 1) * dt, "peak_day_closed_form": ship + s_peak, "peak": hub[i_peak],
+                   "peak_closed_form": peak_ref, "mine_left": at(tr[nm["source"]], t_end, dt),
+                   "market": from_q(res["volumes_q"][nm["outside"]]), "afloat": _in_transit(res)}
+        runs = {"rare-metal": res["series"]}
+    orders = [errors[i] / errors[i + 1] for i in range(len(errors) - 1)]
+    checks.append(check("order", "📏", all(1.6 <= r <= 2.4 for r in orders), value=orders, expected=2.0,
+                        note="刻みを半分にすると山の高さの誤差も半分（1 次）"))
+    summary["peak_errors"] = dict(zip(map(str, dt_list), errors))
+    for item in random_scales(seed, 3, n_min=-1, n_max=-1):  # 製錬の時定数 10〜99.9 日
+        tau = item["value"]
+        if abs(1.0 / tau - big_k) < 1e-3:  # 速さが重なると Bateman の式が割れる
+            continue
+        dt = dt_list[-1]
+        res, nm = _metal_run(dt, 480.0, tau_arm=tau)
+        hub = res["trace"][nm["hubs"][0]]
+        i_peak = max(range(len(hub)), key=hub.__getitem__)
+        s_peak = bateman_peak_time(big_k, 1.0 / tau)
+        ref = bateman([big_k, 1.0 / tau], s_peak, reserve * k_feed[0] / big_k)[1]
+        tag = f"tau_arm={item['label']}:"
+        checks += [
+            close(f"{tag}peak", "🎲📦", hub[i_peak], ref, dt / min(tau, 1.0 / big_k), note="山の高さ（Bateman）"),
+            close(f"{tag}peak-time", "🎲⛰️", (i_peak + 1) * dt, ship + s_peak, 8 * dt / (ship + s_peak), note="山の時刻"),
+            conserved(f"{tag}conserve", res),
+        ]
+    return {"params": {"flow": p, "dt_list": list(dt_list), "seed": seed}, "summary": summary, "runs": runs,
+            "checks": checks}
+
+
 # --- 登録簿 ---------------------------------------------------------------
 
 EXPERIMENTS = {
@@ -2628,6 +2974,10 @@ EXPERIMENTS = {
             e23_inertia_limits),
     "E24": ("distillation", "⚗️", "ワインの蒸留（Rayleigh 式・共沸点・コニャック式の 2 回蒸留）", e24_distillation),
     "E25": ("angels-share", "👼", "天使の取り分（湿度で度数の上下が入れ替わる・40 % を切る年数）", e25_angels_share),
+    "E26": ("money-flow", "💴", "お金の流れ（中央銀行 → メガ銀行 → 証券 → 市中: 量 = 出す速さ × 滞在時間・T+2・決済の手元）",
+            e26_money_flow),
+    "E27": ("gold-flow", "🪙", "金に置き換える（総量が決まっている: 取り分は滞在時間の比、速く回しても増えない）", e27_gold_flow),
+    "E28": ("rare-metal", "⛏️", "レアメタル（産出国 → 船 → 加工国 → 市場: Bateman の鎖、在庫の山の時刻と高さ）", e28_rare_metal),
 }
 SLUGS = {slug: eid for eid, (slug, *_rest) in EXPERIMENTS.items()}
 
@@ -2684,7 +3034,7 @@ SCENE_ICONS = {"🏛": "moniac-rig", "🥢": "somen-flume", "🎋": "flume", "�
                "🕳": "moniac-drain", "🧊": "cold-water", "🪵": "bamboo-wear", "🍜": "noodle-length",
                "🧱": "noodle-clog", "🍽": "chopsticks", "🌧": "rain-runoff", "🎍": "shishi-odoshi",
                "🍷": "pythagorean-cup", "🫗": "mariotte", "🏺": "water-clock", "🚧": "inertia-limits",
-               "⚗": "distillation", "👼": "angels-share"}
+               "⚗": "distillation", "👼": "angels-share", "💴": "money-flow", "🪙": "gold-flow", "⛏": "rare-metal"}
 
 
 def fluid_arg(text: str) -> str:
@@ -2693,7 +3043,7 @@ def fluid_arg(text: str) -> str:
 
 
 def scene_arg(text: str) -> str:
-    """draw の場面: 名前でも 🏛️ 🥢 🎋 🫙 🌊 🕳️ 🧊 🪵 🍜 🧱 🍽️ 🌧️ 🎍 🍷 🫗 🏺 🚧 ⚗️ 👼 でもよい。"""
+    """draw の場面: 名前でも 🏛️ 🥢 🎋 🫙 🌊 🕳️ 🧊 🪵 🍜 🧱 🍽️ 🌧️ 🎍 🍷 🫗 🏺 🚧 ⚗️ 👼 💴 🪙 ⛏️ でもよい。"""
     return SCENE_ICONS.get(_plain(text), text)
 
 
@@ -2853,6 +3203,12 @@ def rig_section(scene: str, fluid: str = "water", temp_c: float | None = None, m
         for row in res["series"]:
             row["t"] = round(row["t"] / YEAR, 6)  # ⏱️ は年で出す
         return res, list(CLIMATES)
+    if scene in HUB_SCENES:  # 💴 🪙 ⛏️ 同じ配管に流す物を置き換えた 3 つ（⏱️ は日）
+        kind, days, every = HUB_SCENES[scene]
+        net = hub_network(kind)
+        res = net.run(days, sample_every=every)
+        res["caps"] = hub_caps(kind)  # 縦いっぱいを槽どうしで揃える（どこにどれだけあるかを比べられる）
+        return res, hub_columns(kind, net)
     raise KeyError(f"unknown rig scene {scene!r}")
 
 
@@ -2861,9 +3217,10 @@ def _from(res: dict, t0: float) -> dict:
     return {**res, "series": [row for row in res["series"] if row["t"] >= t0]}
 
 
+HUB_SCENES = {"money-flow": ("money", 64.0, 4), "gold-flow": ("gold", 64.0, 4), "rare-metal": ("rare-metal", 320.0, 8)}
 RIG_SCENES = ("moniac-rig", "somen-flume", "noodle-length", "noodle-clog", "chopsticks", "cold-water",
               "bamboo-wear", "rain-runoff", "shishi-odoshi", "pythagorean-cup", "mariotte", "water-clock",
-              "inertia-limits", "distillation", "angels-share")
+              "inertia-limits", "distillation", "angels-share", *HUB_SCENES)
 
 
 def _visc(args) -> dict:
@@ -2931,9 +3288,10 @@ DEMOS = (("moniac-rig", "water", None), ("moniac-drain", "water", None), ("flume
          ("bamboo-wear", "water", None), ("rain-runoff", "water", None), ("shishi-odoshi", "water", None),
          ("pythagorean-cup", "poison-water", None), ("mariotte", "water", None), ("water-clock", "water", None),
          ("dam-break", "namekian-water", None), ("inertia-limits", "water", None), ("distillation", "water", "🟨"),
-         ("angels-share", "water", "🟧"))
+         ("angels-share", "water", "🟧"), ("money-flow", "water", "🟩"), ("gold-flow", "water", "🟨"),
+         ("rare-metal", "water", "🟫"))
 DEMOS_SCHEMA = "fluidfullspeedsimulation-demos/1"
-_NEEDS_VS16 = set("🏛🕳🍽🌧⚗")  # 絵文字で出すには U+FE0F が要るもの
+_NEEDS_VS16 = set("🏛🕳🍽🌧⚗⛏")  # 絵文字で出すには U+FE0F が要るもの
 
 
 def scene_icon(scene: str) -> str:

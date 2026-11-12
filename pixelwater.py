@@ -749,7 +749,7 @@ def network_frames(res: dict, columns, *, frames: int | None = 6, rows: int = SE
     times = [row["t"] for row in series]
     depths = [[None if kind == "pipe" else row[f"h:{ref[0]}"][ref[1]] if kind == "cell" else row[f"h:{ref}"]
                for kind, _n, ref in cols] for row in series]
-    cap = _caps(res, cols, depths, cap_mode, caps)
+    cap = _caps(res, cols, depths, cap_mode, caps or res.get("caps"))  # 結果が縦いっぱいを持っていればそれを使う
     counts = [[0 if d is None else blocks(d, cap[c], rows) for c, d in enumerate(line)] for line in depths]
     worst = 0.0
     for line, cnt in zip(depths, counts):
