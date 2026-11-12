@@ -10,7 +10,9 @@ import unittest
 import fluidfullspeedsimulation as ffs
 from fixedq import random_scales
 
-GOLDEN = {"h:header": 0.300750625, "h:side": 0.135225125, "h:store": 0.200107155, "h:sump": 0.191188099}
+# 入る量を「一定の速さで入る」と見なす既定（inflows="uniform"）での値。頭の槽は閉じた式 Q·τ/(A·Σo) = 0.3 と一致する。
+# 入った量をステップの終わりに足す扱い（inflows="end"）では 0.300750625・0.135225125・0.200107155・0.191188099 だった
+GOLDEN = {"h:header": 0.3, "h:side": 0.135000562, "h:store": 0.200026964, "h:sump": 0.191199455}
 
 
 class MoniacRig(unittest.TestCase):

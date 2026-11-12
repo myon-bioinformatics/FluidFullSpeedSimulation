@@ -326,7 +326,7 @@ def _law_mariotte(net, ln, n):
 class Network:
     def __init__(self, dt: float, fluid: str = "water", g: float = G, temp_c: float | None = None,
                  mu: float | None = None, mu_scale: float | None = None, species=None, volume_of=None,
-                 outlets: str = "exact", inflows: str = "end"):
+                 outlets: str = "exact", inflows: str = "uniform"):
         """species を渡すと成分モード（🍷）: 各水槽が成分ごとの量（Q 整数、単位は法則に任せる。蒸留ではモル）を持ち、
         v はその合計。普通の法則が返す量は、出す側の成分の比で整数のまま分ける。成分ごとの量を返す法則
         （boil・evaporate）もある。volume_of(parts) は水位（断面一定の水槽）に使う体積 [m³]。"""
@@ -1308,7 +1308,7 @@ def build(spec: dict) -> Network:
         volume_of = lambda p: mix_volume(p["ethanol"], p["water"])
     net = Network(spec.get("dt", 0.1), spec.get("fluid", "water"), temp_c=spec.get("temp_c"), mu=spec.get("mu"),
                   mu_scale=spec.get("mu_scale"), species=species, volume_of=volume_of,
-                  outlets=spec.get("outlets", "exact"), inflows=spec.get("inflows", "end"))
+                  outlets=spec.get("outlets", "exact"), inflows=spec.get("inflows", "uniform"))
     for t in spec.get("tanks", []):
         net.tank(**t)
     for c in spec.get("channels", []):
