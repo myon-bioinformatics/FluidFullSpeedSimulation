@@ -44,7 +44,8 @@ class SectionImages(unittest.TestCase):
         delays = [int.from_bytes(data[m.start() + 4:m.start() + 6], "little")
                   for m in re.finditer(rb"\x21\xf9\x04", data)]
         self.assertEqual(delays, pw._section_delays(len(self.view["frames"])))
-        self.assertEqual((delays[0], delays[1], delays[-1]), pw.SECTION_DELAYS)
+        self.assertEqual((delays[0], delays[1], delays[-1]), (pw.SECTION_DELAYS[0], 240 // 12, pw.SECTION_DELAYS[2]))
+        self.assertEqual(tuple(pw._section_delays(40)[i] for i in (0, 1, -1)), pw.SECTION_DELAYS)
 
     def test_layout_is_tiles_of_eight(self):
         lay = pw.section_layout(self.view)

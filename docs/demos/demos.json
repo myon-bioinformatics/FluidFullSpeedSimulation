@@ -758,6 +758,30 @@
         320.0
       ],
       "conserved": true
+    },
+    {
+      "id": "D23",
+      "scene": "outlet-count",
+      "icon": "🚿",
+      "fluid": "water",
+      "fill": null,
+      "file": "D23_outlet-count_water.gif",
+      "bytes": 3415,
+      "sha256": "5afc3305141be2801cedb54df6501844afc388a6f30cafc3b660fd59be6eb435",
+      "frames": 8,
+      "canvas": "168x160",
+      "kind": "section",
+      "columns": [
+        "pool-1",
+        "pool-2",
+        "pool-3",
+        "pool-4"
+      ],
+      "t": [
+        4.0,
+        32.0
+      ],
+      "conserved": true
     }
   ]
 }

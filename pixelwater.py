@@ -962,6 +962,7 @@ def section_pixels(view: dict, frame: int = -1, *, scale: int = SECTION_SCALE, g
 
 def _section_delays(n: int, delays=SECTION_DELAYS) -> list[int]:
     first, mid, last = delays
+    mid = max(mid, 240 // max(n, 1))  # 時刻が少ない GIF は 1 枚を長く（途中が全部で 2.4 秒より短くならない）
     out = [mid] * n
     if n:
         out[0], out[-1] = first, last

@@ -2945,6 +2945,101 @@ def e28_rare_metal(dt_list=(1.0, 0.5, 0.25), seed: int = 28) -> dict:
             "checks": checks}
 
 
+# --- E29 出口の数（🚿 同じ槽から弁が n 本出ると、合わせた減り方が刻みの 1 次ずれる） ----------
+
+OUTLETS = {"volume": 128.0, "tau": 30.0, "dt": 0.25, "t_end": 120.0, "counts": (1, 2, 3, 4, 8)}
+OUTLET_SCENE = {"tau": 8.0, "dt": 4.0, "t_end": 32.0, "counts": (1, 2, 4, 8)}  # 刻みをわざと粗くして、ずれを見える大きさに
+
+
+def outlet_factor(rates, dt: float) -> float:
+    """弁が何本か出ている槽の、1 ステップ後に残る割合 1 − Σ(1 − e^(−k_i·dt))。
+    どの弁もステップの最初の量を見て取るので、合わせると e^(−Σk_i·dt) より少し多く取る。"""
+    return 1.0 - sum(1.0 - math.exp(-k * dt) for k in rates)
+
+
+def outlet_error(rates, dt: float, t: float) -> float:
+    """時刻 t の残りが厳密な e^(−Σk·t) から外れる割合の、刻みの 1 次の見積もり −t·dt·(K² − Σk_i²)/2。
+    合計の速さ K を n 等分すると K² − Σk_i² = K²·(1 − 1/n)。1 本なら 0、本数を増やすと頭打ち。"""
+    big_k = sum(rates)
+    return -t * dt * (big_k * big_k - sum(k * k for k in rates)) / 2.0
+
+
+def outlet_network(shares_list, *, tau: float, dt: float, volume: float = OUTLETS["volume"],
+                   pump: bool = False) -> Network:
+    """槽 pool-1, pool-2, … を並べ、それぞれ shares（合計 1）の割合で出口を付ける。合計の時定数はどれも tau。
+    pump=True は弁の代わりに、一定の速さ volume/tau·share のポンプ（残りによらない）。"""
+    net = Network(dt=dt)
+    for i, shares in enumerate(shares_list, 1):
+        net.tank(f"pool-{i}", 1.0, volume=volume)
+        for j, share in enumerate(shares, 1):
+            net.tank(f"out-{i}-{j}", 1.0)
+            if pump:
+                net.pump(f"pool-{i}", f"out-{i}-{j}", rate=volume / tau * share)
+            else:
+                net.valve(f"pool-{i}", f"out-{i}-{j}", tau=tau / share)
+    return net
+
+
+def e29_outlet_count(seed: int = 29) -> dict:
+    """🚿 出口の数。弁 1 本ずつは厳密でも、同じ槽から n 本出ると合わせた減り方は刻みの 1 次ずれる（速く空く）。
+    ずれは (1 − 1/n) に比例して頭打ち、刻みを半分にすると半分。一定量で出すポンプは何本でもずれない。"""
+    p = OUTLETS
+    vol, tau, dt, t_end = p["volume"], p["tau"], p["dt"], p["t_end"]
+    equal = [[1.0 / n] * n for n in p["counts"]]
+    checks, errors = [], {}
+    res = outlet_network(equal, tau=tau, dt=dt).run(t_end)
+    exact = vol * math.exp(-t_end / tau)
+    steps = int(round(t_end / dt))
+    for i, (n, shares) in enumerate(zip(p["counts"], equal), 1):
+        got = from_q(res["volumes_q"][f"pool-{i}"])
+        rates = [s / tau for s in shares]
+        errors[n] = got / exact - 1.0
+        checks.append(close(f"n={n}:discrete", "🎯", got, vol * outlet_factor(rates, dt) ** steps, 1e-9,
+                            note="残り = 最初の量 × (1 − Σ(1 − e^(−k_i·dt)))^ステップ数"))
+        if n == 1:
+            checks.append(check("n=1:exact", "1️⃣", abs(errors[n]) <= 1e-9, value=errors[n], expected=0.0, tol=1e-9,
+                                note="出口が 1 本なら厳密（e^(−t/τ) どおり）"))
+        else:
+            checks.append(close(f"n={n}:first-order", "📐", errors[n], outlet_error(rates, dt, t_end), 0.02,
+                                note="ずれ = −t·dt·K²·(1 − 1/n)/2（速く空く側）"))
+            checks.append(close(f"n={n}:ratio", "🚿", errors[n] / errors[2], (1.0 - 1.0 / n) / 0.5, 0.01,
+                                note="2 本のときとの比 = (1 − 1/n)/(1/2)"))
+    checks.append(conserved("conserve", res))
+    half = outlet_network(equal, tau=tau, dt=dt / 2).run(t_end)
+    order = {n: errors[n] / (from_q(half["volumes_q"][f"pool-{i}"]) / exact - 1.0)
+             for i, n in enumerate(p["counts"], 1) if n > 1}
+    checks.append(check("order", "📏", all(1.9 <= r <= 2.1 for r in order.values()), value=list(order.values()),
+                        expected=2.0, note="刻みを半分にするとずれも半分（1 次）"))
+    limit = -t_end * dt / (2.0 * tau * tau)
+    checks.append(check("ceiling", "🧢", all(limit * 1.02 <= e <= 0.0 for e in errors.values()), value=min(errors.values()),
+                        expected=limit, note="何本に増やしても −t·dt·K²/2 は超えない（頭打ち）"))
+    # 🎲 等分でない出口: 効くのは本数そのものではなく K² − Σk_i²（1 本に偏るほど小さい）
+    for item in random_scales(seed, 3, n_min=1, n_max=2):  # 1 本目の割合 0.01〜0.999
+        a = item["value"]
+        shares = [a, (1.0 - a) / 2.0, (1.0 - a) / 2.0]
+        r = outlet_network([shares], tau=tau, dt=dt).run(t_end)
+        got = from_q(r["volumes_q"]["pool-1"]) / exact - 1.0
+        rates = [s / tau for s in shares]
+        tag = f"share={item['label']}:"
+        checks += [close(f"{tag}first-order", "🎲📐", got, outlet_error(rates, dt, t_end), 0.02,
+                         note="等分でなくても −t·dt·(K² − Σk_i²)/2"),
+                   conserved(f"{tag}conserve", r)]
+    # 💴 一定量で出すポンプ: 取る量が残りによらないので、何本に分けても同じ（槽が足りているあいだ）
+    pumped = outlet_network(equal, tau=tau, dt=dt, pump=True).run(tau / 2.0)
+    left = [pumped["volumes_q"][f"pool-{i}"] for i in range(1, len(equal) + 1)]
+    spread = max(left) - min(left)
+    checks += [
+        check("pump:same", "💴", spread <= max(p["counts"]) * steps, value=spread, expected=0, tol=max(p["counts"]) * steps,
+              note="ポンプは何本でも残りが同じ（差は切り捨ての ulp だけ）"),
+        close("pump:half", "⏱️", from_q(left[0]), vol / 2.0, 1e-12, note="τ/2 でちょうど半分（速さ = 最初の量/τ）"),
+        conserved("pump:conserve", pumped),
+    ]
+    summary = {"errors": {str(n): e for n, e in errors.items()}, "ceiling": limit,
+               "tau_effective": {str(n): -dt / math.log(outlet_factor([1.0 / (n * tau)] * n, dt)) for n in p["counts"]},
+               "order": {str(n): r for n, r in order.items()}}
+    return {"params": {"outlets": p, "seed": seed}, "summary": summary, "runs": {"outlets": res["series"]}, "checks": checks}
+
+
 # --- 登録簿 ---------------------------------------------------------------
 
 EXPERIMENTS = {
@@ -2978,6 +3073,8 @@ EXPERIMENTS = {
             e26_money_flow),
     "E27": ("gold-flow", "🪙", "金に置き換える（総量が決まっている: 取り分は滞在時間の比、速く回しても増えない）", e27_gold_flow),
     "E28": ("rare-metal", "⛏️", "レアメタル（産出国 → 船 → 加工国 → 市場: Bateman の鎖、在庫の山の時刻と高さ）", e28_rare_metal),
+    "E29": ("outlet-count", "🚿", "出口の数（弁が n 本だと合わせた減り方が刻みの 1 次ずれる: (1 − 1/n) に比例して頭打ち、ポンプはずれない）",
+            e29_outlet_count),
 }
 SLUGS = {slug: eid for eid, (slug, *_rest) in EXPERIMENTS.items()}
 
@@ -3034,7 +3131,8 @@ SCENE_ICONS = {"🏛": "moniac-rig", "🥢": "somen-flume", "🎋": "flume", "�
                "🕳": "moniac-drain", "🧊": "cold-water", "🪵": "bamboo-wear", "🍜": "noodle-length",
                "🧱": "noodle-clog", "🍽": "chopsticks", "🌧": "rain-runoff", "🎍": "shishi-odoshi",
                "🍷": "pythagorean-cup", "🫗": "mariotte", "🏺": "water-clock", "🚧": "inertia-limits",
-               "⚗": "distillation", "👼": "angels-share", "💴": "money-flow", "🪙": "gold-flow", "⛏": "rare-metal"}
+               "⚗": "distillation", "👼": "angels-share", "💴": "money-flow", "🪙": "gold-flow", "⛏": "rare-metal",
+               "🚿": "outlet-count"}
 
 
 def fluid_arg(text: str) -> str:
@@ -3043,7 +3141,7 @@ def fluid_arg(text: str) -> str:
 
 
 def scene_arg(text: str) -> str:
-    """draw の場面: 名前でも 🏛️ 🥢 🎋 🫙 🌊 🕳️ 🧊 🪵 🍜 🧱 🍽️ 🌧️ 🎍 🍷 🫗 🏺 🚧 ⚗️ 👼 💴 🪙 ⛏️ でもよい。"""
+    """draw の場面: 名前でも 🏛️ 🥢 🎋 🫙 🌊 🕳️ 🧊 🪵 🍜 🧱 🍽️ 🌧️ 🎍 🍷 🫗 🏺 🚧 ⚗️ 👼 💴 🪙 ⛏️ 🚿 でもよい。"""
     return SCENE_ICONS.get(_plain(text), text)
 
 
@@ -3209,6 +3307,13 @@ def rig_section(scene: str, fluid: str = "water", temp_c: float | None = None, m
         res = net.run(days, sample_every=every)
         res["caps"] = hub_caps(kind)  # 縦いっぱいを槽どうしで揃える（どこにどれだけあるかを比べられる）
         return res, hub_columns(kind, net)
+    if scene == "outlet-count":  # 🚿 出口 1・2・4・8 本の槽を並べる（1 本が厳密。刻みを粗くしてずれを見せる）
+        o = OUTLET_SCENE
+        net = outlet_network([[1.0 / n] * n for n in o["counts"]], tau=o["tau"], dt=o["dt"])
+        res = net.run(o["t_end"], sample_every=1)
+        cols = [f"pool-{i}" for i in range(1, len(o["counts"]) + 1)]
+        res["caps"] = dict.fromkeys(cols, OUTLETS["volume"])
+        return res, cols
     raise KeyError(f"unknown rig scene {scene!r}")
 
 
@@ -3220,7 +3325,7 @@ def _from(res: dict, t0: float) -> dict:
 HUB_SCENES = {"money-flow": ("money", 64.0, 4), "gold-flow": ("gold", 64.0, 4), "rare-metal": ("rare-metal", 320.0, 8)}
 RIG_SCENES = ("moniac-rig", "somen-flume", "noodle-length", "noodle-clog", "chopsticks", "cold-water",
               "bamboo-wear", "rain-runoff", "shishi-odoshi", "pythagorean-cup", "mariotte", "water-clock",
-              "inertia-limits", "distillation", "angels-share", *HUB_SCENES)
+              "inertia-limits", "distillation", "angels-share", *HUB_SCENES, "outlet-count")
 
 
 def _visc(args) -> dict:
@@ -3289,7 +3394,7 @@ DEMOS = (("moniac-rig", "water", None), ("moniac-drain", "water", None), ("flume
          ("pythagorean-cup", "poison-water", None), ("mariotte", "water", None), ("water-clock", "water", None),
          ("dam-break", "namekian-water", None), ("inertia-limits", "water", None), ("distillation", "water", "🟨"),
          ("angels-share", "water", "🟧"), ("money-flow", "water", "🟩"), ("gold-flow", "water", "🟨"),
-         ("rare-metal", "water", "🟫"))
+         ("rare-metal", "water", "🟫"), ("outlet-count", "water", None))
 DEMOS_SCHEMA = "fluidfullspeedsimulation-demos/1"
 _NEEDS_VS16 = set("🏛🕳🍽🌧⚗⛏")  # 絵文字で出すには U+FE0F が要るもの
 

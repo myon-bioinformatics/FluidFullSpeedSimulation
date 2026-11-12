@@ -9,7 +9,7 @@ from fixedq import from_q, random_scales, to_q
 
 class Experiments(unittest.TestCase):
     def test_all_checks_pass(self):
-        for eid in ("E26", "E27", "E28"):
+        for eid in ("E26", "E27", "E28", "E29"):
             slug, _icon, _title, fn = ffs.EXPERIMENTS[eid]
             with self.subTest(experiment=slug):
                 bad = [c["id"] for c in fn()["checks"] if not c["ok"]]
@@ -92,6 +92,39 @@ class Plumbing(unittest.TestCase):
         self.assertEqual(res["links"][0]["volume_moved_q"], to_q(1.0))
         res = ffs.settlement(0.25, overlap=True)  # 1 ステップ分が無いと払い切れない
         self.assertLess(res["links"][0]["volume_moved_q"], to_q(1.0))
+
+
+class Outlets(unittest.TestCase):
+    def test_one_outlet_is_exact_and_more_outlets_drain_faster(self):
+        for item in random_scales(290, 4, n_min=0, n_max=2):  # dt/τ = 0.001〜9.99 … 粗い刻みは 0.5 まで
+            ratio = min(item["value"], 0.5)
+            with self.subTest(dt_over_tau=item["label"]):
+                factors = [ffs.outlet_factor([1.0 / n] * n, ratio) for n in (1, 2, 4, 8, 64)]
+                self.assertAlmostEqual(factors[0], math.exp(-ratio), places=15)
+                self.assertEqual(factors, sorted(factors, reverse=True))
+                self.assertGreater(factors[-1], 1.0 - ratio)  # n → ∞ でも 1 − K·dt（前進オイラー）より下には行かない
+
+    def test_engine_matches_the_factor_for_uneven_outlets(self):
+        for item in random_scales(291, 3, n_min=1, n_max=2):
+            a = item["value"]
+            shares = [a, 0.75 * (1.0 - a), 0.25 * (1.0 - a)]
+            res = ffs.outlet_network([shares], tau=30.0, dt=0.5).run(60.0)
+            want = 128.0 * ffs.outlet_factor([s / 30.0 for s in shares], 0.5) ** 120
+            with self.subTest(share=item["label"]):
+                self.assertAlmostEqual(from_q(res["volumes_q"]["pool-1"]), want, places=8)
+                self.assertEqual(res["conservation_error_q"], 0)
+
+    def test_scene_is_a_staircase(self):
+        res, cols = ffs.rig_section("outlet-count")
+        view = pw.network_frames(res, cols, frames=None, rows=16)
+        self.assertEqual(ffs.scene_arg("🚿"), "outlet-count")
+        for fr in view["frames"]:
+            self.assertEqual(fr["counts"], sorted(fr["counts"], reverse=True))
+        self.assertGreater(view["frames"][1]["counts"][0], view["frames"][1]["counts"][-1])
+
+    def test_short_gifs_play_slower(self):
+        self.assertEqual(pw._section_delays(40), [80] + [10] * 38 + [200])
+        self.assertEqual(pw._section_delays(8), [80] + [30] * 6 + [200])
 
 
 class Scenes(unittest.TestCase):
