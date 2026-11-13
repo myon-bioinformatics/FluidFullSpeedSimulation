@@ -893,7 +893,8 @@ class Network:
         少し多い（n 本なら刻みの 1 次、(1 − 1/n) に比例して速く空く）。ここで弁の合計を (V + P/L)·Φ − P に置き直す:
         L = K·dt = Σ 開き具合_i·dt/τ_i、Φ = 1 − e^(−L)、P = このステップのポンプの量（q·dt）。ポンプは P のまま。
         弁どうしは速さ（開き具合/τ）の比で分け、端数は最後の弁へ（合計は整数で一致）。
-        弁が 1 本でポンプも無い槽は法則のまま（元から厳密）。槽ごとに tank(outlets=...) で切り替えられる。
+        全開の弁が 1 本でポンプも無い槽は法則のまま（元から厳密）。開き具合が 1 でない弁 1 本の槽は、法則（V·k·開き具合）だと
+        刻みの 1 次ずれるので、ここで V·(1 − e^(−開き具合·dt/τ)) に置き直す。槽ごとに tank(outlets=...) で切り替えられる。
         槽と槽のあいだ（上の槽から入る量を同じステップの中で知らない）のずれは、ここでは直らない。
         """
         for src, idx in self._by_src().items():
@@ -904,8 +905,8 @@ class Network:
                 continue
             valves = [i for i in idx if self.links[i]["kind"] == "valve" and req[i] > 0]
             pumped = sum(req[i] for i in idx if self.links[i]["kind"] == "pump")
-            if not valves or (len(valves) == 1 and not pumped):
-                continue
+            if not valves or (len(valves) == 1 and not pumped and self.links[valves[0]]["last_opening"] >= ONE):
+                continue  # 全開の弁 1 本だけなら法則のままで厳密。開き具合が 1 でなければ、下で 1 − e^(−開き具合·dt/τ) に置き直す
             # 速さ × dt = 開き具合 × dt/τ（dt/τ = −ln(1 − k)。k は弁を作ったときの厳密離散化ゲイン）
             weights = [from_q(self.links[i]["last_opening"]) * -math.log1p(-from_q(self.links[i]["k"])) for i in valves]
             scale = sum(weights)

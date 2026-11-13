@@ -408,3 +408,25 @@ def test_carry64_follows_a_moving_valve():
         net.step(n)
         seen.add(net._carry_tank("a", net._by_src()["a"])[1])  # Φ は開き具合が変わるたびに出し直される
     assert net.total_q() == start and len(seen) > 32
+
+
+def test_single_partly_open_valve_is_exact_by_default():
+    """🚿 開き具合が 1 でない弁 1 本の槽: 既定（槽ごとに厳密）は V0·e^(−開き具合·t/τ) と合う。法則のまま（independent）は刻みの 1 次ずれる。"""
+    import math
+
+    from fixedq import ONE
+    from network import Network
+
+    got = {}
+    for mode in ("exact", "independent"):
+        net = Network(dt=4.0, outlets=mode)
+        net.tank("a", 1.0, volume=128.0)
+        net.tank("sink", 1.0)
+        net.valve("a", "sink", tau=32.0, opening=0.5)
+        start = net.total_q()
+        for n in range(16):  # t = 2τ
+            net.step(n)
+        assert net.total_q() == start
+        got[mode] = net.nodes["a"]["v"] / ONE / (128.0 * math.exp(-1.0)) - 1.0
+    assert abs(got["exact"]) < 1e-12
+    assert 0.03 < got["independent"] < 0.033  # 開き具合·(1 − 開き具合)·t·dt/(2τ²) = 1/32 のあたり
