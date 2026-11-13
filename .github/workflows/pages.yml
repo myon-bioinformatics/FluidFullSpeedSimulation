@@ -10,11 +10,13 @@ on:
     paths:
       - "docs/guide.page.json"
       - "docs/demos/**"
+      - "assets/brand/**"
       - ".github/workflows/pages.yml"
   pull_request:
     paths:
       - "docs/guide.page.json"
       - "docs/demos/**"
+      - "assets/brand/**"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -45,6 +47,8 @@ jobs:
           mkdir -p _site
           uv run --no-project --with "$WEB_UI" python -m web_ui --page docs/guide.page.json > _site/index.html
           mkdir -p _site/demos && cp docs/demos/*.gif _site/demos/
+          mkdir -p _site/assets/brand && cp assets/brand/favicon.png assets/brand/favicon-32.png assets/brand/favicon-16.png assets/brand/favicon.ico assets/brand/icon.png assets/brand/concept-diagram.png _site/assets/brand/
+          cp assets/brand/favicon.ico _site/favicon.ico
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         if: github.ref == 'refs/heads/main'
         with:

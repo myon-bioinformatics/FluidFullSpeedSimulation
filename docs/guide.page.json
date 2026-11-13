@@ -3,6 +3,7 @@
   "title": "🌊 FFSS 利用ガイド",
   "theme": "auto",
   "description": "FluidFullSpeedSimulation — 水・エタノール・メタノールなどの作動流体で、流れ・遅れ・検証を整数演算で回すシミュレーター。",
+  "favicon": "./assets/brand/favicon.png",
   "blocks": [
     {
       "type": "badges",

@@ -1,5 +1,9 @@
 # 🌊 FluidFullSpeedSimulation
 
+<p align="center">
+  <img src="assets/brand/icon.png" width="128" height="128" alt="FluidFullSpeedSimulation のアイコン。竹の樋に水とそうめんが流れ、箸で麺を取っている。" />
+</p>
+
 📘 [利用ガイド / Usage guide](https://myon-bioinformatics.github.io/FluidFullSpeedSimulation/) (GitHub Pages)
 
 💧 水・🍶 エタノール・🧴 メタノールなどの作動流体で、**流れ・遅れ・検証**を整数演算で回すシミュレーター。
@@ -8,6 +12,12 @@
 - 🎋 部品の組み合わせで、流しそうめんの台のような別の題材にも広げられる汎用の回路にしている
 - 🧮 量はすべて Q 整数（固定小数点）。移した量をそのまま足し引きするので、総量は 1 ulp も変わらない
 - 🟦 見せ方は絵文字のブロックを積む断面図（行 = 高さ、列 = 区間・水槽）。溜まる・流れる・遅れるがそのまま見える
+
+## 🧭 概念図
+
+[![FluidFullSpeedSimulation の概念図。作動流体、共通の流路、そうめん・水時計・蒸留・MONIAC などの実験群、Q 整数シミュレーションエンジン。](assets/brand/concept-diagram.png)](assets/brand/concept-diagram.png)
+
+クリックで拡大できます。切り出したアイコン・ファビコン・概念図は [assets/brand/](assets/brand/) に分けて置いてあります。
 
 ## 🎞️ デモ（場面ごとに GIF 1 枚）
 
