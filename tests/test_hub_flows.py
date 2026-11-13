@@ -282,3 +282,86 @@ class Scenes(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --- 🧮 丸め方 carry64（係数を 2^-64 刻みにして、切り捨ての残りを繰り越す） ---------------------
+def _hp_two_stage(dt: float, tau1: float, tau2: float, steps: int, v0: float):
+    """2 段の槽（uniform）を 60 桁の小数で進めた、下の槽の量。"""
+    from decimal import Decimal, localcontext
+
+    with localcontext() as ctx:
+        ctx.prec = 60
+        x1, x2 = Decimal(dt) / Decimal(tau1), Decimal(dt) / Decimal(tau2)
+        g1, g2 = 1 - (-x1).exp(), 1 - (-x2).exp()
+        through = 1 - g2 / x2
+        a, b = Decimal(v0), Decimal(0)
+        for _ in range(steps):
+            out = a * g1
+            a, b = a - out, b + out - (b * g2 + out * through)
+        return b
+
+
+def _two_stage(rounding: str, dt: float, v0: float, steps: int):
+    from network import Network
+
+    net = Network(dt=dt, rounding=rounding)
+    net.tank("a", 1.0, volume=v0)
+    net.tank("b", 1.0)
+    net.tank("sink", 1.0)
+    net.valve("a", "b", tau=32.0)
+    net.valve("b", "sink", tau=19.2)
+    start = net.total_q()
+    for n in range(steps):
+        net.step(n)
+    return net, start
+
+
+def test_exp_neg_q_matches_decimal():
+    from decimal import Decimal, localcontext
+    from fractions import Fraction
+
+    from fixedq import exp_neg_q
+
+    for x in (Fraction(1, 512), Fraction(5, 96), Fraction(3, 4), Fraction(7, 2), Fraction(40), Fraction(0)):
+        with localcontext() as ctx:
+            ctx.prec = 60
+            want = (-(Decimal(x.numerator) / Decimal(x.denominator))).exp() * (1 << 64)
+            assert abs(exp_neg_q(x, 64) - want) <= Decimal("0.5000001")
+
+
+def test_carry64_keeps_total_and_stays_within_a_few_ulps():
+    from fixedq import ONE
+
+    dt, steps = 0.25, 384
+    worst = {}
+    for rounding in ("q48", "carry64"):
+        for v0 in (128.0, 2.0 ** -12):
+            net, start = _two_stage(rounding, dt, v0, steps)
+            assert net.total_q() == start  # 総量は 1 ulp も変わらない
+            ulps = abs(net.nodes["b"]["v"] - _hp_two_stage(dt, 32.0, 19.2, steps, v0) * ONE)
+            worst[rounding] = max(worst.get(rounding, 0), ulps)
+    assert worst["carry64"] <= 4
+    assert worst["q48"] > worst["carry64"]
+
+
+def test_carry64_only_touches_valve_only_tanks_and_default_is_q48():
+    from network import ROUNDING_MODES, Network, build
+
+    assert ROUNDING_MODES[0] == "q48" and Network(dt=1.0).rounding == "q48"
+    try:
+        Network(dt=1.0, rounding="q64")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("知らない丸め方は断る")
+    spec = {"dt": 1.0, "rounding": "carry64", "tanks": [{"name": "a", "area": 1.0, "volume": 8.0}, {"name": "b", "area": 1.0},
+                                                         {"name": "c", "area": 1.0}],
+            "links": [{"law": "valve", "src": "a", "dst": "b", "tau": 4.0}, {"law": "valve", "src": "a", "dst": "c", "tau": 8.0},
+                      {"law": "pump", "src": "b", "dst": "c", "rate": 0.01}]}
+    net = build(spec)
+    start = net.total_q()
+    for n in range(64):
+        net.step(n)
+    assert net.total_q() == start
+    assert net._carry_tank("a", net._by_src()["a"]) is not None  # 弁 2 本の槽は carry64
+    assert net._carry_tank("b", net._by_src()["b"]) is None  # ポンプが出ている槽は q48 のまま

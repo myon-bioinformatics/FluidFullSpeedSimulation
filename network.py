@@ -37,7 +37,9 @@ import math
 import random
 from typing import Callable
 
-from fixedq import ONE, Cam, DelayLine, clamp, from_q, lag_gain, lag_step, qdiv, qmul, qsqrt, to_q
+from fractions import Fraction
+
+from fixedq import ONE, Cam, DelayLine, clamp, exp_neg_q, from_q, lag_gain, lag_step, qdiv, qmul, qsqrt, to_q
 from fluids import G, RE_LAMINAR, Section, channel_flow, fall_time, get_fluid, lip_flow, plan_width, reynolds
 from fluids import side_spill
 from fluids import viscous_orifice
@@ -46,6 +48,8 @@ from fluids import superelevation
 LAWS: dict[str, Callable] = {}
 OUTLET_MODES = ("exact", "independent")
 INFLOW_MODES = ("end", "uniform")
+ROUNDING_MODES = ("q48", "carry64")
+CARRY_BITS = 64  # 🧮 carry64 の係数の刻み（2^-64）。量は Q（2^-48）のまま
 PASSABLE: dict[str, Callable] = {}  # 運ばれる物がその管を通れるか（net, link, tracer）→ bool。無ければ常に通れる
 EJECT: dict[str, Callable] = {}  # 運ばれる物がその管へはじき出されるか（net, link, tracer）→ bool
 
@@ -326,7 +330,7 @@ def _law_mariotte(net, ln, n):
 class Network:
     def __init__(self, dt: float, fluid: str = "water", g: float = G, temp_c: float | None = None,
                  mu: float | None = None, mu_scale: float | None = None, species=None, volume_of=None,
-                 outlets: str = "exact", inflows: str = "uniform"):
+                 outlets: str = "exact", inflows: str = "uniform", rounding: str = "q48"):
         """species を渡すと成分モード（🍷）: 各水槽が成分ごとの量（Q 整数、単位は法則に任せる。蒸留ではモル）を持ち、
         v はその合計。普通の法則が返す量は、出す側の成分の比で整数のまま分ける。成分ごとの量を返す法則
         （boil・evaporate）もある。volume_of(parts) は水位（断面一定の水槽）に使う体積 [m³]。"""
@@ -342,6 +346,13 @@ class Network:
         # 🚰 槽に入ってくる量の扱い。end = 入った量はステップの終わりに足す（そのステップのあいだ減らない）、
         # uniform = 1 ステップのあいだ一定の速さで入ると見なし、そのぶん弁から多く出す
         self.inflows = inflows
+        if rounding not in ROUNDING_MODES:
+            raise ValueError(f"rounding must be one of {ROUNDING_MODES}")
+        # 🧮 丸め方。q48 = 係数も量も 2^-48 刻み、掛け算は切り捨て（既定）。
+        # carry64 = 弁だけが出ている槽（開き具合が一定）で、係数を 2^-64 刻みにし、掛け算の切り捨ての残りを次のステップへ繰り越す
+        self.rounding = rounding
+        self._carry: dict = {}  # 掛け算の場所ごとの、切り捨ての残り
+        self._carry_plan: dict = {}  # 槽ごとの係数（管の本数が変わったら作り直す）
         self.dt = dt
         self.dt_q = to_q(dt)
         # 🧊 temp_c を渡すと温度表で μ・ρ が動く。🍯 mu（Pa·s）か mu_scale（倍率）で粘度を直接変えられる
@@ -822,6 +833,49 @@ class Network:
             self._groups = (len(self.links), groups)
         return self._groups[1]
 
+    def _cmul(self, site, v: int, coef: int) -> int:
+        """🧮 量 × 係数（2^-64 刻み）。切り捨ての残りを場所ごとに持ち、次のステップの同じ掛け算に足す。"""
+        acc = self._carry.get(site, 0) + v * coef
+        self._carry[site] = acc & ((1 << CARRY_BITS) - 1)
+        return acc >> CARRY_BITS
+
+    def _carry_tank(self, src: str, idx: list[int]):
+        """🧮 carry64 が効く槽なら (弁の番号, Φ, 分け前, 入った量のうち同じステップに出る割合) を返す。効かなければ None。
+
+        効くのは、出ている管が弁だけで、開き具合が一定（浮きで動かない）で、槽ごとに厳密に解く設定の槽。
+        L = Σ 開き具合·dt/τ は分数で厳密に、Φ = 1 − e^(−L) は整数の級数で出す（float を通さない）。"""
+        if self.rounding != "carry64" or self.species is not None:
+            return None
+        key = (src, len(self.links))
+        if key not in self._carry_plan:
+            links = [self.links[i] for i in idx]
+            plan = None
+            if (all(ln["kind"] == "valve" and ln["cam"] is None for ln in links)
+                    and (self.nodes[src].get("outlets") or self.outlets) == "exact"):
+                weights = [Fraction(ln["opening"], ONE) * Fraction(self.dt) / Fraction(ln["tau"]) for ln in links]
+                scale = sum(weights)
+                if scale > 0:
+                    one = 1 << CARRY_BITS
+                    phi = one - exp_neg_q(scale, CARRY_BITS)
+                    plan = (list(idx), phi, [round(w / scale * one) for w in weights[:-1]],
+                            round((1 - Fraction(phi, one) / scale) * one))
+            self._carry_plan[key] = plan
+        return self._carry_plan[key]
+
+    def _carry_outlets(self, req: list[int]) -> None:
+        """🧮 carry64 が効く槽の、今までどおりの量（V·Φ）を出し直す。弁どうしは速さの比で分け、端数は最後の弁へ。"""
+        for src, idx in self._by_src().items():
+            plan = self._carry_tank(src, idx)
+            if plan is None:
+                continue
+            valves, phi, shares, _ = plan
+            have = self.nodes[src]["v"]
+            rest = total = min(max(self._cmul(("base", src), have, phi), 0), have)
+            for i, share in zip(valves[:-1], shares):
+                req[i] = min(self._cmul(("share", i), total, share), rest)
+                rest -= req[i]
+            req[valves[-1]] = rest
+
     def _exact_outlets(self, req: list[int]) -> None:
         """🚿 弁とポンプだけが出ている槽を、1 ステップぶん厳密に解く（dV/dt = −K·V − q）。
 
@@ -834,7 +888,7 @@ class Network:
         """
         for src, idx in self._by_src().items():
             node = self.nodes[src]
-            if (node.get("outlets") or self.outlets) != "exact":
+            if (node.get("outlets") or self.outlets) != "exact" or self._carry_tank(src, idx) is not None:
                 continue
             if any(self.links[i]["kind"] not in ("valve", "pump") for i in idx):
                 continue
@@ -878,6 +932,16 @@ class Network:
             inflow = arrivals.get(src, 0)
             if inflow <= 0 or any(self.links[i]["kind"] not in ("valve", "pump") for i in idx):
                 continue
+            plan = self._carry_tank(src, idx)
+            if plan is not None:  # 🧮 増やす分も 2^-64 刻みの係数と繰り越しで出す
+                valves, _, shares, through = plan
+                rest = extra = min(max(self._cmul(("extra", src), inflow, through), 0), inflow)
+                for i, share in zip(valves[:-1], shares):
+                    part = min(self._cmul(("xshare", i), extra, share), rest)
+                    req[i] += part
+                    rest -= part
+                req[valves[-1]] += rest
+                continue
             valves = [i for i in idx if self.links[i]["kind"] == "valve"]
             weights = [from_q(self.links[i]["last_opening"]) * -math.log1p(-from_q(self.links[i]["k"])) for i in valves]
             scale = sum(weights)
@@ -903,6 +967,8 @@ class Network:
         if len(self.last_flow) != len(self.links):
             self.last_flow = [0] * len(self.links)
         req = [max(LAWS[ln["kind"]](self, ln, n), 0) for ln in self.links]
+        if self.rounding == "carry64":
+            self._carry_outlets(req)
         self._exact_outlets(req)
         # 出す側の水が足りなければ、その節点から出る管で整数のまま按分する
         for src, idx in self._by_src().items():
@@ -1280,7 +1346,7 @@ def ch_depth(ln: dict, net: "Network") -> float:
 LINK_BUILDERS = ("pipe", "orifice", "weir", "cam", "pump", "valve", "float_valve", "tip", "siphon", "mariotte", "boil",
                  "evaporate")
 SPEC_KEYS = {"dt", "fluid", "temp_c", "mu", "mu_scale", "species", "tanks", "channels", "flumes", "rains", "links",
-             "tracers", "t_end", "trace", "sample_every", "outlets", "inflows"}
+             "tracers", "t_end", "trace", "sample_every", "outlets", "inflows", "rounding"}
 
 
 def build(spec: dict) -> Network:
@@ -1308,7 +1374,8 @@ def build(spec: dict) -> Network:
         volume_of = lambda p: mix_volume(p["ethanol"], p["water"])
     net = Network(spec.get("dt", 0.1), spec.get("fluid", "water"), temp_c=spec.get("temp_c"), mu=spec.get("mu"),
                   mu_scale=spec.get("mu_scale"), species=species, volume_of=volume_of,
-                  outlets=spec.get("outlets", "exact"), inflows=spec.get("inflows", "uniform"))
+                  outlets=spec.get("outlets", "exact"), inflows=spec.get("inflows", "uniform"),
+                  rounding=spec.get("rounding", "q48"))
     for t in spec.get("tanks", []):
         net.tank(**t)
     for c in spec.get("channels", []):
