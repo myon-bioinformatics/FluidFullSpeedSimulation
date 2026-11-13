@@ -371,6 +371,37 @@
     },
     {
       "type": "section",
+      "title": "🚿 単弁の検証",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "開度 1/2・経過時間 2τ。旧方式は残量を多く見積もり、dt/τ=1/8 で +3.17%、1/64 で +0.39%。"
+        },
+        {
+          "type": "text",
+          "text": "既定の q48 は指数解に対応。開度・流入・ポンプ・弁の本数・質量保存を回帰テストで確認。"
+        },
+        {
+          "type": "text",
+          "text": "⚠️ dt/τ=64 では係数の丸めにより例外が発生する既知の問題があります。"
+        },
+        {
+          "type": "links",
+          "items": [
+            {
+              "label": "📐 式と検証結果",
+              "href": "https://github.com/myon-bioinformatics/FluidFullSpeedSimulation/blob/main/docs/single-valve-discretization.md"
+            },
+            {
+              "label": "🧪 回帰テスト",
+              "href": "https://github.com/myon-bioinformatics/FluidFullSpeedSimulation/blob/main/tests/test_single_valve_review.py"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "section",
       "title": "🔗 リンク",
       "blocks": [
         {
