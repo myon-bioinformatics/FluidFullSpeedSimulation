@@ -72,6 +72,29 @@ def lag_gain(dt: float, tau: float) -> int:
     return to_q(-math.expm1(-dt / tau))
 
 
+def exp_neg_q(x: Fraction, bits: int = 64) -> int:
+    """e^(−x)（x ≥ 0 の分数）を 2^-bits 刻みの整数で返す（四捨五入）。整数の級数だけで出す（float を通さない）。
+
+    x を 2^s で割って 1 未満にし、テイラー級数を 32 ビットの余裕を付けて足してから、s 回 2 乗して戻す。
+    🧮 係数を Q（2^-48）より細かく持ちたいとき（``Network(rounding="carry64")``）に使う。"""
+    x = Fraction(x)
+    if x < 0:
+        raise ValueError("x must be non-negative")
+    guard = bits + 32
+    halvings = (x.numerator // x.denominator).bit_length() + 1
+    z = x / (1 << halvings)
+    zq = (z.numerator << guard) // z.denominator
+    total = mag = 1 << guard
+    n, sign = 0, 1
+    while mag:
+        n, sign = n + 1, -sign
+        mag = (mag * zq >> guard) // n
+        total += sign * mag
+    for _ in range(halvings):
+        total = total * total >> guard
+    return (total + (1 << (guard - bits - 1))) >> (guard - bits)
+
+
 def lag_step(y: int, x: int, k: int) -> int:
     """水槽 1 段の遅れ: y ← y + k(x - y)。"""
     return y + qmul(x - y, k)
