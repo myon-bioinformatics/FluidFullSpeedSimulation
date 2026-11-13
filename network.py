@@ -349,10 +349,11 @@ class Network:
         if rounding not in ROUNDING_MODES:
             raise ValueError(f"rounding must be one of {ROUNDING_MODES}")
         # 🧮 丸め方。q48 = 係数も量も 2^-48 刻み、掛け算は切り捨て（既定）。
-        # carry64 = 弁だけが出ている槽（開き具合が一定）で、係数を 2^-64 刻みにし、掛け算の切り捨ての残りを次のステップへ繰り越す
+        # carry64 = 弁とポンプだけが出ている槽で、係数を 2^-64 刻みにし、掛け算の切り捨ての残りを次のステップへ繰り越す
         self.rounding = rounding
         self._carry: dict = {}  # 掛け算の場所ごとの、切り捨ての残り
-        self._carry_plan: dict = {}  # 槽ごとの係数（管の本数が変わったら作り直す）
+        self._carry_plan: dict = {}  # 槽ごとの係数（管の本数か開き具合が変わったら作り直す）
+        self._carry_raw: dict = {}  # このステップの、0 で止める前の弁の合計
         self.dt = dt
         self.dt_q = to_q(dt)
         # 🧊 temp_c を渡すと温度表で μ・ρ が動く。🍯 mu（Pa·s）か mu_scale（倍率）で粘度を直接変えられる
@@ -842,35 +843,44 @@ class Network:
     def _carry_tank(self, src: str, idx: list[int]):
         """🧮 carry64 が効く槽なら (弁の番号, Φ, 分け前, 入った量のうち同じステップに出る割合) を返す。効かなければ None。
 
-        効くのは、出ている管が弁だけで、開き具合が一定（浮きで動かない）で、槽ごとに厳密に解く設定の槽。
-        L = Σ 開き具合·dt/τ は分数で厳密に、Φ = 1 − e^(−L) は整数の級数で出す（float を通さない）。"""
+        効くのは、出ている管が弁とポンプだけで、槽ごとに厳密に解く設定の槽。
+        L = Σ 開き具合·dt/τ は、そのステップの開き具合（Q の整数）から分数で厳密に、Φ = 1 − e^(−L) は整数の級数で出す
+        （float を通さない）。開き具合が動く弁（浮きとカム）では、開き具合が変わるたびに出し直す。"""
         if self.rounding != "carry64" or self.species is not None:
             return None
-        key = (src, len(self.links))
+        valves = [i for i in idx if self.links[i]["kind"] == "valve"]
+        key = (src, len(self.links), tuple(self.links[i]["last_opening"] for i in valves))
         if key not in self._carry_plan:
-            links = [self.links[i] for i in idx]
+            if len(self._carry_plan) > 4096:  # 開き具合が動き続けるときに、覚えすぎない
+                self._carry_plan.clear()
             plan = None
-            if (all(ln["kind"] == "valve" and ln["cam"] is None for ln in links)
+            if (valves and all(self.links[i]["kind"] in ("valve", "pump") for i in idx)
                     and (self.nodes[src].get("outlets") or self.outlets) == "exact"):
-                weights = [Fraction(ln["opening"], ONE) * Fraction(self.dt) / Fraction(ln["tau"]) for ln in links]
+                weights = [Fraction(self.links[i]["last_opening"], ONE) * Fraction(self.dt) / Fraction(self.links[i]["tau"])
+                           for i in valves]
                 scale = sum(weights)
                 if scale > 0:
                     one = 1 << CARRY_BITS
                     phi = one - exp_neg_q(scale, CARRY_BITS)
-                    plan = (list(idx), phi, [round(w / scale * one) for w in weights[:-1]],
+                    plan = (valves, phi, [round(w / scale * one) for w in weights[:-1]],
                             round((1 - Fraction(phi, one) / scale) * one))
             self._carry_plan[key] = plan
         return self._carry_plan[key]
 
     def _carry_outlets(self, req: list[int]) -> None:
-        """🧮 carry64 が効く槽の、今までどおりの量（V·Φ）を出し直す。弁どうしは速さの比で分け、端数は最後の弁へ。"""
+        """🧮 carry64 が効く槽の、今までどおりの量を出し直す。弁の合計は V·Φ − P·(1 − Φ/L)（P = このステップのポンプの量。
+        (V + P/L)·Φ − P と同じ）。弁どうしは速さの比で分け、端数は最後の弁へ。"""
+        self._carry_raw = {}
         for src, idx in self._by_src().items():
             plan = self._carry_tank(src, idx)
             if plan is None:
                 continue
-            valves, phi, shares, _ = plan
+            valves, phi, shares, through = plan
             have = self.nodes[src]["v"]
-            rest = total = min(max(self._cmul(("base", src), have, phi), 0), have)
+            pumped = sum(req[i] for i in idx if self.links[i]["kind"] == "pump")
+            raw = self._cmul(("base", src), have, phi) - (self._cmul(("pump", src), pumped, through) if pumped else 0)
+            self._carry_raw[src] = raw  # 0 で止める前の値（増やす分を出すときに使う）
+            rest = total = min(max(raw, 0), have)
             for i, share in zip(valves[:-1], shares):
                 req[i] = min(self._cmul(("share", i), total, share), rest)
                 rest -= req[i]
@@ -883,7 +893,8 @@ class Network:
         少し多い（n 本なら刻みの 1 次、(1 − 1/n) に比例して速く空く）。ここで弁の合計を (V + P/L)·Φ − P に置き直す:
         L = K·dt = Σ 開き具合_i·dt/τ_i、Φ = 1 − e^(−L)、P = このステップのポンプの量（q·dt）。ポンプは P のまま。
         弁どうしは速さ（開き具合/τ）の比で分け、端数は最後の弁へ（合計は整数で一致）。
-        弁が 1 本でポンプも無い槽は法則のまま（元から厳密）。槽ごとに tank(outlets=...) で切り替えられる。
+        全開の弁が 1 本でポンプも無い槽は法則のまま（元から厳密）。開き具合が 1 でない弁 1 本の槽は、法則（V·k·開き具合）だと
+        刻みの 1 次ずれるので、ここで V·(1 − e^(−開き具合·dt/τ)) に置き直す。槽ごとに tank(outlets=...) で切り替えられる。
         槽と槽のあいだ（上の槽から入る量を同じステップの中で知らない）のずれは、ここでは直らない。
         """
         for src, idx in self._by_src().items():
@@ -894,8 +905,8 @@ class Network:
                 continue
             valves = [i for i in idx if self.links[i]["kind"] == "valve" and req[i] > 0]
             pumped = sum(req[i] for i in idx if self.links[i]["kind"] == "pump")
-            if not valves or (len(valves) == 1 and not pumped):
-                continue
+            if not valves or (len(valves) == 1 and not pumped and self.links[valves[0]]["last_opening"] >= ONE):
+                continue  # 全開の弁 1 本だけなら法則のままで厳密。開き具合が 1 でなければ、下で 1 − e^(−開き具合·dt/τ) に置き直す
             # 速さ × dt = 開き具合 × dt/τ（dt/τ = −ln(1 − k)。k は弁を作ったときの厳密離散化ゲイン）
             weights = [from_q(self.links[i]["last_opening"]) * -math.log1p(-from_q(self.links[i]["k"])) for i in valves]
             scale = sum(weights)
@@ -935,7 +946,9 @@ class Network:
             plan = self._carry_tank(src, idx)
             if plan is not None:  # 🧮 増やす分も 2^-64 刻みの係数と繰り越しで出す
                 valves, _, shares, through = plan
-                rest = extra = min(max(self._cmul(("extra", src), inflow, through), 0), inflow)
+                raw = self._carry_raw.get(src, 0)  # 弁の合計を V·Φ + (I − P)·(1 − Φ/L) まで増やす（0 より小さければ 0）
+                extra = max(raw + self._cmul(("extra", src), inflow, through), 0) - max(raw, 0)
+                rest = extra = min(max(extra, 0), inflow)
                 for i, share in zip(valves[:-1], shares):
                     part = min(self._cmul(("xshare", i), extra, share), rest)
                     req[i] += part

@@ -364,4 +364,69 @@ def test_carry64_only_touches_valve_only_tanks_and_default_is_q48():
         net.step(n)
     assert net.total_q() == start
     assert net._carry_tank("a", net._by_src()["a"]) is not None  # 弁 2 本の槽は carry64
-    assert net._carry_tank("b", net._by_src()["b"]) is None  # ポンプが出ている槽は q48 のまま
+    assert net._carry_tank("b", net._by_src()["b"]) is None  # 弁が無い槽（ポンプだけ）は q48 のまま
+
+
+def test_carry64_with_a_pump_out_matches_the_exact_answer():
+    from decimal import Decimal, localcontext
+
+    from fixedq import ONE
+    from network import Network
+
+    dt, steps, v0, tau, rate = 0.25, 128, 128.0, 32.0, 0.5  # dV/dt = −V/τ − q。空になる前に測る
+    worst = {}
+    for rounding in ("q48", "carry64"):
+        net = Network(dt=dt, rounding=rounding)
+        net.tank("a", 1.0, volume=v0)
+        net.tank("sink", 1.0)
+        net.valve("a", "sink", tau=tau)
+        net.pump("a", "sink", rate=rate)
+        start = net.total_q()
+        for n in range(steps):
+            net.step(n)
+        assert net.total_q() == start
+        with localcontext() as ctx:
+            ctx.prec = 60
+            k, q, t = 1 / Decimal(tau), Decimal(rate), Decimal(dt) * steps
+            want = ((Decimal(v0) + q / k) * (-k * t).exp() - q / k) * ONE
+            worst[rounding] = abs(net.nodes["a"]["v"] - want)
+    assert worst["carry64"] <= 4 and worst["q48"] > worst["carry64"]
+
+
+def test_carry64_follows_a_moving_valve():
+    from network import Network
+
+    net = Network(dt=0.5, rounding="carry64")
+    net.tank("sea", 1.0, volume=64.0)
+    net.tank("clock", 1.0)
+    net.tank("a", 1.0, volume=8.0)
+    net.tank("b", 1.0)
+    net.pump("sea", "clock", rate=0.25)
+    net.valve("a", "b", tau=16.0, sensor="clock", cam=[[0.0, 1.0], [16.0, 0.25]])
+    start, seen = net.total_q(), set()
+    for n in range(96):
+        net.step(n)
+        seen.add(net._carry_tank("a", net._by_src()["a"])[1])  # Φ は開き具合が変わるたびに出し直される
+    assert net.total_q() == start and len(seen) > 32
+
+
+def test_single_partly_open_valve_is_exact_by_default():
+    """🚿 開き具合が 1 でない弁 1 本の槽: 既定（槽ごとに厳密）は V0·e^(−開き具合·t/τ) と合う。法則のまま（independent）は刻みの 1 次ずれる。"""
+    import math
+
+    from fixedq import ONE
+    from network import Network
+
+    got = {}
+    for mode in ("exact", "independent"):
+        net = Network(dt=4.0, outlets=mode)
+        net.tank("a", 1.0, volume=128.0)
+        net.tank("sink", 1.0)
+        net.valve("a", "sink", tau=32.0, opening=0.5)
+        start = net.total_q()
+        for n in range(16):  # t = 2τ
+            net.step(n)
+        assert net.total_q() == start
+        got[mode] = net.nodes["a"]["v"] / ONE / (128.0 * math.exp(-1.0)) - 1.0
+    assert abs(got["exact"]) < 1e-12
+    assert 0.03 < got["independent"] < 0.033  # 開き具合·(1 − 開き具合)·t·dt/(2τ²) = 1/32 のあたり
