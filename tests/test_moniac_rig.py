@@ -12,7 +12,9 @@ from fixedq import random_scales
 
 # 入る量を「一定の速さで入る」と見なす既定（inflows="uniform"）での値。頭の槽は閉じた式 Q·τ/(A·Σo) = 0.3 と一致する。
 # 入った量をステップの終わりに足す扱い（inflows="end"）では 0.300750625・0.135225125・0.200107155・0.191188099 だった
-GOLDEN = {"h:header": 0.3, "h:side": 0.135000562, "h:store": 0.200026964, "h:sump": 0.191199455}
+# 開き具合が 1 でない弁 1 本の槽を法則のまま（V·k·開き具合）で取っていたときは h:store 0.200026964・h:sump 0.191199455 だった。
+# 1 − e^(−開き具合·dt/τ) に置き直した今の値は、刻みを細かくした先（dt/16 で h:store 0.2・h:sump 0.1912）に 100 倍ほど近い
+GOLDEN = {"h:header": 0.3, "h:side": 0.135000562, "h:store": 0.200000201, "h:sump": 0.19119999}
 
 
 class MoniacRig(unittest.TestCase):
