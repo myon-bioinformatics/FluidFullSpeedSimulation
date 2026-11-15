@@ -1,4 +1,4 @@
-"""💴 🪙 ⛏️ 同じ配管に流す物を置き換える（E26〜E28）・🚿 出口の数（E29）・🫀 血液の循環（E30）・🔥 火力発電（E31）: 定常・総量・Bateman・決済・描画。"""
+"""💴 🪙 ⛏️ 同じ配管に流す物を置き換える（E26〜E28）・🚿 出口の数（E29）・🫀 血液の循環（E30）・🔥 火力発電（E31）・❄️ ヒートポンプ（E32）: 定常・総量・Bateman・決済・描画。"""
 import math
 import unittest
 
@@ -369,6 +369,45 @@ class ThermalPower(unittest.TestCase):
                 self.assertEqual(got, sorted(got))
             self.assertEqual(res["volumes_q"]["fuel"], 0)  # ちょうど燃やし切る
             self.assertEqual(res["conservation_error_q"], 0)
+
+
+class HeatPump(unittest.TestCase):
+    """❄️ 電気 + 外気の熱 → 部屋（🔥 の裏返し）。"""
+
+    def test_cop_balance_and_carnot(self):
+        p = ffs.HEAT_PUMP
+        st = ffs.heat_pump_steady()
+        self.assertAlmostEqual(st["cop"], p["heat"] / p["power"], places=12)
+        self.assertAlmostEqual(st["room"], p["heat"], places=12)
+        self.assertLess(st["cop"], ffs.carnot_cop(p["t_out"], p["t_room"]))
+        for item in random_scales(320, 6, n_min=-2, n_max=0):  # Tc 1〜999 °C、Th = Tc + 0.1〜99.9 K
+            tc = item["value"]
+            th = tc + item["A"] * 10 ** (-item["N"] - 1)
+            with self.subTest(t_cold=item["label"]):
+                self.assertAlmostEqual(ffs.carnot_cop(tc, th) * ffs.carnot(tc, th), 1.0, places=12)
+                self.assertGreater(ffs.carnot_cop(tc, th), 1.0)
+
+    def test_running_on_plant_power_beats_burning_at_home(self):
+        cop = ffs.heat_pump_steady()["cop"]
+        for kind in ffs.THERMAL["plants"]:
+            ts = ffs.thermal_steady(kind)
+            eta = ts["grid"] / ts["fuel_hhv"]
+            with self.subTest(plant=kind):
+                self.assertGreater(eta * cop, 1.0)
+                self.assertLess(eta, 1.0)
+
+    def test_scene(self):
+        self.assertEqual(ffs.scene_arg("❄️"), "heat-pump")
+        res, cols = ffs.rig_section("heat-pump")
+        self.assertEqual(cols, ffs.heat_pump_columns())
+        view = pw.network_frames(res, cols, frames=None, rows=16)
+        for col in (0, 1):  # 電気と外気は減るだけ、部屋は溜まるだけ
+            got = [fr["counts"][col] for fr in view["frames"]]
+            self.assertEqual(got, sorted(got, reverse=True))
+        room = [fr["counts"][-1] for fr in view["frames"]]
+        self.assertEqual(room, sorted(room))
+        self.assertEqual((res["volumes_q"]["power"], res["volumes_q"]["outdoor"]), (0, 0))
+        self.assertEqual(res["conservation_error_q"], 0)
 
 
 class Scenes(unittest.TestCase):

@@ -3458,6 +3458,111 @@ def e31_thermal_power(seed: int = 31) -> dict:
                      for kind in t["plants"]}}
 
 
+# --- E32 ヒートポンプ（❄️ 🔥 の裏返し: 電気 + 外気の熱 → 部屋） --------------------------------
+
+# 時間は秒、エネルギーは kJ（速さは kW）。2.8 kW 級のエアコン（Panasonic CS-TX286D2）の暖房: JIS C 9612 の条件
+# （外気 7 °C・室内 20 °C）で 3.6 kW を 705 W で出す。stages は熱が溜まる槽を順に (名前, τ [s])、τ は仮置き。
+# 電気は圧縮機へ、外気の熱は室外の熱交換器へ入り、どちらも冷媒に乗って室内の熱交換器から部屋へ出る。
+HEAT_PUMP = {"heat": 3.6, "power": 0.705, "t_room": 20.0, "t_out": 7.0, "dt": 1.0, "scene": (256.0, 2),
+             "stages": (("evaporator", 16.0), ("compressor", 8.0), ("condenser", 32.0))}
+
+
+def heat_pump_columns() -> list[str]:
+    """断面図の列: 🔌 電気 ｜ 🌬️ 外気 ｜ 室外の熱交換器 ｜ 圧縮機 ｜ 室内の熱交換器 ｜ 🏠 部屋。"""
+    return ["power", "outdoor", *(name for name, _t in HEAT_PUMP["stages"]), "room"]
+
+
+def heat_pump_network(*, slow: float = 1.0, t_run: float | None = None, dt: float | None = None) -> Network:
+    """🔌 電気 → 圧縮機、🌬️ 外気 → 室外の熱交換器 → 圧縮機 → 室内の熱交換器 → 🏠 部屋。電気と外気は t_run 秒ぶんちょうど。"""
+    p = HEAT_PUMP
+    net = Network(dt=p["dt"] if dt is None else dt)
+    for name in heat_pump_columns():
+        net.tank(name, 1.0)
+    (evap, t_e), (comp, t_c), (cond, t_h) = p["stages"]
+    steps = int(round((p["scene"][0] if t_run is None else t_run) / net.dt))
+    for src, dst, rate in (("power", comp, p["power"]), ("outdoor", evap, p["heat"] - p["power"])):
+        ln = net.pump(src, dst, rate=rate)
+        net.nodes[src]["v"] = steps * ln["amount"]  # ちょうど steps 回分
+    net.valve(evap, comp, tau=slow * t_e)
+    net.valve(comp, cond, tau=slow * t_c)
+    net.valve(cond, "room", tau=slow * t_h)
+    return net
+
+
+def heat_pump_steady(*, slow: float = 1.0, dt: float | None = None) -> dict:
+    """行き渡った後: 段の熱 = 入る速さ × τ（steady_tank）、部屋に入る速さ = 電気 + 外気。lag は部屋に届く熱の遅れの平均。"""
+    p = HEAT_PUMP
+    (_e, t_e), (_c, t_c), (_h, t_h) = p["stages"]
+    w, q_c = p["power"], p["heat"] - p["power"]
+    evap, e_base = steady_tank(1.0 / (slow * t_e), q_c, q_c, dt)
+    comp, c_base = steady_tank(1.0 / (slow * t_c), w + q_c, w + e_base, dt)
+    cond, _base = steady_tank(1.0 / (slow * t_h), w + q_c, c_base, dt)
+    lag = slow * (t_c + t_h + t_e * q_c / (w + q_c))
+    return {"room": w + q_c, "cop": (w + q_c) / w, "lag": lag,
+            "stored": {"evaporator": evap, "compressor": comp, "condenser": cond}}
+
+
+def carnot_cop(t_cold: float, t_hot: float) -> float:
+    """暖房の COP の上限 Th/(Th − Tc) = 1 / (Carnot の効率)。"""
+    return 1.0 / carnot(t_cold, t_hot)
+
+
+def e32_heat_pump(seed: int = 32) -> dict:
+    """❄️ ヒートポンプは 🔥 の裏返し: 電気 W で外気から Q_c を汲み、部屋に W + Q_c を出す（COP = (W + Q_c)/W > 1）。
+    上限は Carnot の COP = 1/η_Carnot。🔥 の発電所の電気で回すと、燃料 1 から部屋に η·COP の熱が届く。"""
+    p, checks = HEAT_PUMP, []
+    t_end = 32.0 * max(t for _n, t in p["stages"])
+    st = heat_pump_steady(dt=p["dt"])
+
+    def run_checks(tag: str, res: dict, st: dict) -> list[dict]:
+        rates = node_rates(res)
+        stored = {n: from_q(res["volumes_q"][n]) for n in st["stored"]}
+        worst = max(rel_err(stored[n], st["stored"][n]) for n in stored)
+        room_in, w = rates["room"]["in"], rates["power"]["out"]
+        lag_got = t_end - from_q(res["volumes_q"]["room"]) / st["room"]
+        return [
+            check(f"{tag}stored", "🎯", worst <= 1e-9, value=worst, tol=1e-9,
+                  note="段の熱 = 入る速さ × τ（離散の定常: エンジンの 1 ステップをそのまま解いた式）"),
+            close(f"{tag}cop", "❄️", room_in / w, st["cop"], 1e-9, note="COP = 部屋に出る熱 / 電気（3.6 kW / 705 W）"),
+            close(f"{tag}balance", "🧾", room_in, w + rates["outdoor"]["out"], 1e-12,
+                  note="部屋に出る熱 = 電気 + 外気から汲んだ熱（エネルギーは増えない。外から運んでくるだけ）"),
+            check(f"{tag}lag", "⏳", abs(lag_got - st["lag"]) <= res["dt"], value=lag_got, expected=st["lag"],
+                  tol=res["dt"], note="部屋に届く熱の遅れの平均 = 経路ごとの τ の和（電気と外気の取り分で重み付け）"),
+            conserved(f"{tag}conserve", res),
+        ]
+
+    res = heat_pump_network(t_run=t_end).run(t_end)
+    checks += run_checks("", res, st)
+    limit = carnot_cop(p["t_out"], p["t_room"])
+    checks += [
+        check("carnot", "📐", st["cop"] < limit, value=st["cop"], expected=limit,
+              note="Carnot の上限 Th/(Th − Tc)（外気 7 °C → 室内 20 °C）より低い"),
+    ]
+    for item in random_scales(seed, 4, n_min=-2, n_max=-1):  # 🎲 温度を振る: Tc 10〜999 °C、Th = Tc + 1〜99.9 K
+        tc = item["value"]
+        th = tc + item["A"] * 10 ** (-item["N"] - 1)
+        cop, eta = carnot_cop(tc, th), carnot(tc, th)
+        checks.append(close(f"reverse:{item['label']}", "🔁", cop * eta, 1.0, 1e-12,
+                            note="Carnot のヒートポンプは Carnot の熱機関を逆に回したもの: COP × η = 1。冷房の COP は 1 小さい"))
+    for item in random_scales(seed + 1, 2, n_min=1, n_max=1):  # 🎲 どの τ も c 倍（0.1〜0.999）
+        c = item["value"]
+        r = heat_pump_network(slow=c, t_run=t_end).run(t_end)
+        checks += run_checks(f"slow={item['label']}:", r, heat_pump_steady(slow=c, dt=p["dt"]))
+    # 🔥 → ❄️ 発電所の電気で回す: 燃料（HHV）1 から部屋に届く熱 = 送電端の効率（HHV）× COP。直接燃やすと 1 を超えない
+    chain = {}
+    for kind, plant in THERMAL["plants"].items():
+        ts = thermal_steady(kind)
+        eta = ts["grid"] / ts["fuel_hhv"]
+        chain[kind] = {"eta_hhv": eta, "heat_per_fuel": eta * st["cop"], "break_even_cop": 1.0 / eta}
+        checks.append(check(f"chain:{kind}", plant["icon"] + "❄️", eta * st["cop"] > 1.0, value=eta * st["cop"],
+                            expected=1.0, note=f"燃料 1 → 電気 {eta:.3f} → 部屋に {eta * st['cop']:.2f}。COP が {1.0 / eta:.2f} を超えれば"
+                                               "、燃料を部屋で直接燃やす（どれだけ上手に燃やしても 1 まで）より暖かい"))
+    summary = {"cop": st["cop"], "carnot_cop": limit, "share_of_carnot": st["cop"] / limit, "lag_s": st["lag"],
+               "outdoor_share": 1.0 - 1.0 / st["cop"], "chain": chain}
+    return {"params": {"heat_pump": p, "seed": seed}, "summary": summary, "checks": checks,
+            "runs": {"heat-pump": heat_pump_network().run(p["scene"][0], sample_every=p["scene"][1])["series"]}}
+
+
 # --- 登録簿 ---------------------------------------------------------------
 
 EXPERIMENTS = {
@@ -3497,6 +3602,8 @@ EXPERIMENTS = {
             e30_circulation),
     "E31": ("thermal-power", "🔥", "火力発電（燃料 → 熱が溜まる段 → 電気・煙突・海: 効率は割合の積、遅れは τ の和、Carnot・Curzon–Ahlborn と比べる）",
             e31_thermal_power),
+    "E32": ("heat-pump", "❄️", "ヒートポンプ（🔥 の裏返し: 電気 + 外気の熱 → 部屋、COP = 1/η_Carnot が上限、発電所の電気で回すと燃料 1 から部屋に η·COP）",
+            e32_heat_pump),
 }
 SLUGS = {slug: eid for eid, (slug, *_rest) in EXPERIMENTS.items()}
 
@@ -3555,7 +3662,7 @@ SCENE_ICONS = {"🏛": "moniac-rig", "🥢": "somen-flume", "🎋": "flume", "�
                "🍷": "pythagorean-cup", "🫗": "mariotte", "🏺": "water-clock", "🚧": "inertia-limits",
                "⚗": "distillation", "👼": "angels-share", "💴": "money-flow", "🪙": "gold-flow", "⛏": "rare-metal",
                "🚿": "outlet-count", "🫀": "circulation",
-               "🪨": "coal-power", "🌀": "combined-cycle"}
+               "🪨": "coal-power", "🌀": "combined-cycle", "❄": "heat-pump"}
 
 
 def fluid_arg(text: str) -> str:
@@ -3564,7 +3671,7 @@ def fluid_arg(text: str) -> str:
 
 
 def scene_arg(text: str) -> str:
-    """draw の場面: 名前でも 🏛️ 🥢 🎋 🫙 🌊 🕳️ 🧊 🪵 🍜 🧱 🍽️ 🌧️ 🎍 🍷 🫗 🏺 🚧 ⚗️ 👼 💴 🪙 ⛏️ 🚿 🫀 🪨 🌀 でもよい。"""
+    """draw の場面: 名前でも 🏛️ 🥢 🎋 🫙 🌊 🕳️ 🧊 🪵 🍜 🧱 🍽️ 🌧️ 🎍 🍷 🫗 🏺 🚧 ⚗️ 👼 💴 🪙 ⛏️ 🚿 🫀 🪨 🌀 ❄️ でもよい。"""
     return SCENE_ICONS.get(_plain(text), text)
 
 
@@ -3747,6 +3854,11 @@ def rig_section(scene: str, fluid: str = "water", temp_c: float | None = None, m
         sinks = ("grid", "aux", "stack", "sea")
         res["caps"] = dict.fromkeys(sinks, max(from_q(res["volumes_q"][n]) for n in sinks))
         return res, thermal_columns(kind)
+    if scene == "heat-pump":  # ❄️ 電気と外気の熱を使い切るまで。🔌 🌬️ 🏠 は縦いっぱいを揃える（部屋 = 電気 + 外気）
+        t_end, every = HEAT_PUMP["scene"]
+        res = heat_pump_network().run(t_end, sample_every=every)
+        res["caps"] = dict.fromkeys(("power", "outdoor", "room"), from_q(res["volumes_q"]["room"]))
+        return res, heat_pump_columns()
     raise KeyError(f"unknown rig scene {scene!r}")
 
 
@@ -3759,7 +3871,7 @@ HUB_SCENES = {"money-flow": ("money", 64.0, 4), "gold-flow": ("gold", 64.0, 4), 
 THERMAL_SCENES = {"coal-power": "coal", "combined-cycle": "lng"}
 RIG_SCENES = ("moniac-rig", "somen-flume", "noodle-length", "noodle-clog", "chopsticks", "cold-water",
               "bamboo-wear", "rain-runoff", "shishi-odoshi", "pythagorean-cup", "mariotte", "water-clock",
-              "inertia-limits", "distillation", "angels-share", *HUB_SCENES, "outlet-count", "circulation", *THERMAL_SCENES)
+              "inertia-limits", "distillation", "angels-share", *HUB_SCENES, "outlet-count", "circulation", *THERMAL_SCENES, "heat-pump")
 
 
 def _visc(args) -> dict:
@@ -3829,9 +3941,10 @@ DEMOS = (("moniac-rig", "water", None), ("moniac-drain", "water", None), ("flume
          ("dam-break", "namekian-water", None), ("inertia-limits", "water", None), ("distillation", "water", "🟨"),
          ("angels-share", "water", "🟧"), ("money-flow", "water", "🟩"), ("gold-flow", "water", "🟨"),
          ("rare-metal", "water", "🟫"), ("outlet-count", "water", None), ("circulation", "water", "🟥"),
-         ("coal-power", "water", "🟧"), ("combined-cycle", "water", "🟧"))
+         ("coal-power", "water", "🟧"), ("combined-cycle", "water", "🟧"),
+         ("heat-pump", "water", "🟧"))
 DEMOS_SCHEMA = "fluidfullspeedsimulation-demos/1"
-_NEEDS_VS16 = set("🏛🕳🍽🌧⚗⛏")  # 絵文字で出すには U+FE0F が要るもの
+_NEEDS_VS16 = set("🏛🕳🍽🌧⚗⛏❄")  # 絵文字で出すには U+FE0F が要るもの
 
 
 def scene_icon(scene: str) -> str:

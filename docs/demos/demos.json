@@ -869,6 +869,32 @@
         2048.0
       ],
       "conserved": true
+    },
+    {
+      "id": "D27",
+      "scene": "heat-pump",
+      "icon": "❄️",
+      "fluid": "water",
+      "fill": "🟧",
+      "file": "D27_heat-pump_water.gif",
+      "bytes": 26712,
+      "sha256": "418e6044e5b38e5a034710054c8f3ec8f149605a2c35d809da8fbdbcffaef69d",
+      "frames": 40,
+      "canvas": "248x160",
+      "kind": "section",
+      "columns": [
+        "power",
+        "outdoor",
+        "evaporator",
+        "compressor",
+        "condenser",
+        "room"
+      ],
+      "t": [
+        2.0,
+        256.0
+      ],
+      "conserved": true
     }
   ]
 }

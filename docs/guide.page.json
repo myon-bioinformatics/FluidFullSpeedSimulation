@@ -403,6 +403,18 @@
               "alt": "D26 combined-cycle"
             }
           ]
+        },
+        {
+          "type": "card",
+          "title": "D27 ❄️ heat-pump",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D27_heat-pump_water.gif",
+              "alt": "D27 heat-pump"
+            }
+          ]
         }
       ]
     },
