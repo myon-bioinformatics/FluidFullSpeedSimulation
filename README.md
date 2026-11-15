@@ -49,8 +49,10 @@
 | ![D22](docs/demos/D22_rare-metal_water.gif) | **D22 ⛏️ `rare-metal` 🟫**<br>列: 産出国 ｜ 船 30 日 ｜ 製錬の加工国 ｜ 部品の加工国 … ｜ 市場。産出国が指数で減り、加工国の在庫は山を作ってから消え、市場に積もる（0〜320 日） |
 | ![D23](docs/demos/D23_outlet-count_water.gif) | **D23 🚿 `outlet-count`**<br>列: 別々に取る 1 本 ｜ 2 本 ｜ 4 本 ｜ 8 本 ｜ 厳密に解く 8 本（合計の速さは同じ）。別々に取ると本数が多いほど速く空く。厳密に解く 8 本（右端）は 1 本（左端）と同じ。ずれが見えるように刻みをわざと粗くしてある（dt = τ/2、0〜32 日） |
 | ![D24](docs/demos/D24_circulation_water.gif) | **D24 🫀 `circulation` 🟥**<br>列: 心臓 ｜ 動脈 ｜ 🧠 脳 ｜ ❤️ 冠動脈 ｜ 🫘 腎臓 ｜ 🍽️ 腸・肝臓 ｜ 💪 筋肉 ｜ 🖐️ 皮膚 ｜ 🦴 その他 ｜ 静脈 ｜ 🫁 肺。最初は血液 5 L が全部心臓に。5 L/min で送り出すと、動脈と器官がすぐ満ち、静脈と肺が遅れて満ちて心臓へ戻り、心臓は 350 mL で止まる（0〜128 秒。🟥 は色だけ） |
+| ![D25](docs/demos/D25_coal-power_water.gif) | **D25 🪨 `coal-power` 🟧**<br>列: ⛽ 燃料 ｜ 🔥 ボイラ ｜ ♨️ 蒸気 ｜ 🔌 送電 ｜ 🏠 所内 ｜ 🏭 煙突 ｜ 🌊 海。燃料を一定の速さで燃やし切る。ボイラと蒸気に熱が溜まってから電気が出始め、出口 4 つの傾きが行き先の割合（0〜2048 秒。🟧 は色だけ） |
+| ![D26](docs/demos/D26_combined-cycle_water.gif) | **D26 🌀 `combined-cycle` 🟧**<br>列: ⛽ 燃料 ｜ 🌀 ガスタービン ｜ ♨️ 排熱回収ボイラ ｜ 蒸気 ｜ 🔌 送電 ｜ 🏠 所内 ｜ 🏭 煙突 ｜ 🌊 海。ガスタービンの電気はすぐ出て、蒸気の分は排熱回収ボイラに溜まってから遅れて足される（0〜2048 秒） |
 
-- 🟦 1 段 = 縦いっぱい / 16。縦いっぱいは走らせた中の最大（樋は全区間で共通、水槽はそれぞれ）。いちばん上の段は明るい色（水面）。💴 は中央銀行を除く槽、🪙 ⛏️ は全槽で縦いっぱいを揃えてあるので、その範囲内で列をまたいで量を比べられる。💴 の中央銀行は別スケールで、他の槽と高さを比較できない。🫀 は槽ごと（脳 52.5 mL も静脈 3.2 L も、満ちれば縦いっぱい）
+- 🟦 1 段 = 縦いっぱい / 16。縦いっぱいは走らせた中の最大（樋は全区間で共通、水槽はそれぞれ）。いちばん上の段は明るい色（水面）。💴 は中央銀行を除く槽、🪙 ⛏️ は全槽で縦いっぱいを揃えてあるので、その範囲内で列をまたいで量を比べられる。💴 の中央銀行は別スケールで、他の槽と高さを比較できない。🫀 は槽ごと（脳 52.5 mL も静脈 3.2 L も、満ちれば縦いっぱい）。🪨 🌀 は出口 4 つ（送電・所内・煙突・海）を揃え、燃料と段は槽ごと
 - 🟨 は運ばれる物（🍜）、灰色の帯は遅れのある管、下の帯は時刻（最初 → 最後）。色は Ironmate の色 ID と派生規則
 - 🔁 作り直す: `uv run python fluidfullspeedsimulation.py demos`（`docs/demos/` の GIF と `demos.json` に bytes・sha256）。`demos --check` は書かずにバイト単位で比べ、違えば終了コード 1（CI で確かめる）。`--only 🏛️ D03` で一部だけ
 - 🖼️ 1 場面だけ好きな引数で: `draw 🥢 --view files --frames 60 --rows 24 --fill 🟥`（GIF + PNG + 🧾 受領記録 JSON）
@@ -165,6 +167,7 @@ commit・blob・sha256 は `vendor.lock.json` に固定。更新は親の `vendo
 | E28 ⛏️ | `rare-metal` | レアメタル: 産出国（埋蔵量 128 kt）→ 船 30 日 → 製錬 → 部品 → 市場。Bateman の鎖どおり、加工国 a の在庫の山は 64.5 日（式 64.52 日）に 27.0001 kt（式 27.00）、刻みを半分にすると誤差も半分（入った量をステップの終わりに足す扱いでは 1.3 % → 0.63 % → 0.31 %、既定では 0.0025 % → 0.0017 % → 0.0004 %）、最初の船はちょうど 30 日後 |
 | E29 🚿 | `outlet-count` | 出口の数: 弁を別々に取らせる（`outlets="independent"`）と、n 本で残りが −t·dt·K²·(1 − 1/n)/2 だけ少ない（τ 30 日・dt 0.25 日・120 日で 2 本 −0.83 %、3 本 −1.11 %、4 本 −1.25 %、8 本 −1.46 %）、刻みを半分にすると半分。既定（`outlets="exact"`）は槽ごとに 1 ステップを厳密に解くので、1〜8 本・偏った 3 本・刻みが時定数の半分・弁 + ポンプのどれでも e^(−t/τ) どおり（差 7e-12 以下）、出た量は速さの比で分かれる |
 | E30 🫀 | `circulation` | 血液の循環（安静時の大人: 血液 5 L・心拍出量 5 L/min）: 器官は使わずに通すだけなので 入る = 出る（🧠 脳 750 mL/min で ±0、入った量 − 出た量 = いまある量が 0 ulp）、どの槽も 入る速さ × 滞在時間（中心容積の原理 V = F·T、離散の定常と 2e-11 以内）、器官へ行く割合は表どおり、赤血球が一周 60 s（= 血液量 / 心拍出量）。失う割合・ポンプの速さを A×10^-N で振ると、心臓が空になった先は戻ってくる分しか送れない（6.6 % を超えて失うと送る速さが血液量に比例して落ち、ポンプを速くしても 5.35 L/min で頭打ち） |
+| E31 🔥 | `thermal-power` | 火力発電（🪨 石炭 USC と 🌀 LNG 複合。エネルギーだけを流す）: 効率 = 段ごとの割合の積 × (1 − 所内率)（離散の定常と 1e-13）、HHV / LHV の比 = 燃料の LHV/HHV（環境省の表と丸めの範囲で一致）、送電の遅れ = 経路ごとの τ の和、どちらも Carnot より低く Curzon–Ahlborn より高い、1975 年の表の 3 発電所は CA の方が実測に近い。τ と出力を A×10^-N で振っても割合は同じ |
 
 どの実験も ⚖️ 総量の保存（ずれ 0 ulp）と、層流の前提（Re）・Courant 数などの前提条件を一緒に確かめる。
 閉じた式とのずれ（δ）は丸めずにそのまま出す（`run -v`）。
@@ -378,6 +381,29 @@ uv run python fluidfullspeedsimulation.py draw 🫗 🟩                     # �
 - 📏 刻み dt = 0.25 s では、器官の量は連続の式より 0.05 % 多く、そのぶん心臓が 0.14 % 少ない（離散の定常とは 2e-11 以内）
 - ⚠️ 拍動・血圧・圧力波（Windkessel）、脳の自動調節（血圧が変わっても流れを保つ）、静脈の収縮・頻脈などの補償、酸素の受け渡しは入れていない。器官ごとの滞在時間の違いも入れていない
 
+## 🔥 火力発電（E31）
+
+燃料のエネルギーだけを流す（水・蒸気の循環は次の段階）。燃料は HHV で入れ、HHV − LHV（燃えてできた水蒸気の潜熱）はそのまま煙突へ。熱が溜まる段は弁で行き先へ分かれ、割合の積が効率になる。時間は秒、量は MJ（速さは MW）。
+
+| | 🪨 石炭 USC（磯子新 1 号級） | 🌀 LNG 複合（西名古屋 7-1 号） |
+|---|---|---|
+| ⚡ 出力（発電端） | 60 万 kW | 118.82 万 kW |
+| 🧩 段（τ は仮置き） | ボイラ 512 s → 蒸気 64 s | ガスタービン 8 s → 排熱回収ボイラ 256 s → 蒸気 64 s |
+| 🔀 割合 | ボイラ → 蒸気 94 %（仮置き）、蒸気 → 電気 47.9 %（解く） | GT → 電気 42.6 %（7HA.02）、排熱 → 煙突 10.7 %、蒸気 → 電気 40.0 %（解く） |
+| 🔌 発電端 / 送電端（LHV） | 45 / 42 % | 63.08 / 61.4 % |
+| 🔥 同（HHV） | 43.0 / 40.2 %（表は 43 / 40） | 56.8 / 55.3 % |
+| 🧾 行き先（燃料の HHV = 100） | 🔌 40.2・🏠 2.9・🏭 10.1・🌊 46.9 | 🔌 55.3・🏠 1.5・🏭 15.5・🌊 27.7 |
+| ⏳ 送電の遅れの平均 | 576 s（512 + 64） | 112 s（GT の分 8 s、蒸気の分 328 s） |
+| 📐 Carnot / CA（Tc 25 °C） | 0.659 / 0.416（主蒸気 600 °C） | 0.841 / 0.601（1600 °C） |
+
+- 🧮 効率 = 段ごとの割合の積 × (1 − 所内率)。🌀 は η = η_GT + (1 − η_GT)·η_回収·η_ST（ガスタービンの排熱を蒸気でもう一度使う）。「解く」の割合は発電端の効率に合わせて決めたもの
+- 🔥 HHV 基準 / LHV 基準 = 燃料の LHV/HHV（石炭 0.956、天然ガス 0.90）。環境省の表の比（43/45、57.5/64）と丸めの範囲で合う
+- 🌊 石炭ではいちばん大きい行き先が海（復水器）。🌀 は排熱をもう一度使うぶん海が減り、ガスは水素が多いぶん煙突（潜熱）が増える
+- ⏳ 燃やし始めると、熱が段に溜まる分だけ電気が遅れる: 送電した量 = 送電の速さ × (t − 遅れ)、遅れ = 経路ごとの τ の和を電気の取り分で重み付けたもの（V = F·T と同じ式）
+- 📐 どちらも Carnot より下で、Curzon–Ahlborn の 1 − √(Tc/Th) は超える（再熱・再生・複合で、熱の出入りの損を減らした）。1975 年の表の 3 発電所は CA の方が実測に近い
+- 🎲 τ を A×10^-N 倍にしても割合は同じで、遅れだけが同じ倍率になる。出力を x 倍にすると全部 x 倍
+- ⚠️ 仮置き: 🪨 のボイラ 94 %、どの τ も（起動の操作・暖機は入れていない）。部分負荷で効率が落ちること、水・蒸気の循環、タービンの段ごとの損、温度・圧力の変化は入れていない
+
 ## 🚿 出口の数（E29）
 
 同じ槽から弁が何本か出ているとき、弁を 1 本ずつ別々に計算すると、どの弁も「ステップの最初にあった量」の 1 − e^(−k·dt) を取る。互いの取り分を知らずに取るので、合わせると e^(−K·dt) より少し多く取る（速く空く = 遅れが短く出る）。
@@ -496,6 +522,7 @@ uv run python fluidfullspeedsimulation.py draw 🫗 🟩                     # �
 - 🍜 流しそうめん: 麺どうしのからまり、竹の向きを変える分岐、麺の密度・摩擦・挟む時間の実測値
 - 🟩 Node 側の鏡合わせ実装（BigInt で同じ整数列になるか）
 - 🫀 循環: 1 拍ずつのポンプ、脳の自動調節（浮き弁の cam で動脈の量によらず流れを保つ）、運動時の配分、色素の希釈で心拍出量・血液量を測る（成分モード）
+- 🔥 火力: 水・蒸気の循環（給水ポンプ → ボイラ → タービン → 復水器が ±0 で回る）、部分負荷の効率。❄️ ヒートポンプ（COP の上限 Tc/(Th − Tc)）
 
 ## 📚 出典
 
@@ -536,4 +563,11 @@ uv run python fluidfullspeedsimulation.py draw 🫗 🟩                     # �
 - [Barrow Quarterly: CT Perfusion Imaging（中心容積の原理 MTT = CBV / CBF）](https://www.barrowneuro.org/for-physicians-researchers/education/grand-rounds-publications-media/barrow-quarterly/volume-17-no-3-2001/ct-perfusion-imaging/)
 - [Zaharchuk 2007, AJNR 28:1850（脳血流 50 mL/100 g/min、脳血液量 2〜5 mL/100 g）](https://www.ajnr.org/content/28/10/1850)
 - [Newman ほか 2006, AJNR（PMC8133912: 平均通過時間 3.43〜4.18 s、脳血流 43.8〜55.5 mL/100 g/min）](https://pmc.ncbi.nlm.nih.gov/articles/PMC8133912)
+- [環境省: 発電技術の BAT 表（USC 90〜110 万 kW 級 発電端 43 (45)・送電端 40 (42) %、GTCC 1650 °C 級 発電端 57.5 (64)・送電端 56 %。括弧は LHV）](https://www.env.go.jp/content/000072257.pdf)
+- [磯子火力発電所（新 1 号機 60 万 kW・USC・主蒸気 600 °C・25.0 MPa・HHV 43 % / LHV 45 %）](https://pedia.3rd-in.co.jp/wiki/%E7%A3%AF%E5%AD%90%E7%81%AB%E5%8A%9B%E7%99%BA%E9%9B%BB%E6%89%80)
+- [GE: 西名古屋 7-1 号が発電効率 63.08 % でギネス世界記録（2018）](https://www.ge.com/news/press-releases/ges-ha-gas-turbine-delivers-second-world-record-efficiency/jp)、[日刊工業新聞: 118 万 8200 kW、GT 3 台 + ST 1 台、1600 °C](https://www.nikkan.co.jp/articles/view/00448935)、[経済産業省 審査書（1600 °C 級、低位発熱量基準 約 62 %）](https://www.meti.go.jp/policy/safety_security/industrial_safety/sangyo/electric/files/nishinagoya/shinsasyo2.pdf)
+- [GE Vernova: 7HA.02 単体 42.6 %（LHV）](https://www.gevernova.com/gas-power/products/gas-turbines/7ha)
+- [US 6606848（排熱回収ボイラの入熱の約 10.7 % が煙突へ）](https://image-ppubs.uspto.gov/dirsearch-public/print/downloadPdf/6606848)
+- [NCASI: HHV → LHV の換算（天然ガス 0.90）](https://www.ncasi.org/wp-content/uploads/2025/09/NCASI_FS-25-01_Conversion-of-HHVs-to-LHVs-for-Various-Fuels-Used-in-the-FPI_09.2025.pdf)、[GREET の発熱量表（瀝青炭 LHV 26.1・HHV 27.3 MJ/kg）](https://courses.grainger.illinois.edu/npre470/sp2018/web/Lower_and_Higher_Heating_Values_of_Gas_Liquid_and_Solid_Fuels.pdf)
+- [Endoreversible thermodynamics — Wikipedia（Curzon & Ahlborn 1975 の表: West Thurrock・CANDU・Larderello）](https://en.wikipedia.org/wiki/Endoreversible_thermodynamics)、[DTU: Curzon-Ahlborn-virkningsgraden（Avedøre 2003 は 0.52 で CA 0.41 を超える）](https://dcwww.fysik.dtu.dk/~oltr/Xdrev/evigenergi/noter/0CURZON.DOC)
 - [ふるなび: そうめんとひやむぎの違い（食品表示基準の太さ区分）](https://furunavi.jp/discovery/knowledge_food/202504-somen_hiyamugi/)

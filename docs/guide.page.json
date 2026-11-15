@@ -379,6 +379,30 @@
               "alt": "D24 circulation"
             }
           ]
+        },
+        {
+          "type": "card",
+          "title": "D25 🪨 coal-power",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D25_coal-power_water.gif",
+              "alt": "D25 coal-power"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "D26 🌀 combined-cycle",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D26_combined-cycle_water.gif",
+              "alt": "D26 combined-cycle"
+            }
+          ]
         }
       ]
     },

@@ -1,4 +1,4 @@
-"""💴 🪙 ⛏️ 同じ配管に流す物を置き換える（E26〜E28）・🚿 出口の数（E29）・🫀 血液の循環（E30）: 定常・総量・Bateman・決済・描画。"""
+"""💴 🪙 ⛏️ 同じ配管に流す物を置き換える（E26〜E28）・🚿 出口の数（E29）・🫀 血液の循環（E30）・🔥 火力発電（E31）: 定常・総量・Bateman・決済・描画。"""
 import math
 import unittest
 
@@ -296,7 +296,7 @@ class Circulation(unittest.TestCase):
             self.assertEqual(net.total_q(), total)
         self.assertEqual(total, to_q(ffs.CIRCULATION["blood"]))
         res = ffs.circulation_network().run(40.0 * ffs.circulation_taus()["vein"])
-        r = ffs.circulation_rates(res)["brain"]
+        r = ffs.node_rates(res)["brain"]
         self.assertAlmostEqual(r["in"], r["out"], places=12)
         self.assertAlmostEqual(r["in"] * 60.0, 0.15 * 5.0, places=9)  # 脳 750 mL/min
 
@@ -311,6 +311,64 @@ class Circulation(unittest.TestCase):
             filled = [fr["counts"][col] for fr in view["frames"]]
             self.assertEqual(filled, sorted(filled))
         self.assertEqual(res["conservation_error_q"], 0)
+
+
+class ThermalPower(unittest.TestCase):
+    """🔥 燃料 → 熱が溜まる段 → 電気・煙突・海（エネルギーだけを流す）。"""
+
+    def test_plan_meets_the_efficiency_and_every_stage_splits_to_one(self):
+        for kind, p in ffs.THERMAL["plants"].items():
+            plan = ffs.thermal_plan(kind)
+            st = ffs.thermal_steady(kind)
+            with self.subTest(plant=kind):
+                for _name, _tau, outs in plan["stages"]:
+                    self.assertAlmostEqual(sum(outs.values()), 1.0, places=12)
+                    self.assertTrue(all(0.0 < v < 1.0 for v in outs.values()))
+                self.assertAlmostEqual(st["gross"] / st["fuel_lhv"], p["efficiency"], places=12)
+                out = st["grid"] + st["aux"] + st["stack"] + st["sea"]  # 定常では燃やした HHV が全部どこかへ出る
+                self.assertAlmostEqual(out / st["fuel_hhv"], 1.0, places=12)
+                self.assertGreater(st["sea"] + st["stack"], st["grid"] * (1.0 - p["efficiency"]) / p["efficiency"] * 0.9)
+
+    def test_combined_cycle_formula(self):
+        outs = {name: o for name, _t, o in ffs.thermal_plan("lng")["stages"]}
+        gt, rec, st = outs["gt"]["power"], outs["hrsg"]["steam"], outs["steam"]["power"]
+        self.assertAlmostEqual(gt + (1.0 - gt) * rec * st, ffs.THERMAL["plants"]["lng"]["efficiency"], places=12)
+
+    def test_curzon_ahlborn_table_and_carnot(self):
+        published = {"West Thurrock": (0.64, 0.40), "CANDU": (0.48, 0.28), "Larderello": (0.33, 0.178)}
+        for name, tc, th, _seen in ffs.THERMAL["curzon_ahlborn"]:
+            cn, ca = published[name]
+            with self.subTest(plant=name):
+                self.assertAlmostEqual(ffs.carnot(tc, th), cn, delta=0.0051)  # Larderello は 0.325（表により 0.33 / 0.32）
+                self.assertAlmostEqual(ffs.curzon_ahlborn(tc, th), ca, delta=0.0005 if name == "Larderello" else 0.005)
+        for item in random_scales(310, 6, n_min=-3, n_max=-2):  # 高温 100〜9990 °C
+            th = item["value"]
+            with self.subTest(t_hot=item["label"]):
+                self.assertLess(ffs.curzon_ahlborn(25.0, th), ffs.carnot(25.0, th))
+
+    def test_lag_scales_with_slow_and_shares_do_not(self):
+        for kind in ffs.THERMAL["plants"]:
+            base = ffs.thermal_steady(kind)
+            for item in random_scales(311, 4, n_min=-1, n_max=1):  # 0.1〜99.9 倍
+                c = item["value"]
+                st = ffs.thermal_steady(kind, slow=c)
+                with self.subTest(plant=kind, slow=item["label"]):
+                    self.assertAlmostEqual(st["lag"] / base["lag"], c, places=9)
+                    self.assertAlmostEqual(st["grid"], base["grid"], places=9)
+
+    def test_scenes(self):
+        self.assertEqual((ffs.scene_arg("🪨"), ffs.scene_arg("🌀")), ("coal-power", "combined-cycle"))
+        for scene, kind in ffs.THERMAL_SCENES.items():
+            res, cols = ffs.rig_section(scene)
+            self.assertEqual(cols, ffs.thermal_columns(kind))
+            view = pw.network_frames(res, cols, frames=None, rows=16)
+            fuel = [fr["counts"][0] for fr in view["frames"]]
+            self.assertEqual(fuel, sorted(fuel, reverse=True))
+            for col in range(len(cols) - 4, len(cols)):  # 出口は溜まる一方
+                got = [fr["counts"][col] for fr in view["frames"]]
+                self.assertEqual(got, sorted(got))
+            self.assertEqual(res["volumes_q"]["fuel"], 0)  # ちょうど燃やし切る
+            self.assertEqual(res["conservation_error_q"], 0)
 
 
 class Scenes(unittest.TestCase):

@@ -814,6 +814,61 @@
         128.0
       ],
       "conserved": true
+    },
+    {
+      "id": "D25",
+      "scene": "coal-power",
+      "icon": "🪨",
+      "fluid": "water",
+      "fill": "🟧",
+      "file": "D25_coal-power_water.gif",
+      "bytes": 31552,
+      "sha256": "34731bf6046d21d035aa75fd1d0dde88e2a30708fa2b9227dd9207533c3bce8b",
+      "frames": 40,
+      "canvas": "288x160",
+      "kind": "section",
+      "columns": [
+        "fuel",
+        "boiler",
+        "steam",
+        "grid",
+        "aux",
+        "stack",
+        "sea"
+      ],
+      "t": [
+        32.0,
+        2048.0
+      ],
+      "conserved": true
+    },
+    {
+      "id": "D26",
+      "scene": "combined-cycle",
+      "icon": "🌀",
+      "fluid": "water",
+      "fill": "🟧",
+      "file": "D26_combined-cycle_water.gif",
+      "bytes": 31028,
+      "sha256": "6403ebfc94d8cdf0267fb02c97cb0d99e4abaeeca73d9a7f80c55e628b80eeed",
+      "frames": 40,
+      "canvas": "328x160",
+      "kind": "section",
+      "columns": [
+        "fuel",
+        "gt",
+        "hrsg",
+        "steam",
+        "grid",
+        "aux",
+        "stack",
+        "sea"
+      ],
+      "t": [
+        32.0,
+        2048.0
+      ],
+      "conserved": true
     }
   ]
 }

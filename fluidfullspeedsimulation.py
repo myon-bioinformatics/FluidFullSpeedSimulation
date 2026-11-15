@@ -3192,7 +3192,7 @@ def circulation_steady(*, blood: float | None = None, output: float | None = Non
     return {"output": flow, "limited": flow < want, "rest_time": rest, **out}
 
 
-def circulation_rates(res: dict) -> dict:
+def node_rates(res: dict) -> dict:
     """最後のステップの、槽ごとの 入る速さ・出る速さ [L/s]。"""
     rates: dict = {}
     for ln in res["links"]:
@@ -3205,7 +3205,7 @@ def circulation_rates(res: dict) -> dict:
 def _circulation_checks(tag: str, res: dict, st: dict) -> list[dict]:
     names = circulation_columns()
     worst = max(rel_err(from_q(res["volumes_q"][n]), st[n]) for n in names if st[n] > 0)
-    pumped = circulation_rates(res)["heart"]["out"]
+    pumped = node_rates(res)["heart"]["out"]
     return [
         check(f"{tag}steady:discrete", "🎯", worst <= 1e-9, value=worst, tol=1e-9,
               note="どの槽も 入る速さ × 滞在時間（離散の定常: エンジンの 1 ステップをそのまま解いた式）、心臓は残り"),
@@ -3229,7 +3229,7 @@ def e30_circulation(seed: int = 30) -> dict:
     res = net.run(t_end)
     exact, smooth = circulation_steady(dt=dt), circulation_steady()
     got = {n: from_q(res["volumes_q"][n]) for n in names}
-    rates = circulation_rates(res)
+    rates = node_rates(res)
     balance = {n: abs(r["in"] - r["out"]) / r["in"] for n, r in rates.items()}
     links = res["links"]
     moved_in = sum(ln["volume_moved_q"] for ln in links if ln["dst"] == "brain")
@@ -3273,6 +3273,191 @@ def e30_circulation(seed: int = 30) -> dict:
             "checks": checks}
 
 
+# --- E31 火力発電（🔥 燃料 → 熱 → 電気。エネルギーだけを流す） ------------------------------
+
+# 時間は秒、エネルギーは MJ（速さは MW）。効率は LHV（低位発熱量）基準で持ち、燃料は HHV（高位発熱量）で入れる:
+# HHV − LHV（燃えてできた水蒸気の潜熱）は、そのまま煙突へ出る。stages は熱が溜まる槽を順に (名前, τ [s], {行き先: 割合})。
+# 割合 None は発電端の効率 efficiency に合うように解く。"power" は発電端の電気で、所内率 aux で 🏠 所内 と 🔌 送電 に分ける。
+# 🪨 磯子新 1 号級の USC（60 万 kW、主蒸気 600 °C、発電端 45 %・送電端 42 % LHV）、ボイラ 94 % は仮置き。
+# 🌀 西名古屋 7-1 号（118.82 万 kW、1600 °C 級、発電端 63.08 % LHV）、ガスタービン単体 42.6 %（7HA.02）、
+#    排熱回収ボイラの煙突 10.7 %、所内率は 1650 °C 級の 発電端 57.5 → 送電端 56 % HHV から。τ はどれも仮置き。
+# table は環境省 BAT 表の 発電端 (HHV, LHV)（🪨 90〜110 万 kW 級 USC、🌀 1650 °C 級 GTCC）。
+# curzon_ahlborn は 1975 年の表（名前, 低温 °C, 高温 °C, 実測の効率）。
+THERMAL = {
+    "t_cold": 25.0, "dt": 4.0, "scene": (2048.0, 8),
+    "plants": {
+        "coal": {"icon": "🪨", "gross": 600.0, "lhv_hhv": 26.1 / 27.3, "efficiency": 0.45, "aux": 1.0 - 42.0 / 45.0,
+                 "t_hot": 600.0, "table": (0.43, 0.45), "stages": (("boiler", 512.0, {"steam": 0.94, "stack": 0.06}),
+                                            ("steam", 64.0, {"power": None, "sea": None}))},
+        "lng": {"icon": "🌀", "gross": 1188.2, "lhv_hhv": 0.90, "efficiency": 0.6308, "aux": 1.0 - 56.0 / 57.5,
+                "t_hot": 1600.0, "table": (0.575, 0.64), "stages": (("gt", 8.0, {"power": 0.426, "hrsg": 0.574}),
+                                            ("hrsg", 256.0, {"stack": 0.107, "steam": 0.893}),
+                                            ("steam", 64.0, {"power": None, "sea": None}))},
+    },
+    "curzon_ahlborn": (("West Thurrock", 25.0, 565.0, 0.36), ("CANDU", 25.0, 300.0, 0.30),
+                       ("Larderello", 80.0, 250.0, 0.16)),
+}
+
+
+def thermal_plan(kind: str) -> dict:
+    """段の割合を埋める（None は発電端の効率に合わせて解く）。reach = 燃料 LHV のうちその段に入る割合。"""
+    p = THERMAL["plants"][kind]
+    stages, reach, known = [], {p["stages"][0][0]: 1.0}, 0.0
+    for name, tau, outs in p["stages"]:
+        if None in outs.values():
+            x = (p["efficiency"] - known) / reach[name]
+            outs = {"power": x, "sea": 1.0 - x}
+        known += reach[name] * outs.get("power", 0.0)
+        for dst, s in outs.items():
+            if dst not in ("power", "stack", "sea"):
+                reach[dst] = reach.get(dst, 0.0) + reach[name] * s
+        stages.append((name, tau, outs))
+    return {**p, "stages": tuple(stages), "reach": reach}
+
+
+def thermal_columns(kind: str) -> list[str]:
+    """断面図の列: ⛽ 燃料 ｜ 熱が溜まる段 … ｜ 🔌 送電 ｜ 🏠 所内 ｜ 🏭 煙突 ｜ 🌊 海。"""
+    return ["fuel", *(name for name, _t, _o in THERMAL["plants"][kind]["stages"]), "grid", "aux", "stack", "sea"]
+
+
+def thermal_fuel(kind: str, load: float = 1.0) -> tuple[float, float]:
+    """燃やす速さ (LHV, HHV) [MW]。load は出力の割合（効率は変えない）。"""
+    p = THERMAL["plants"][kind]
+    lhv = load * p["gross"] / p["efficiency"]
+    return lhv, lhv / p["lhv_hhv"]
+
+
+def thermal_network(kind: str, *, load: float = 1.0, slow: float = 1.0, t_fuel: float | None = None,
+                    dt: float | None = None) -> Network:
+    """🔥 燃料 → 段（熱が溜まる槽）→ 🔌 送電・🏠 所内・🏭 煙突・🌊 海（復水器の冷却水）。燃料は t_fuel 秒ぶんちょうど。
+    slow はどの τ も何倍にするか（割合は変わらない）。"""
+    plan, aux = thermal_plan(kind), THERMAL["plants"][kind]["aux"]
+    net = Network(dt=THERMAL["dt"] if dt is None else dt)
+    for name in thermal_columns(kind):
+        net.tank(name, 1.0)
+    lhv, hhv = thermal_fuel(kind, load)
+    net.pump("fuel", plan["stages"][0][0], rate=lhv)
+    net.pump("fuel", "stack", rate=hhv - lhv)  # 水蒸気の潜熱（HHV − LHV）
+    steps = int(round((THERMAL["scene"][0] if t_fuel is None else t_fuel) / net.dt))
+    net.nodes["fuel"]["v"] = steps * sum(ln["amount"] for ln in net.links)  # ポンプの量（Q）のちょうど steps 回分
+    for name, tau, outs in plan["stages"]:
+        for dst, s in outs.items():
+            if dst == "power":
+                net.valve(name, "grid", tau=slow * tau / (s * (1.0 - aux)))
+                net.valve(name, "aux", tau=slow * tau / (s * aux))
+            else:
+                net.valve(name, dst, tau=slow * tau / s)
+    return net
+
+
+def thermal_steady(kind: str, *, load: float = 1.0, slow: float = 1.0, dt: float | None = None) -> dict:
+    """行き渡った後（閉じた式）: 段に溜まる熱 = 入る速さ × τ（💴 🪙 🫀 と同じ steady_tank）、出口の速さは割合どおり。
+    lag は 送電の遅れの平均 = 電気の経路ごとの τ の和を、その経路の電気の取り分で重み付けたもの。"""
+    plan = thermal_plan(kind)
+    lhv, hhv = thermal_fuel(kind, load)
+    flows = {plan["stages"][0][0]: (lhv, lhv)}  # 段: (入る速さ, 同じステップの中で数える速さ)
+    delay, out, power, lag = {plan["stages"][0][0]: 0.0}, {}, 0.0, 0.0
+    sinks = {"stack": hhv - lhv, "sea": 0.0}
+    for name, tau, outs in plan["stages"]:
+        actual, counted = flows.pop(name)
+        out[name], base = steady_tank(1.0 / (slow * tau), actual, counted, dt)
+        here = delay[name] + slow * tau
+        for dst, s in outs.items():
+            if dst == "power":
+                power += actual * s
+                lag += actual * s * here
+            elif dst in sinks:
+                sinks[dst] += actual * s
+            else:
+                a, c = flows.get(dst, (0.0, 0.0))
+                flows[dst] = (a + actual * s, c + base * s)
+                delay[dst] = here
+    aux = plan["aux"]
+    return {"fuel_lhv": lhv, "fuel_hhv": hhv, "gross": power, "grid": power * (1.0 - aux), "aux": power * aux,
+            **sinks, "lag": lag / power, "stored": out}
+
+
+def carnot(t_cold: float, t_hot: float) -> float:
+    return 1.0 - (t_cold + 273.15) / (t_hot + 273.15)
+
+
+def curzon_ahlborn(t_cold: float, t_hot: float) -> float:
+    """最大出力のときの効率 1 − √(Tc/Th)（温度差に比例する熱の出入りで出力を最大にした熱機関）。"""
+    return 1.0 - math.sqrt((t_cold + 273.15) / (t_hot + 273.15))
+
+
+def _thermal_checks(tag: str, kind: str, res: dict, st: dict, t_end: float) -> list[dict]:
+    rates = node_rates(res)  # 最後のステップの、槽ごとの 入る・出る 速さ
+    lhv = st["fuel_lhv"]
+    stored = {n: from_q(res["volumes_q"][n]) for n in st["stored"]}
+    worst = max(rel_err(stored[n], st["stored"][n]) for n in stored)
+    eff = rates["grid"]["in"] / lhv
+    grid = from_q(res["volumes_q"]["grid"])
+    lag_got = t_end - grid / st["grid"]  # 送電した量 = 送電の速さ × (t − 遅れ)
+    dt = res["dt"]
+    return [
+        check(f"{tag}stored", "🎯", worst <= 1e-9, value=worst, tol=1e-9,
+              note="段に溜まる熱 = 入る速さ × τ（離散の定常: エンジンの 1 ステップをそのまま解いた式）"),
+        close(f"{tag}net", "🔌", eff, st["grid"] / lhv, 1e-9,
+              note="送電端の効率（LHV）= 段ごとの割合の積 × (1 − 所内率)"),
+        check(f"{tag}lag", "⏳", abs(lag_got - st["lag"]) <= dt, value=lag_got, expected=st["lag"], tol=dt,
+              note="送電の遅れの平均 = 電気の経路ごとの τ の和（取り分で重み付け）。燃やし始めてから溜まった熱の分だけ遅れる"),
+        conserved(f"{tag}conserve", res),
+    ]
+
+
+def e31_thermal_power(seed: int = 31) -> dict:
+    """🔥 火力発電のエネルギーの行き先。🪨 石炭（USC）と 🌀 LNG のコンバインドサイクルを、燃料 → 熱が溜まる段 → 電気・煙突・海
+    と流す。効率は段ごとの割合の積、遅れは τ の和。Carnot・Curzon–Ahlborn の式とも比べる（水・蒸気の循環は次の段階）。"""
+    t, checks, summary = THERMAL, [], {}
+    t_end = 32.0 * max(tau for p in t["plants"].values() for _n, tau, _o in p["stages"])
+    for i, (kind, p) in enumerate(t["plants"].items()):
+        plan = thermal_plan(kind)
+        st = thermal_steady(kind, dt=t["dt"])
+        res = thermal_network(kind, t_fuel=t_end).run(t_end)
+        checks += _thermal_checks(f"{kind}:", kind, res, st, t_end)
+        gross = st["gross"] / st["fuel_lhv"]
+        hhv_net = st["grid"] / st["fuel_hhv"]
+        ca, cn = curzon_ahlborn(t["t_cold"], p["t_hot"]), carnot(t["t_cold"], p["t_hot"])
+        checks += [
+            close(f"{kind}:gross", p["icon"], gross, p["efficiency"], 1e-12,
+                  note="発電端の効率（LHV）= 出典の値（割合 None の段をこれに合うように解いた）"),
+            close(f"{kind}:hhv", "🔥", p["table"][0] / p["table"][1], p["lhv_hhv"], 0.012,
+                  note="表の HHV 基準 / LHV 基準 = 燃料の LHV/HHV（潜熱はそのまま煙突へ出るので、効率の比は燃料の比。表の丸め 0.5 点まで）"),
+            check(f"{kind}:carnot", "📐", gross < cn, value=gross, expected=cn,
+                  note="Carnot の上限 1 − Tc/Th より低い（Tc 25 °C、Th は主蒸気・タービン入口の温度）"),
+            check(f"{kind}:beyond-ca", "📈", gross > ca, value=gross, expected=ca,
+                  note="いまの発電所は Curzon–Ahlborn の 1 − √(Tc/Th) を超える（再熱・再生・複合で熱の出入りの損を減らした）"),
+        ]
+        sinks = {k: st[k] / st["fuel_hhv"] for k in ("grid", "aux", "stack", "sea")}
+        summary[kind] = {"efficiency_lhv": {"gross": gross, "net": st["grid"] / st["fuel_lhv"]},
+                         "efficiency_hhv": {"gross": st["gross"] / st["fuel_hhv"], "net": hhv_net},
+                         "share_of_hhv": sinks, "lag_s": st["lag"], "carnot": cn, "curzon_ahlborn": ca,
+                         "plan": {name: outs for name, _tau, outs in plan["stages"]}}
+        for item in random_scales(seed + 2 * i, 2, n_min=1, n_max=1):  # 🎲 どの τ も c 倍速く（0.1〜0.999 倍）
+            c = item["value"]
+            r = thermal_network(kind, slow=c, t_fuel=t_end).run(t_end)
+            checks += _thermal_checks(f"{kind}:slow={item['label']}:", kind, r,
+                                      thermal_steady(kind, slow=c, dt=t["dt"]), t_end)
+        for item in random_scales(seed + 2 * i + 1, 2, n_min=1, n_max=1):  # 🎲 出力を x 倍（0.1〜0.999、効率は変えない）
+            x = item["value"]
+            r = thermal_network(kind, load=x, t_fuel=t_end).run(t_end)
+            more = _thermal_checks(f"{kind}:load={item['label']}:", kind, r, thermal_steady(kind, load=x, dt=t["dt"]),
+                                   t_end)
+            ratio = from_q(r["volumes_q"]["grid"]) / from_q(res["volumes_q"]["grid"])
+            checks += more + [close(f"{kind}:load={item['label']}:linear", "🎲📈", ratio, x, 1e-9,
+                                    note="燃料を x 倍にすると送電も x 倍（部分負荷で効率が落ちることは入れていない）")]
+    # 📚 Curzon–Ahlborn（1975）の表: 実測は Carnot より低く、CA の方が近い
+    for name, tc, th, seen in t["curzon_ahlborn"]:
+        cn, ca = carnot(tc, th), curzon_ahlborn(tc, th)
+        checks.append(check(f"ca:{name}", "📚", seen < cn and abs(seen - ca) < abs(seen - cn), value=seen, expected=ca,
+                            note=f"Carnot {cn:.2f}・CA {ca:.3f}。実測は Carnot より低く、CA に近い"))
+        summary.setdefault("curzon_ahlborn_table", {})[name] = {"carnot": cn, "curzon_ahlborn": ca, "observed": seen}
+    return {"params": {"thermal": t, "seed": seed}, "summary": summary, "checks": checks,
+            "runs": {kind: thermal_network(kind).run(t["scene"][0], sample_every=t["scene"][1])["series"]
+                     for kind in t["plants"]}}
+
+
 # --- 登録簿 ---------------------------------------------------------------
 
 EXPERIMENTS = {
@@ -3310,6 +3495,8 @@ EXPERIMENTS = {
             e29_outlet_count),
     "E30": ("circulation", "🫀", "血液の循環（心臓 → 器官 → 心臓: 器官は入る = 出る、V = F·T、一周 60 s、心臓は戻ってきた分しか送れない）",
             e30_circulation),
+    "E31": ("thermal-power", "🔥", "火力発電（燃料 → 熱が溜まる段 → 電気・煙突・海: 効率は割合の積、遅れは τ の和、Carnot・Curzon–Ahlborn と比べる）",
+            e31_thermal_power),
 }
 SLUGS = {slug: eid for eid, (slug, *_rest) in EXPERIMENTS.items()}
 
@@ -3367,7 +3554,8 @@ SCENE_ICONS = {"🏛": "moniac-rig", "🥢": "somen-flume", "🎋": "flume", "�
                "🧱": "noodle-clog", "🍽": "chopsticks", "🌧": "rain-runoff", "🎍": "shishi-odoshi",
                "🍷": "pythagorean-cup", "🫗": "mariotte", "🏺": "water-clock", "🚧": "inertia-limits",
                "⚗": "distillation", "👼": "angels-share", "💴": "money-flow", "🪙": "gold-flow", "⛏": "rare-metal",
-               "🚿": "outlet-count", "🫀": "circulation"}
+               "🚿": "outlet-count", "🫀": "circulation",
+               "🪨": "coal-power", "🌀": "combined-cycle"}
 
 
 def fluid_arg(text: str) -> str:
@@ -3376,7 +3564,7 @@ def fluid_arg(text: str) -> str:
 
 
 def scene_arg(text: str) -> str:
-    """draw の場面: 名前でも 🏛️ 🥢 🎋 🫙 🌊 🕳️ 🧊 🪵 🍜 🧱 🍽️ 🌧️ 🎍 🍷 🫗 🏺 🚧 ⚗️ 👼 💴 🪙 ⛏️ 🚿 🫀 でもよい。"""
+    """draw の場面: 名前でも 🏛️ 🥢 🎋 🫙 🌊 🕳️ 🧊 🪵 🍜 🧱 🍽️ 🌧️ 🎍 🍷 🫗 🏺 🚧 ⚗️ 👼 💴 🪙 ⛏️ 🚿 🫀 🪨 🌀 でもよい。"""
     return SCENE_ICONS.get(_plain(text), text)
 
 
@@ -3552,6 +3740,13 @@ def rig_section(scene: str, fluid: str = "water", temp_c: float | None = None, m
     if scene == "circulation":  # 🫀 最初は全部心臓に。送り出して器官・静脈・肺を通って戻る（⏱️ は秒、縦いっぱいは槽ごと）
         t_end, every = CIRCULATION["scene"]
         return circulation_network().run(t_end, sample_every=every), circulation_columns()
+    if scene in THERMAL_SCENES:  # 🪨 🌀 燃料を燃やし切るまで。出口（送電・所内・煙突・海）は縦いっぱいを揃える（⏱️ は秒）
+        kind = THERMAL_SCENES[scene]
+        t_end, every = THERMAL["scene"]
+        res = thermal_network(kind).run(t_end, sample_every=every)
+        sinks = ("grid", "aux", "stack", "sea")
+        res["caps"] = dict.fromkeys(sinks, max(from_q(res["volumes_q"][n]) for n in sinks))
+        return res, thermal_columns(kind)
     raise KeyError(f"unknown rig scene {scene!r}")
 
 
@@ -3561,9 +3756,10 @@ def _from(res: dict, t0: float) -> dict:
 
 
 HUB_SCENES = {"money-flow": ("money", 64.0, 4), "gold-flow": ("gold", 64.0, 4), "rare-metal": ("rare-metal", 320.0, 8)}
+THERMAL_SCENES = {"coal-power": "coal", "combined-cycle": "lng"}
 RIG_SCENES = ("moniac-rig", "somen-flume", "noodle-length", "noodle-clog", "chopsticks", "cold-water",
               "bamboo-wear", "rain-runoff", "shishi-odoshi", "pythagorean-cup", "mariotte", "water-clock",
-              "inertia-limits", "distillation", "angels-share", *HUB_SCENES, "outlet-count", "circulation")
+              "inertia-limits", "distillation", "angels-share", *HUB_SCENES, "outlet-count", "circulation", *THERMAL_SCENES)
 
 
 def _visc(args) -> dict:
@@ -3624,7 +3820,7 @@ def _formats(args) -> tuple[str, ...]:
 
 # --- 🎞️ README のデモ（場面ごとに GIF 1 枚） ----------------------------------------
 
-# (場面, 流体, 塗り)。塗りは色だけ（物理は流体で決まる）。⚗️ はエタノールの 🟨、👼 は琥珀の 🟧、🫀 は血の 🟥 で塗る
+# (場面, 流体, 塗り)。塗りは色だけ（物理は流体で決まる）。⚗️ はエタノールの 🟨、👼 は琥珀の 🟧、🫀 は血の 🟥、🪨 🌀 は熱の 🟧 で塗る
 DEMOS = (("moniac-rig", "water", None), ("moniac-drain", "water", None), ("flume", "water", None),
          ("flume-hopper", "water", None), ("somen-flume", "water", None), ("noodle-length", "water", None),
          ("noodle-clog", "water", None), ("chopsticks", "water", None), ("cold-water", "water", None),
@@ -3632,7 +3828,8 @@ DEMOS = (("moniac-rig", "water", None), ("moniac-drain", "water", None), ("flume
          ("pythagorean-cup", "poison-water", None), ("mariotte", "water", None), ("water-clock", "water", None),
          ("dam-break", "namekian-water", None), ("inertia-limits", "water", None), ("distillation", "water", "🟨"),
          ("angels-share", "water", "🟧"), ("money-flow", "water", "🟩"), ("gold-flow", "water", "🟨"),
-         ("rare-metal", "water", "🟫"), ("outlet-count", "water", None), ("circulation", "water", "🟥"))
+         ("rare-metal", "water", "🟫"), ("outlet-count", "water", None), ("circulation", "water", "🟥"),
+         ("coal-power", "water", "🟧"), ("combined-cycle", "water", "🟧"))
 DEMOS_SCHEMA = "fluidfullspeedsimulation-demos/1"
 _NEEDS_VS16 = set("🏛🕳🍽🌧⚗⛏")  # 絵文字で出すには U+FE0F が要るもの
 
