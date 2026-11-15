@@ -1,15 +1,14 @@
-"""⌨️ コマンド（list・fluids・run・draw）: 終了コード、絵文字の引数、draw の出力、場面ごとの run / draw、vendor の固定ファイル。
+"""⌨️ コマンド（list・fluids・run・draw）: 終了コード、絵文字の引数、draw の出力、場面ごとの run / draw、cli_args の読み込み元。
 
 - CliCase: ``call``（標準出力ごと）と ``usage_error``（argparse の終了コード 2）を 1 か所に
 - Commands: list・fluids・run、--json・--jsonl、終了コード 1 / 2
 - EmojiArguments: 絵文字をそのままコマンドに書く（run 🥢 / draw 🏛️ 🟩 / draw 🥢 🟥）
 - Draw: draw のファイル書き出し・コマ・仮置きの流体・試験台、断る引数
 - 場面ごと: 🍯 粘度・🧊🎋 水温と竹の傷み・🌧️ 雨・🎍🍷🫗 溜まる → 一気に・🚧 慣性
-- Vendor: vendor.lock.json と vendor/ のバイト列、cli_args は vendor から読む
+- Vendor: cli_args は vendor から読む（lock とバイト列は tests/test_fleet.py）
 """
 
 import contextlib
-import hashlib
 import io
 import json
 import tempfile
@@ -228,17 +227,6 @@ class InertiaLimitsScene(CliCase):
 
 
 class Vendor(unittest.TestCase):
-    def test_vendored_files_match_the_lock(self):
-        lock = json.loads((ROOT / "vendor.lock.json").read_text(encoding="utf-8"))
-        self.assertEqual(lock["schema"], "vendor-lock/1")
-        for item in lock["files"]:
-            data = (ROOT / item["destination"]).read_bytes()
-            self.assertEqual(hashlib.sha256(data).hexdigest(), item["sha256"], item["destination"])
-            blob = hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
-            self.assertEqual(blob, item["blob_sha"], item["destination"])
-            self.assertEqual(item["ref"], item["commit"])
-            self.assertRegex(item["commit"], r"^[0-9a-f]{40}$")
-
     def test_cli_args_comes_from_vendor(self):
         cli = ffs.vendored("cli_args")
         self.assertEqual(Path(cli.__file__).resolve(), (ROOT / "vendor" / "cli_args.py").resolve())

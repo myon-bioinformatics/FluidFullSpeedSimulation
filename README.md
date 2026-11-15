@@ -86,7 +86,8 @@ uv run python -m pytest -q                              # 🧪 テスト（pytho
 | 🌊 | `tests/test_network.py` | 回路・🎋 竹の傷み・🍜 麺・🚰 単弁・🧮 丸め方 |
 | 🔬 | `tests/test_experiments.py` | E01〜E29 |
 | 🟦 | `tests/test_pixelwater.py` | ドット絵・断面図・PNG / GIF・🎞️ デモ |
-| ⌨️ | `tests/test_cli.py` | コマンド・絵文字の引数・🔒 vendor |
+| ⌨️ | `tests/test_cli.py` | コマンド・絵文字の引数 |
+| 🔒 | `tests/test_fleet.py` | vendor の lock・親 workflow の固定 commit（親の `fleet_check.py`） |
 
 ### 🐍 / 🟩 名前で呼ぶ（`__main__` を通らない）
 
@@ -115,6 +116,7 @@ node vendor/py_launch.cjs --call simulate -- network.py '{"dt":1,"tanks":[...],"
 |---|---|---|
 | `vendor/cli_args.py` | myon-bioinformatics/cli_args | CLI の parser（`make_parser`、省略形を受け付けない、終了コード 0/1/2） |
 | `vendor/py_launch.cjs` | myon-bioinformatics/myon-bioinformatics | Node から関数を名前で呼ぶ |
+| `vendor/fleet_check.py` | myon-bioinformatics/myon-bioinformatics | 🧪 テスト専用。リポジトリ共通の検査（lock・親の固定 commit） |
 
 commit・blob・sha256 は `vendor.lock.json` に固定。更新は親の `vendor_sync.py`（`check` / `update` / `enroll`）で。
 
