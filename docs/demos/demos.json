@@ -895,6 +895,30 @@
         256.0
       ],
       "conserved": true
+    },
+    {
+      "id": "D28",
+      "scene": "csf",
+      "icon": "🧠",
+      "fluid": "water",
+      "fill": null,
+      "file": "D28_csf_water.gif",
+      "bytes": 6266,
+      "sha256": "8686ecd102247008d1279ae64d22731d634d811584a61664c31883d059088621",
+      "frames": 40,
+      "canvas": "168x160",
+      "kind": "section",
+      "columns": [
+        "ventricles-1",
+        "subarachnoid-1",
+        "ventricles-2",
+        "subarachnoid-2"
+      ],
+      "t": [
+        36.0,
+        1440.0
+      ],
+      "conserved": true
     }
   ]
 }

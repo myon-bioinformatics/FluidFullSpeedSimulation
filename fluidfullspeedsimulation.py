@@ -3544,6 +3544,105 @@ def e32_heat_pump(seed: int = 32) -> dict:
             "runs": {"heat-pump": heat_pump_network().run(p["scene"][0], sample_every=p["scene"][1])["series"]}}
 
 
+# --- E33 脳脊髄液（🧠 血液 → 脳室 → くも膜下腔 → 血液） ---------------------------------------
+
+# 時間は分、量は mL。脈絡叢が血液から 0.35 mL/min（約 500 mL/日）作り、脳室 25 mL → くも膜下腔 125 mL を通って
+# くも膜顆粒から静脈（血液）へ戻る。作る速さは圧によらない（ポンプ）、吸収は圧による（量に比例する弁）。
+# scene は draw の (分, 何ステップごとに描くか): 吸収がふつうの頭 ｜ 止まった頭 を並べる。
+CSF = {"production": 0.35, "volumes": {"ventricles": 25.0, "subarachnoid": 125.0}, "blood": 5000.0, "dt": 1.0,
+       "scene": (1440.0, 36)}
+
+
+def csf_taus() -> dict:
+    """滞在時間 = 量 / 作る速さ（ふつうの状態で決め、吸収の通りやすさを変えても脳室は同じ）。"""
+    return {k: v / CSF["production"] for k, v in CSF["volumes"].items()}
+
+
+def csf_steady(*, opening: float = 1.0, dt: float | None = None) -> dict:
+    """行き渡った後: 脳室 = 作る速さ × τ、くも膜下腔 = 作る速さ × τ / 吸収の開き具合（steady_tank）。"""
+    f, tau = CSF["production"], csf_taus()
+    vent, base = steady_tank(1.0 / tau["ventricles"], f, f, dt)
+    sub, _base = steady_tank(opening / tau["subarachnoid"], f, base, dt)
+    return {"ventricles": vent, "subarachnoid": sub, "turnover_per_day": 1440.0 * f / (vent + sub)}
+
+
+def csf_network(openings=(1.0,), *, steady: bool = False, dt: float | None = None) -> Network:
+    """🩸 血液 → 🧠 脳室 → くも膜下腔 → 🩸 血液（頭ごとに -1, -2 …）。opening は吸収（くも膜顆粒）の開き具合、0 なら吸収しない。
+    steady=True なら、どの頭もその開き具合の離散の定常量から始める（最初から回っている状態。0 の頭は止まる直前のふつうの量）。"""
+    p, tau = CSF, csf_taus()
+    net = Network(dt=p["dt"] if dt is None else dt)
+    empty = {"ventricles": 0.0, "subarachnoid": 0.0}
+    starts = [csf_steady(opening=o if o > 0 else 1.0, dt=net.dt) if steady else empty for o in openings]
+    net.tank("blood", 1.0, volume=p["blood"] - sum(st[k] for st in starts for k in p["volumes"]))
+    for i, (o, start) in enumerate(zip(openings, starts), 1):
+        vent, sub = f"ventricles-{i}", f"subarachnoid-{i}"
+        net.tank(vent, 1.0, volume=start["ventricles"]).tank(sub, 1.0, volume=start["subarachnoid"])
+        net.pump("blood", vent, rate=p["production"])
+        net.valve(vent, sub, tau=tau["ventricles"])
+        if o > 0:
+            net.valve(sub, "blood", tau=tau["subarachnoid"], opening=o)
+    return net
+
+
+def e33_csf(seed: int = 33) -> dict:
+    """🧠 脳脊髄液は血液から作られ、脳室とくも膜下腔を通って血液へ戻る（脳の中の小さな循環）。頭の中では 入る = 出る（±0）、
+    量 = 作る速さ × 滞在時間、1 日に 3〜4 回入れ替わる。吸収が止まると、作る速さのまま溜まる。"""
+    p, tau, checks = CSF, csf_taus(), []
+    dt = p["dt"]
+    total = sum(p["volumes"].values())
+    t_end = 40.0 * tau["subarachnoid"]
+    turn = total / p["production"]
+    net = csf_network()
+    net.tracer("dye", "ventricles-1", release=t_end - 4.0 * turn, stop="blood")  # 🧪 脳室に入れた色素（先入れ先出し）
+    res = net.run(t_end)
+    st = csf_steady(dt=dt)
+    got = {k: from_q(res["volumes_q"][f"{k}-1"]) for k in p["volumes"]}
+    worst = max(rel_err(got[k], st[k]) for k in got)
+    rates = node_rates(res)
+    made, absorbed = rates["ventricles-1"]["in"], rates["subarachnoid-1"]["out"]
+    dye = res["tracers"][0]
+    lap = None if dye["arrival"] is None else dye["arrival"] - dye["path"][0]["t"]
+    checks += [
+        check("steady", "🎯", worst <= 1e-9, value=worst, tol=1e-9,
+              note="脳室 = 作る速さ × τ、くも膜下腔も同じ（離散の定常: エンジンの 1 ステップをそのまま解いた式）"),
+        close("steady:volume", "📐", sum(got.values()), total, dt / tau["ventricles"],
+              note="合計 150 mL（脳室 25 + くも膜下腔 125）。連続の式との差は刻みの分まで"),
+        close("skull:±0", "🧠", absorbed, made, 1e-9, note="頭の中は 作る速さ = 吸収する速さ（入る = 出る）"),
+        close("turnover", "🔄", 1440.0 * absorbed / sum(got.values()), st["turnover_per_day"], 1e-9,
+              note="1 日に入れ替わる回数 = 1 日に作る量 / 量（504 / 150 = 3.36 回）"),
+        check("dye", "🧪", lap is not None and abs(lap - turn) <= 2 * dt, value=lap, expected=turn, tol=2 * dt,
+              note="脳室に入れた色素が血液に出るまで = 量 / 作る速さ（7.1 時間）"),
+        conserved("conserve", res),
+    ]
+    # 🚫 吸収が止まると、作った分がそのまま溜まる（1 日で 504 mL、整数で 0 ulp）
+    day = 1440.0
+    blocked = csf_network((0.0,), steady=True).run(day)
+    gained = sum(blocked["volumes_q"][f"{k}-1"] for k in p["volumes"]) - sum(to_q(st[k]) for k in p["volumes"])
+    pump = next(ln for ln in blocked["links"] if ln["kind"] == "pump")
+    checks += [
+        check("blocked:gain", "🚫", gained == pump["volume_moved_q"], value=from_q(gained),
+              expected=p["production"] * day, tol=0,
+              note="吸収が止まると 1 日に作る 504 mL がそのまま溜まる（作るのは圧によらない。Q 整数で 0 ulp）"),
+        conserved("blocked:conserve", blocked),
+    ]
+    for item in random_scales(seed, 3, n_min=1, n_max=1):  # 🎲 吸収の通りやすさ o 倍（0.1〜0.999）
+        o = item["value"]
+        want = csf_steady(opening=o, dt=dt)
+        r = csf_network((o,), steady=True).run(day)  # 定常の点に置いて、1 日たっても動かないか
+        sub = from_q(r["volumes_q"]["subarachnoid-1"])
+        checks += [
+            close(f"open={item['label']}:subarachnoid", "🎲🌊", sub, want["subarachnoid"], 1e-9,
+                  note="吸収の通りやすさが o 倍になると、くも膜下腔の量は 1/o 倍で釣り合う（そこから動かない）"),
+            close(f"open={item['label']}:closed-form", "📐", want["subarachnoid"], p["volumes"]["subarachnoid"] / o,
+                  dt / tau["ventricles"], note="連続の式 125 mL / o との差は刻みの分まで"),
+            conserved(f"open={item['label']}:conserve", r),
+        ]
+    summary = {"steady_ml": got, "turnover_per_day": st["turnover_per_day"], "residence_h": turn / 60.0,
+               "dye_lap_min": lap, "blocked_gain_ml_per_day": from_q(gained)}
+    return {"params": {"csf": p, "seed": seed}, "summary": summary, "checks": checks,
+            "runs": {"csf": res["series"][-50:]}}
+
+
 # --- 登録簿 ---------------------------------------------------------------
 
 EXPERIMENTS = {
@@ -3585,6 +3684,8 @@ EXPERIMENTS = {
             e31_thermal_power),
     "E32": ("heat-pump", "❄️", "ヒートポンプ（🔥 の裏返し: 電気 + 外気の熱 → 部屋、COP = 1/η_Carnot が上限、発電所の電気で回すと燃料 1 から部屋に η·COP）",
             e32_heat_pump),
+    "E33": ("csf", "🧠", "脳脊髄液（血液 → 脳室 → くも膜下腔 → 血液: 頭の中は入る = 出る、1 日 3〜4 回入れ替わる、吸収が止まると作る速さで溜まる）",
+            e33_csf),
 }
 SLUGS = {slug: eid for eid, (slug, *_rest) in EXPERIMENTS.items()}
 
@@ -3643,7 +3744,7 @@ SCENE_ICONS = {"🏛": "moniac-rig", "🥢": "somen-flume", "🎋": "flume", "�
                "🍷": "pythagorean-cup", "🫗": "mariotte", "🏺": "water-clock", "🚧": "inertia-limits",
                "⚗": "distillation", "👼": "angels-share", "💴": "money-flow", "🪙": "gold-flow", "⛏": "rare-metal",
                "🚿": "outlet-count", "🫀": "circulation",
-               "🪨": "coal-power", "🌀": "combined-cycle", "❄": "heat-pump"}
+               "🪨": "coal-power", "🌀": "combined-cycle", "❄": "heat-pump", "🧠": "csf"}
 
 
 def fluid_arg(text: str) -> str:
@@ -3652,7 +3753,7 @@ def fluid_arg(text: str) -> str:
 
 
 def scene_arg(text: str) -> str:
-    """draw の場面: 名前でも 🏛️ 🥢 🎋 🫙 🌊 🕳️ 🧊 🪵 🍜 🧱 🍽️ 🌧️ 🎍 🍷 🫗 🏺 🚧 ⚗️ 👼 💴 🪙 ⛏️ 🚿 🫀 🪨 🌀 ❄️ でもよい。"""
+    """draw の場面: 名前でも 🏛️ 🥢 🎋 🫙 🌊 🕳️ 🧊 🪵 🍜 🧱 🍽️ 🌧️ 🎍 🍷 🫗 🏺 🚧 ⚗️ 👼 💴 🪙 ⛏️ 🚿 🫀 🪨 🌀 ❄️ 🧠 でもよい。"""
     return SCENE_ICONS.get(_plain(text), text)
 
 
@@ -3840,6 +3941,12 @@ def rig_section(scene: str, fluid: str = "water", temp_c: float | None = None, m
         res = heat_pump_network().run(t_end, sample_every=every)
         res["caps"] = dict.fromkeys(("power", "outdoor", "room"), from_q(res["volumes_q"]["room"]))
         return res, heat_pump_columns()
+    if scene == "csf":  # 🧠 吸収がふつうの頭 ｜ 止まった頭（どちらも回っている状態から 1 日。⏱️ は分）。くも膜下腔は縦いっぱいを揃える
+        t_end, every = CSF["scene"]
+        res = csf_network((1.0, 0.0), steady=True).run(t_end, sample_every=every)
+        cols = ["ventricles-1", "subarachnoid-1", "ventricles-2", "subarachnoid-2"]
+        res["caps"] = dict.fromkeys(cols[1::2], max(from_q(res["volumes_q"][c]) for c in cols[1::2]))
+        return res, cols
     raise KeyError(f"unknown rig scene {scene!r}")
 
 
@@ -3852,7 +3959,7 @@ HUB_SCENES = {"money-flow": ("money", 64.0, 4), "gold-flow": ("gold", 64.0, 4), 
 THERMAL_SCENES = {"coal-power": "coal", "combined-cycle": "lng"}
 RIG_SCENES = ("moniac-rig", "somen-flume", "noodle-length", "noodle-clog", "chopsticks", "cold-water",
               "bamboo-wear", "rain-runoff", "shishi-odoshi", "pythagorean-cup", "mariotte", "water-clock",
-              "inertia-limits", "distillation", "angels-share", *HUB_SCENES, "outlet-count", "circulation", *THERMAL_SCENES, "heat-pump")
+              "inertia-limits", "distillation", "angels-share", *HUB_SCENES, "outlet-count", "circulation", *THERMAL_SCENES, "heat-pump", "csf")
 
 
 def _visc(args) -> dict:
@@ -3923,7 +4030,7 @@ DEMOS = (("moniac-rig", "water", None), ("moniac-drain", "water", None), ("flume
          ("angels-share", "water", "🟧"), ("money-flow", "water", "🟩"), ("gold-flow", "water", "🟨"),
          ("rare-metal", "water", "🟫"), ("outlet-count", "water", None), ("circulation", "water", "🟥"),
          ("coal-power", "water", "🟧"), ("combined-cycle", "water", "🟧"),
-         ("heat-pump", "water", "🟧"))
+         ("heat-pump", "water", "🟧"), ("csf", "water", None))
 DEMOS_SCHEMA = "fluidfullspeedsimulation-demos/1"
 _NEEDS_VS16 = set("🏛🕳🍽🌧⚗⛏❄")  # 絵文字で出すには U+FE0F が要るもの
 

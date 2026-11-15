@@ -415,6 +415,18 @@
               "alt": "D27 heat-pump"
             }
           ]
+        },
+        {
+          "type": "card",
+          "title": "D28 🧠 csf",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D28_csf_water.gif",
+              "alt": "D28 csf"
+            }
+          ]
         }
       ]
     },

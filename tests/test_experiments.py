@@ -1,6 +1,6 @@
-"""🔬 実験 E01〜E29（ID + 識別子）: 全検証の通しと、場面ごとの閉じた式・回路・定常値。
+"""🔬 実験 E01〜E33（ID + 識別子）: 全検証の通しと、場面ごとの閉じた式・回路・定常値。
 
-- experiments: E01〜E29 の全検証が通る・ID と識別子・乱数で選んだ刻みでの通し
+- experiments: E01〜E33 の全検証が通る・ID と識別子・乱数で選んだ刻みでの通し
 - moniac_rig: E11 moniac-rig を据え置きの試験台にする。
 - rain: 🌧️ 斜面に降る雨: 運動波の閉じた式、Network.rain、spec の rains、区間数での収束、E18 の場面。
 - periodic: 🎍🍷🫗 溜まる → 閾値 → 一気に: tip / siphon / mariotte の法則と E19〜E21。
@@ -8,7 +8,7 @@
 - limits: 🚧 E23 inertia-limits: U 字管の閉じた式、エンジンの単調な緩和、Ritter の解、ダム決壊の外れ方、Joukowsky。
 - distillation: ⚗️ E24 ワインの蒸留（still_network、カット、draw の ⚗️）。
 - angels_share: 👼 天使の取り分（E25）: 較正・閉じた式・RH*・40 % を切る年数・木の吸い込み・描画。
-- hub_flows: 💴 🪙 ⛏️ 同じ配管に流す物を置き換える（E26〜E28）・🚿 出口の数（E29）・🫀 血液の循環（E30）・🔥 火力発電（E31）・❄️ ヒートポンプ（E32）: 定常・総量・Bateman・決済・描画。
+- hub_flows: 💴 🪙 ⛏️ 同じ配管に流す物を置き換える（E26〜E28）・🚿 出口の数（E29）・🫀 血液の循環（E30）・🔥 火力発電（E31）・❄️ ヒートポンプ（E32）・🧠 脳脊髄液（E33）: 定常・総量・Bateman・決済・描画。
 """
 
 import contextlib
@@ -1133,6 +1133,38 @@ class HeatPump(unittest.TestCase):
         self.assertEqual(room, sorted(room))
         self.assertEqual((res["volumes_q"]["power"], res["volumes_q"]["outdoor"]), (0, 0))
         self.assertEqual(res["conservation_error_q"], 0)
+
+
+class CerebrospinalFluid(unittest.TestCase):
+    """🧠 血液 → 脳室 → くも膜下腔 → 血液。"""
+
+    def test_steady_turnover_and_opening(self):
+        st = ffs.csf_steady()
+        self.assertAlmostEqual(st["ventricles"] + st["subarachnoid"], 150.0, places=12)
+        self.assertAlmostEqual(st["turnover_per_day"], 1440.0 * 0.35 / 150.0, places=12)
+        for item in random_scales(330, 5, n_min=1, n_max=2):  # 吸収の通りやすさ 0.01〜0.999 倍
+            o = item["value"]
+            with self.subTest(opening=item["label"]):
+                self.assertAlmostEqual(ffs.csf_steady(opening=o)["subarachnoid"], 125.0 / o, places=9)
+                self.assertAlmostEqual(ffs.csf_steady(opening=o)["ventricles"], 25.0, places=12)
+
+    def test_running_head_does_not_move_and_blocked_head_gains_production(self):
+        res = ffs.csf_network((1.0, 0.0), steady=True).run(720.0)
+        st = ffs.csf_steady(dt=ffs.CSF["dt"])
+        self.assertAlmostEqual(from_q(res["volumes_q"]["subarachnoid-1"]), st["subarachnoid"], places=9)
+        gained = from_q(res["volumes_q"]["subarachnoid-2"] + res["volumes_q"]["ventricles-2"])
+        self.assertAlmostEqual(gained - (st["subarachnoid"] + st["ventricles"]), 0.35 * 720.0, places=9)
+        self.assertEqual(res["conservation_error_q"], 0)
+
+    def test_scene(self):
+        self.assertEqual(ffs.scene_arg("🧠"), "csf")
+        res, cols = ffs.rig_section("csf")
+        view = pw.network_frames(res, cols, frames=None, rows=16)
+        normal = {fr["counts"][1] for fr in view["frames"]}
+        blocked = [fr["counts"][3] for fr in view["frames"]]
+        self.assertEqual(len(normal), 1)  # ふつうの頭は動かない（±0）
+        self.assertEqual(blocked, sorted(blocked))
+        self.assertEqual(blocked[-1], 16)
 
 
 if __name__ == "__main__":
