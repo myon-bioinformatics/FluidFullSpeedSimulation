@@ -18,8 +18,6 @@ MONIAC は「水が流れ落ちる様子」の手本。部品は物理のまま�
 - ``valve``（弁つきの出口。開き具合は一定か、別の水槽の浮き → カムで決まる。MONIAC の弁）
 - ``tip``（🎍 鹿威し: 溜まると傾いて一気に落とす）/ ``siphon``（🍷 ピタゴラスの杯: 頂に届くと吸い切る）
   / ``mariotte``（🫗 マリオットびん: 空気管の下端まで流量が一定）
-- ``tip``（🎍 鹿威し: 溜まると傾いて一気に落とす）/ ``siphon``（🍷 ピタゴラスの杯: 頂に届くと吸い切る）
-  / ``mariotte``（🫗 マリオットびん: 空気管の下端まで流量が一定）
 - どの管にも ``delay``（輸送の遅れ）を付けられる。管の中の水も総量に数える
 
 運ばれる物 ``tracer``（そうめん・葉っぱ・浮き）: 入った節点に先にいた水が全部出たら、いちばん多く
@@ -40,10 +38,10 @@ from typing import Callable
 from fractions import Fraction
 
 from fixedq import ONE, Cam, DelayLine, clamp, exp_neg_q, from_q, lag_gain, lag_step, qdiv, qmul, qsqrt, to_q
-from fluids import G, RE_LAMINAR, Section, channel_flow, fall_time, get_fluid, lip_flow, plan_width, reynolds
-from fluids import side_spill
-from fluids import viscous_orifice
-from fluids import superelevation
+from fluids import (
+    G, RE_LAMINAR, Section, bisection, channel_flow, fall_time, get_fluid, lip_flow, plan_width, reynolds, side_spill,
+    superelevation, viscous_orifice,
+)
 
 LAWS: dict[str, Callable] = {}
 OUTLET_MODES = ("exact", "independent")
@@ -1450,13 +1448,10 @@ def critical_gain(capacity: float, leak: float, tau_p: float, stages: int) -> fl
     def phase(w: float) -> float:
         return math.atan2(capacity * w, leak) + stages * math.atan(tau_p * w)
 
-    lo, hi = 0.0, 1.0
+    hi = 1.0
     while phase(hi) < math.pi:
         hi *= 2.0
-    for _ in range(200):
-        mid = 0.5 * (lo + hi)
-        lo, hi = (mid, hi) if phase(mid) < math.pi else (lo, mid)
-    w = 0.5 * (lo + hi)
+    w = bisection(lambda w: phase(w) < math.pi, 0.0, hi)
     return math.hypot(capacity * w, leak) * (1 + (tau_p * w) ** 2) ** (stages / 2)
 
 

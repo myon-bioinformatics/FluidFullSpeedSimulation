@@ -26,8 +26,8 @@ from pathlib import Path
 
 from fixedq import ONE, from_q, lag_gain, lag_step, qdiv, qmul, random_scales, shift_lag_step, to_q
 from fluids import FLUIDS, PLACEHOLDER_MU_SCALE, REAL_FLUIDS, RE_LAMINAR, Section, channel_reynolds, fall_time
-from fluids import fluid_table, get_fluid, lip_head
-from fluids import ORIFICE_DELTA, TEMP_TABLES, lip_flow, normal_depth, superelevation, table_value, viscous_orifice
+from fluids import bisection, fluid_table, get_fluid, lip_head
+from fluids import ORIFICE_DELTA, TEMP_TABLES, normal_depth, superelevation, table_value, viscous_orifice
 from fluids import overland_equilibrium, overland_power_law, overland_recession, overland_rise, overland_t_e_power_law
 from fluids import G, poiseuille_head, poiseuille_tau, torricelli_empty_time, torricelli_head, transport_delay
 from fluids import mariotte_constant_time, mariotte_flow, siphon_drain_time, siphon_drain_time_with_inflow, siphon_flow
@@ -696,19 +696,12 @@ def moniac_rig(dt: float = 0.05, q1: float = 2e-4, q2: float = 3e-4, t_step: flo
     return net
 
 
-def _solve(f, lo: float, hi: float) -> float:
-    for _ in range(200):
-        mid = 0.5 * (lo + hi)
-        lo, hi = (mid, hi) if f(mid) < 0 else (lo, mid)
-    return 0.5 * (lo + hi)
-
-
 def rig_steady(q: float) -> dict:
     """試験台の定常（閉じた式）。頭の槽 h = Q·τ/(A·Σo)、分流は開き具合の比、
     貯める槽は cam(h)·A·h/τ = Q·o_store/Σo を二分法、横の槽は V = q_side·τ / cam_side(h_store)。"""
     total = sum(RIG_OPEN.values())
     flows = {k: q * o / total for k, o in RIG_OPEN.items()}
-    store = _solve(lambda h: interp(RIG_STORE_CAM, h) * 0.02 * h / 20.0 - flows["store"], 0.0, 10.0)
+    store = bisection(lambda h: interp(RIG_STORE_CAM, h) * 0.02 * h / 20.0 - flows["store"] < 0, 0.0, 10.0)
     side = flows["side"] * 15.0 / min(1.0, interp(RIG_SIDE_CAM, store)) / 0.01
     return {"header": q * 10.0 / (0.01 * total), "store": store, "side": side, "flows": flows}
 
@@ -805,7 +798,7 @@ def bend_outer(q: float, slope: float = 0.03, radius: float = 0.12, n_manning: f
 def eject_flow(size: float, lo: float = 5e-5, hi: float = 2e-3) -> float:
     """外側の水面が「縁 − 太さ/2」になる流量（水はこぼれず、麺だけが縁に届く窓のまん中）。"""
     target = BAMBOO["size"] - size / 2.0
-    return _solve(lambda q: bend_outer(q) - target, lo, hi)
+    return bisection(lambda q: bend_outer(q) - target < 0, lo, hi)
 
 
 def drape_flume(q: float = 3e-6, splash: tuple | None = None, dt: float = 0.01) -> Network:
@@ -1983,11 +1976,7 @@ def utube(area: float, radius: float, length: float, limb: float, delta_h: float
 
 def utube_crossover_radius(length: float, limb: float, nu: float, g: float = G, lo: float = 1e-5, hi: float = 0.1) -> float:
     """一様な U 字管（A = a）で ζ = 1 になる半径。これより太ければ実物は揺れる。"""
-    for _ in range(200):
-        mid = 0.5 * (lo + hi)
-        th = utube_theory(math.pi * mid ** 2, mid, length, limb, nu, g)
-        lo, hi = (mid, hi) if th["zeta"] > 1.0 else (lo, mid)
-    return 0.5 * (lo + hi)
+    return bisection(lambda r: utube_theory(math.pi * r ** 2, r, length, limb, nu, g)["zeta"] > 1.0, lo, hi)
 
 
 def ritter_depth(x: float, t: float, h0: float, g: float = G) -> float:
@@ -2433,11 +2422,7 @@ def years_to_abv(limit: float, rates: dict, rh: float, f: float = 1.0, t_max: fl
     """度数が limit を切るまでの年数（閉じた式を二分法）。切らなければ None。"""
     if abv(*cask_state(t_max, rates, rh, f)) > limit:
         return None
-    lo, hi = 0.0, t_max
-    for _ in range(200):
-        mid = 0.5 * (lo + hi)
-        lo, hi = (mid, hi) if abv(*cask_state(mid, rates, rh, f)) > limit else (lo, mid)
-    return 0.5 * (lo + hi)
+    return bisection(lambda t: abv(*cask_state(t, rates, rh, f)) > limit, 0.0, t_max)
 
 
 @register_law("soak")
@@ -2588,11 +2573,7 @@ def angel_soak(rates: dict) -> dict:
         ser = _cask_series(res, "scotland")
         return {"loss_1y": 1.0 - ser[1][1] / v0, "loss_2y": 1.0 - ser[2][1] / ser[1][1], "res": res}
 
-    lo, hi = 0.0, 1000.0
-    for _ in range(60):
-        mid = 0.5 * (lo + hi)
-        lo, hi = (mid, hi) if run(mid)["loss_1y"] < SOAK["first_year_loss"] else (lo, mid)
-    cap = 0.5 * (lo + hi)
+    cap = bisection(lambda c: run(c)["loss_1y"] < SOAK["first_year_loss"], 0.0, 1000.0, 60)
     out = run(cap)
     ne0, nw0 = moles_for_abv(CASK["fill_abv"], CASK["volume"])
     return {"capacity_mol": cap, "capacity_liters": cap / (ne0 + nw0) * CASK["volume"] * 1e3,
@@ -2909,7 +2890,7 @@ def _metal_run(dt: float, t_end: float, **over) -> tuple[dict, dict]:
 def e28_rare_metal(dt_list=(1.0, 0.5, 0.25), seed: int = 28) -> dict:
     """⛏️ 産出国（埋蔵量が決まっている）→ 船 30 日 → 製錬する加工国 → 部品にする加工国 → 市場。
     1 次の段の鎖なので Bateman の式が答え: 産出国は指数で減り、加工国の在庫は山を作ってから減る。"""
-    kind, p = "rare-metal", HUB_FLOWS["rare-metal"]
+    p = HUB_FLOWS["rare-metal"]
     reserve, ship = p["source_volume"], p["delay_feed"]
     k_feed = [1.0 / t for t in p["tau_feed"]]
     big_k, k_arm, k_sat = sum(k_feed), 1.0 / p["tau_arm"], 1.0 / p["tau_sat"]
