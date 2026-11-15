@@ -367,6 +367,18 @@
               "alt": "D23 outlet-count"
             }
           ]
+        },
+        {
+          "type": "card",
+          "title": "D24 🫀 circulation",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D24_circulation_water.gif",
+              "alt": "D24 circulation"
+            }
+          ]
         }
       ]
     },

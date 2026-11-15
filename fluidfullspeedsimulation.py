@@ -2675,6 +2675,17 @@ def hub_caps(kind: str) -> dict:
     return dict.fromkeys(tanks, max(steady[n] for n in tanks))
 
 
+def steady_tank(rate_out: float, actual: float, counted: float, dt: float | None = None) -> tuple[float, float]:
+    """弁だけが出る槽の行き渡った後: (槽の量, 直結の下の槽が数える出る速さ)。出口の合計の速さ rate_out、
+    実際に入る速さ actual・同じステップの中で数える速さ counted。dt=None は連続の式 actual/rate_out（💴 🪙 🫀 で共通）。"""
+    if dt is None:
+        return actual / rate_out, actual
+    big_l = rate_out * dt
+    phi = -math.expm1(-big_l)
+    base = actual - counted * (1.0 - phi / big_l)
+    return base * dt / phi, base
+
+
 def hub_steady(kind: str, *, dt: float | None = None, **over) -> dict:
     """行き渡った後の量（閉じた式）。どの槽も「入ってくる速さ × 滞在時間」= J/K。
 
@@ -2691,13 +2702,7 @@ def hub_steady(kind: str, *, dt: float | None = None, **over) -> dict:
         raise ValueError("no steady state without a way back to the source")
 
     def tank(rate_out: float, actual: float, counted: float) -> tuple[float, float]:
-        """(槽の量, 直結の下の槽が数える出る速さ)。出口の合計の速さ rate_out、入る速さ actual・数える速さ counted。"""
-        if dt is None:
-            return actual / rate_out, actual
-        big_l = rate_out * dt
-        phi = -math.expm1(-big_l)
-        base = actual - counted * (1.0 - phi / big_l)
-        return base * dt / phi, base
+        return steady_tank(rate_out, actual, counted, dt)
 
     r_arm, r_out, r_sat, r_back = (1.0 / p[k] if p[k] else 0.0 for k in ("tau_arm", "tau_out", "tau_sat", "tau_back"))
     to_arm = r_arm / (r_arm + r_out)
@@ -3118,6 +3123,156 @@ def e29_outlet_count(seed: int = 29) -> dict:
     return {"params": {"outlets": p, "seed": seed}, "summary": summary, "runs": {"outlets": res["series"]}, "checks": checks}
 
 
+# --- E30 血液の循環（🫀 心臓 → 器官 → 心臓） ----------------------------------------
+
+# 安静時の大人 1 人。時間は秒、量は L。体積は 血液量 × 割合（Young 2010 の表 1.2 = Guyton の数字、残り 7 % が心臓）、
+# 器官へ行く割合は心拍出量の内訳（Columbia 大 Regional Circulations の表）。器官の割合は細動脈・毛細血管の 7 % を
+# 流れの比で分けたもの（どの器官も滞在時間は同じ）。scene は draw の (秒, 何ステップごとに描くか)。
+CIRCULATION = {
+    "blood": 5.0, "output": 5.0 / 60.0, "dt": 0.25, "scene": (128.0, 2),
+    "flows": {"brain": 0.15, "coronary": 0.05, "kidney": 0.22, "gut-liver": 0.25, "muscle": 0.17, "skin": 0.08,
+              "other": 0.08},
+    "volumes": {"artery": 0.13, "organs": 0.07, "vein": 0.64, "lung": 0.09},
+}
+
+
+def circulation_taus() -> dict:
+    """血管の時定数（ふつうの状態で決め、ポンプの速さや血液量を変えても血管は同じ）。動脈 → 器官の弁は
+    1/τ = 血管の通りやすさで、比が器官へ行く割合。器官・静脈・肺は 体積 / 心拍出量（滞在時間）。"""
+    p = CIRCULATION
+    f, v, vol = p["output"], p["blood"], p["volumes"]
+    k_art = f / (v * vol["artery"])
+    return {"artery": {o: 1.0 / (k_art * s) for o, s in p["flows"].items()}, "organ": v * vol["organs"] / f,
+            "vein": v * vol["vein"] / f, "lung": v * vol["lung"] / f}
+
+
+def circulation_columns() -> list[str]:
+    """断面図の列: 心臓 ｜ 動脈 ｜ 器官 7 つ ｜ 静脈 ｜ 肺。"""
+    return ["heart", "artery", *CIRCULATION["flows"], "vein", "lung"]
+
+
+def circulation_network(*, blood: float | None = None, output: float | None = None, dt: float | None = None) -> Network:
+    """🫀 心臓（ポンプ）→ 動脈 → 器官 7 つ（並列）→ 静脈 → 肺 → 心臓。最初は血液が全部心臓にある。
+    心臓は一定の速さ output [L/s] で送るが、空になればそのときあるだけ（戻ってきた分）しか送れない。"""
+    p, tau = CIRCULATION, circulation_taus()
+    net = Network(dt=p["dt"] if dt is None else dt)
+    net.tank("heart", 1.0, volume=p["blood"] if blood is None else blood)
+    for name in circulation_columns()[1:]:
+        net.tank(name, 1.0)
+    net.pump("heart", "artery", rate=p["output"] if output is None else output)
+    for organ in p["flows"]:
+        net.valve("artery", organ, tau=tau["artery"][organ])
+        net.valve(organ, "vein", tau=tau["organ"])
+    net.valve("vein", "lung", tau=tau["vein"])
+    net.valve("lung", "heart", tau=tau["lung"])
+    return net
+
+
+def circulation_steady(*, blood: float | None = None, output: float | None = None, dt: float | None = None) -> dict:
+    """行き渡った後（閉じた式）。どの槽も 入る速さ × 滞在時間（中心容積の原理 V = F·T）、心臓は残り。
+    dt を渡すと離散の定常（💴 🪙 と同じ steady_tank）。血液が少ないかポンプが速くて心臓が空になると、送れるのは
+    戻ってくる分だけ: F = 血液量 / (T_残り + dt)（空の心臓に 1 ステップで届いた量を次のステップで送る。連続なら dt → 0）。"""
+    p, tau = CIRCULATION, circulation_taus()
+    blood = p["blood"] if blood is None else blood
+    want = p["output"] if output is None else output
+    k_art = sum(1.0 / t for t in tau["artery"].values())
+    unit = {}  # 送る速さ 1 L/s あたりの量
+    unit["artery"], art_base = steady_tank(k_art, 1.0, 1.0, dt)  # 上がポンプなので厳密に 1/K
+    vein_counted = 0.0
+    for organ, t_art in tau["artery"].items():
+        share = (1.0 / t_art) / k_art
+        unit[organ], base = steady_tank(1.0 / tau["organ"], share, art_base * share, dt)
+        vein_counted += base
+    unit["vein"], vein_base = steady_tank(1.0 / tau["vein"], 1.0, vein_counted, dt)
+    unit["lung"], _base = steady_tank(1.0 / tau["lung"], 1.0, vein_base, dt)
+    rest = sum(unit.values())
+    flow = min(want, blood / (rest + (dt or 0.0)))
+    out = {k: v * flow for k, v in unit.items()}
+    out["heart"] = blood - flow * rest
+    return {"output": flow, "limited": flow < want, "rest_time": rest, **out}
+
+
+def circulation_rates(res: dict) -> dict:
+    """最後のステップの、槽ごとの 入る速さ・出る速さ [L/s]。"""
+    rates: dict = {}
+    for ln in res["links"]:
+        q = res["final"][f"q:{ln['index']}"]
+        rates.setdefault(ln["dst"], {"in": 0.0, "out": 0.0})["in"] += q
+        rates.setdefault(ln["src"], {"in": 0.0, "out": 0.0})["out"] += q
+    return rates
+
+
+def _circulation_checks(tag: str, res: dict, st: dict) -> list[dict]:
+    names = circulation_columns()
+    worst = max(rel_err(from_q(res["volumes_q"][n]), st[n]) for n in names if st[n] > 0)
+    pumped = circulation_rates(res)["heart"]["out"]
+    return [
+        check(f"{tag}steady:discrete", "🎯", worst <= 1e-9, value=worst, tol=1e-9,
+              note="どの槽も 入る速さ × 滞在時間（離散の定常: エンジンの 1 ステップをそのまま解いた式）、心臓は残り"),
+        close(f"{tag}output", "🫀", pumped * 60.0, st["output"] * 60.0, 1e-9,
+              note="送る速さ [L/min] = min(ポンプの速さ, 血液量 / (T_残り + dt))。心臓は戻ってきた分しか送れない"),
+        conserved(f"{tag}conserve", res),
+    ]
+
+
+def e30_circulation(seed: int = 30) -> dict:
+    """🫀 血液の循環。心臓が一定の速さで送り、器官を通って静脈・肺から心臓へ戻る。器官は血液を使わずに通すだけ
+    （入る = 出る、±0）なので、総量 5 L がそのまま回り続ける。どの槽も 入る速さ × 滞在時間、一周は 血液量 / 心拍出量。
+    血液が減るか、ポンプだけ速くすると、心臓は戻ってきた分しか送れない（拍動・圧力・自動調節は入れていない）。"""
+    p, tau = CIRCULATION, circulation_taus()
+    dt, names = p["dt"], circulation_columns()
+    t_end = 40.0 * tau["vein"]
+    lap = p["blood"] / p["output"]
+    release = t_end - 4.0 * lap
+    net = circulation_network()
+    net.tracer("rbc", "heart", release=release, stop="heart")  # 🩸 赤血球 1 つ（先入れ先出し、いちばん多く流れる器官を通る）
+    res = net.run(t_end)
+    exact, smooth = circulation_steady(dt=dt), circulation_steady()
+    got = {n: from_q(res["volumes_q"][n]) for n in names}
+    rates = circulation_rates(res)
+    balance = {n: abs(r["in"] - r["out"]) / r["in"] for n, r in rates.items()}
+    links = res["links"]
+    moved_in = sum(ln["volume_moved_q"] for ln in links if ln["dst"] == "brain")
+    moved_out = sum(ln["volume_moved_q"] for ln in links if ln["src"] == "brain")
+    worst_smooth = max(rel_err(got[n], smooth[n]) for n in names)
+    k_max = max(1.0 / tau["organ"], 1.0 / tau["lung"], sum(1.0 / t for t in tau["artery"].values()))
+    shares = {o: rates[o]["in"] / rates["heart"]["out"] for o in p["flows"]}
+    worst_share = max(abs(shares[o] - s) for o, s in p["flows"].items())
+    rbc = res["tracers"][0]
+    lap_got = None if rbc["arrival"] is None else rbc["arrival"] - rbc["path"][0]["t"]
+    checks = _circulation_checks("", res, exact) + [
+        check("steady:central-volume", "📐", worst_smooth <= dt * k_max, value=worst_smooth, tol=dt * k_max,
+              note="中心容積の原理 V = F·T（連続の式）との差（dt × いちばん速い槽の速さ まで）"),
+        check("brain:±0", "🧠", balance["brain"] <= 1e-9, value=balance["brain"], tol=1e-9,
+              note="脳は 入る速さ = 出る速さ（使わずに通すだけ）"),
+        check("brain:ledger", "🧾", moved_in - moved_out == res["volumes_q"]["brain"], value=from_q(moved_in - moved_out),
+              expected=got["brain"], tol=0, note="脳に入った量 − 出た量 = いま脳にある量（Q 整数、0 ulp）"),
+        check("all:±0", "🔁", max(balance.values()) <= 1e-9, value=max(balance.values()), tol=1e-9,
+              note="どの槽も 入る = 出る。心臓では 戻ってくる速さ（静脈還流）= 送る速さ（心拍出量）"),
+        check("shares", "🥧", worst_share <= 1e-9, value=worst_share, tol=1e-9,
+              note="器官へ行く割合 = 表の割合（脳 15 %・腎臓 22 % …）。動脈 → 器官の弁の速さの比で決まる"),
+        check("lap", "🩸", lap_got is not None and abs(lap_got - lap) <= 2 * dt, value=lap_got, expected=lap,
+              tol=2 * dt, note="赤血球が一周する時間 = 血液量 / 心拍出量（60 s）。どの器官も滞在時間が同じなので経路によらない"),
+    ]
+    for item in random_scales(seed, 3, n_min=1, n_max=2):  # 🩸 失う割合 x（1〜99.9 %）
+        x = item["value"]
+        blood = p["blood"] * (1.0 - x)
+        r = circulation_network(blood=blood).run(t_end)
+        checks += _circulation_checks(f"loss={item['label']}:", r, circulation_steady(blood=blood, dt=dt))
+    for item in random_scales(seed + 1, 3, n_min=0, n_max=0):  # 🫀 ポンプの速さ c 倍（1〜9.99 倍）、血管は同じ
+        c = item["value"]
+        r = circulation_network(output=c * p["output"]).run(t_end)
+        checks += _circulation_checks(f"rate={item['label']}:", r, circulation_steady(output=c * p["output"], dt=dt))
+    reserve = exact["heart"] - exact["output"] * dt
+    summary = {"steady_ml": {n: 1e3 * got[n] for n in names}, "output_l_min": 60.0 * rates["heart"]["out"],
+               "transit_s": {"organ": tau["organ"], "vein": tau["vein"], "lung": tau["lung"],
+                             "artery": exact["artery"] / exact["output"], "heart": exact["heart"] / exact["output"]},
+               "lap": lap_got, "loss_before_output_falls": reserve / p["blood"],
+               "max_output_l_min": 60.0 * p["blood"] / (exact["rest_time"] + dt)}
+    return {"params": {"circulation": p, "seed": seed}, "summary": summary, "runs": {"circulation": res["series"]},
+            "checks": checks}
+
+
 # --- 登録簿 ---------------------------------------------------------------
 
 EXPERIMENTS = {
@@ -3153,6 +3308,8 @@ EXPERIMENTS = {
     "E28": ("rare-metal", "⛏️", "レアメタル（産出国 → 船 → 加工国 → 市場: Bateman の鎖、在庫の山の時刻と高さ）", e28_rare_metal),
     "E29": ("outlet-count", "🚿", "出口の数（別々に取ると n 本で刻みの 1 次ずれる: (1 − 1/n) に比例。槽ごとに厳密に解く既定ではずれない）",
             e29_outlet_count),
+    "E30": ("circulation", "🫀", "血液の循環（心臓 → 器官 → 心臓: 器官は入る = 出る、V = F·T、一周 60 s、心臓は戻ってきた分しか送れない）",
+            e30_circulation),
 }
 SLUGS = {slug: eid for eid, (slug, *_rest) in EXPERIMENTS.items()}
 
@@ -3210,7 +3367,7 @@ SCENE_ICONS = {"🏛": "moniac-rig", "🥢": "somen-flume", "🎋": "flume", "�
                "🧱": "noodle-clog", "🍽": "chopsticks", "🌧": "rain-runoff", "🎍": "shishi-odoshi",
                "🍷": "pythagorean-cup", "🫗": "mariotte", "🏺": "water-clock", "🚧": "inertia-limits",
                "⚗": "distillation", "👼": "angels-share", "💴": "money-flow", "🪙": "gold-flow", "⛏": "rare-metal",
-               "🚿": "outlet-count"}
+               "🚿": "outlet-count", "🫀": "circulation"}
 
 
 def fluid_arg(text: str) -> str:
@@ -3219,7 +3376,7 @@ def fluid_arg(text: str) -> str:
 
 
 def scene_arg(text: str) -> str:
-    """draw の場面: 名前でも 🏛️ 🥢 🎋 🫙 🌊 🕳️ 🧊 🪵 🍜 🧱 🍽️ 🌧️ 🎍 🍷 🫗 🏺 🚧 ⚗️ 👼 💴 🪙 ⛏️ 🚿 でもよい。"""
+    """draw の場面: 名前でも 🏛️ 🥢 🎋 🫙 🌊 🕳️ 🧊 🪵 🍜 🧱 🍽️ 🌧️ 🎍 🍷 🫗 🏺 🚧 ⚗️ 👼 💴 🪙 ⛏️ 🚿 🫀 でもよい。"""
     return SCENE_ICONS.get(_plain(text), text)
 
 
@@ -3392,6 +3549,9 @@ def rig_section(scene: str, fluid: str = "water", temp_c: float | None = None, m
         cols = [f"pool-{i}" for i in range(1, len(o["counts"]) + 1)]
         res["caps"] = dict.fromkeys(cols, OUTLETS["volume"])
         return res, cols
+    if scene == "circulation":  # 🫀 最初は全部心臓に。送り出して器官・静脈・肺を通って戻る（⏱️ は秒、縦いっぱいは槽ごと）
+        t_end, every = CIRCULATION["scene"]
+        return circulation_network().run(t_end, sample_every=every), circulation_columns()
     raise KeyError(f"unknown rig scene {scene!r}")
 
 
@@ -3403,7 +3563,7 @@ def _from(res: dict, t0: float) -> dict:
 HUB_SCENES = {"money-flow": ("money", 64.0, 4), "gold-flow": ("gold", 64.0, 4), "rare-metal": ("rare-metal", 320.0, 8)}
 RIG_SCENES = ("moniac-rig", "somen-flume", "noodle-length", "noodle-clog", "chopsticks", "cold-water",
               "bamboo-wear", "rain-runoff", "shishi-odoshi", "pythagorean-cup", "mariotte", "water-clock",
-              "inertia-limits", "distillation", "angels-share", *HUB_SCENES, "outlet-count")
+              "inertia-limits", "distillation", "angels-share", *HUB_SCENES, "outlet-count", "circulation")
 
 
 def _visc(args) -> dict:
@@ -3464,7 +3624,7 @@ def _formats(args) -> tuple[str, ...]:
 
 # --- 🎞️ README のデモ（場面ごとに GIF 1 枚） ----------------------------------------
 
-# (場面, 流体, 塗り)。塗りは色だけ（物理は流体で決まる）。⚗️ はエタノールの 🟨、👼 は琥珀の 🟧 で塗る
+# (場面, 流体, 塗り)。塗りは色だけ（物理は流体で決まる）。⚗️ はエタノールの 🟨、👼 は琥珀の 🟧、🫀 は血の 🟥 で塗る
 DEMOS = (("moniac-rig", "water", None), ("moniac-drain", "water", None), ("flume", "water", None),
          ("flume-hopper", "water", None), ("somen-flume", "water", None), ("noodle-length", "water", None),
          ("noodle-clog", "water", None), ("chopsticks", "water", None), ("cold-water", "water", None),
@@ -3472,7 +3632,7 @@ DEMOS = (("moniac-rig", "water", None), ("moniac-drain", "water", None), ("flume
          ("pythagorean-cup", "poison-water", None), ("mariotte", "water", None), ("water-clock", "water", None),
          ("dam-break", "namekian-water", None), ("inertia-limits", "water", None), ("distillation", "water", "🟨"),
          ("angels-share", "water", "🟧"), ("money-flow", "water", "🟩"), ("gold-flow", "water", "🟨"),
-         ("rare-metal", "water", "🟫"), ("outlet-count", "water", None))
+         ("rare-metal", "water", "🟫"), ("outlet-count", "water", None), ("circulation", "water", "🟥"))
 DEMOS_SCHEMA = "fluidfullspeedsimulation-demos/1"
 _NEEDS_VS16 = set("🏛🕳🍽🌧⚗⛏")  # 絵文字で出すには U+FE0F が要るもの
 

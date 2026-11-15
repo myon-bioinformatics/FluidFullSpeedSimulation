@@ -1,4 +1,4 @@
-"""💴 🪙 ⛏️ 同じ配管に流す物を置き換える（E26〜E28）: 定常・総量・Bateman・決済・描画。"""
+"""💴 🪙 ⛏️ 同じ配管に流す物を置き換える（E26〜E28）・🚿 出口の数（E29）・🫀 血液の循環（E30）: 定常・総量・Bateman・決済・描画。"""
 import math
 import unittest
 
@@ -9,7 +9,7 @@ from fixedq import from_q, random_scales, to_q
 
 class Experiments(unittest.TestCase):
     def test_all_checks_pass(self):
-        for eid in ("E26", "E27", "E28", "E29"):
+        for eid in ("E26", "E27", "E28", "E29", "E30"):
             slug, _icon, _title, fn = ffs.EXPERIMENTS[eid]
             with self.subTest(experiment=slug):
                 bad = [c["id"] for c in fn()["checks"] if not c["ok"]]
@@ -254,6 +254,63 @@ class Outlets(unittest.TestCase):
     def test_short_gifs_play_slower(self):
         self.assertEqual(pw._section_delays(40), [80] + [10] * 38 + [200])
         self.assertEqual(pw._section_delays(8), [80] + [30] * 6 + [200])
+
+
+class Circulation(unittest.TestCase):
+    """🫀 心臓 → 動脈 → 器官 7 つ → 静脈 → 肺 → 心臓。"""
+
+    def test_steady_adds_up_and_every_tank_is_flow_times_transit(self):
+        p, tau = ffs.CIRCULATION, ffs.circulation_taus()
+        for dt in (None, p["dt"]):
+            st = ffs.circulation_steady(dt=dt)
+            with self.subTest(dt=dt):
+                self.assertFalse(st["limited"])
+                self.assertAlmostEqual(sum(st[n] for n in ffs.circulation_columns()), p["blood"], places=12)
+        st = ffs.circulation_steady()
+        for organ, share in p["flows"].items():  # 中心容積の原理 V = F·T（どの器官も滞在時間は同じ）
+            self.assertAlmostEqual(st[organ], p["output"] * share * tau["organ"], places=12)
+        self.assertAlmostEqual(st["heart"], p["blood"] * 0.07, places=12)  # 表の残り 7 % が心臓
+        self.assertAlmostEqual(sum(p["flows"].values()), 1.0, places=12)
+
+    def test_heart_sends_only_what_comes_back(self):
+        p = ffs.CIRCULATION
+        base = ffs.circulation_steady(dt=p["dt"])
+        keep = base["heart"] - base["output"] * p["dt"]  # これだけ失っても送る速さは変わらない
+        for item in random_scales(300, 6, n_min=1, n_max=3):  # 失う割合 0.1〜99.9 %
+            x = item["value"]
+            st = ffs.circulation_steady(blood=p["blood"] * (1.0 - x), dt=p["dt"])
+            with self.subTest(loss=item["label"]):
+                self.assertEqual(st["limited"], p["blood"] * x > keep)
+                if st["limited"]:  # 空の心臓: 送る速さは血液量に比例
+                    self.assertAlmostEqual(st["output"] / (1.0 - x), p["blood"] / (base["rest_time"] + p["dt"]),
+                                           places=12)
+                    self.assertAlmostEqual(st["heart"], st["output"] * p["dt"], places=12)
+                else:
+                    self.assertEqual(st["output"], p["output"])
+
+    def test_total_is_exact_and_brain_balance_settles_to_zero(self):
+        net = ffs.circulation_network()
+        total = net.total_q()
+        for n in range(400):
+            net.step(n)
+            self.assertEqual(net.total_q(), total)
+        self.assertEqual(total, to_q(ffs.CIRCULATION["blood"]))
+        res = ffs.circulation_network().run(40.0 * ffs.circulation_taus()["vein"])
+        r = ffs.circulation_rates(res)["brain"]
+        self.assertAlmostEqual(r["in"], r["out"], places=12)
+        self.assertAlmostEqual(r["in"] * 60.0, 0.15 * 5.0, places=9)  # 脳 750 mL/min
+
+    def test_scene_heart_drains_and_others_fill(self):
+        self.assertEqual(ffs.scene_arg("🫀"), "circulation")
+        res, cols = ffs.rig_section("circulation")
+        self.assertEqual(cols, ffs.circulation_columns())
+        view = pw.network_frames(res, cols, frames=None, rows=16)
+        heart = [fr["counts"][0] for fr in view["frames"]]
+        self.assertEqual(heart, sorted(heart, reverse=True))  # 心臓は減るだけ（行き渡るまで戻りが送る速さに届かない）
+        for col in range(1, len(cols)):
+            filled = [fr["counts"][col] for fr in view["frames"]]
+            self.assertEqual(filled, sorted(filled))
+        self.assertEqual(res["conservation_error_q"], 0)
 
 
 class Scenes(unittest.TestCase):
