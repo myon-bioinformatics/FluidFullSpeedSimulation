@@ -18,7 +18,6 @@ on:
       - "docs/demos/**"
       - "assets/brand/**"
       - ".github/workflows/pages.yml"
-  workflow_dispatch:
 
 permissions:
   contents: read
