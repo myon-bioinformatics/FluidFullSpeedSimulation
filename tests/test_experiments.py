@@ -8,7 +8,7 @@
 - limits: 🚧 E23 inertia-limits: U 字管の閉じた式、エンジンの単調な緩和、Ritter の解、ダム決壊の外れ方、Joukowsky。
 - distillation: ⚗️ E24 ワインの蒸留（still_network、カット、draw の ⚗️）。
 - angels_share: 👼 天使の取り分（E25）: 較正・閉じた式・RH*・40 % を切る年数・木の吸い込み・描画。
-- hub_flows: 💴 🪙 ⛏️ 同じ配管に流す物を置き換える（E26〜E28）: 定常・総量・Bateman・決済・描画。
+- hub_flows: 💴 🪙 ⛏️ 同じ配管に流す物を置き換える（E26〜E28）・🚿 出口の数（E29）・🫀 血液の循環（E30）・🔥 火力発電（E31）・❄️ ヒートポンプ（E32）: 定常・総量・Bateman・決済・描画。
 """
 
 import contextlib
@@ -705,12 +705,12 @@ class Simulation(unittest.TestCase):
 
 # ──── hub_flows ───────────────────────────────────────────────────
 
-"""💴 🪙 ⛏️ 同じ配管に流す物を置き換える（E26〜E28）: 定常・総量・Bateman・決済・描画。"""
+"""💴 🪙 ⛏️ 同じ配管に流す物を置き換える（E26〜E28）・🚿 出口の数（E29）・🫀 血液の循環（E30）・🔥 火力発電（E31）・❄️ ヒートポンプ（E32）: 定常・総量・Bateman・決済・描画。"""
 
 
 class HubFlowChecks(unittest.TestCase):
     def test_all_checks_pass(self):
-        for eid in ("E26", "E27", "E28", "E29"):
+        for eid in ("E26", "E27", "E28", "E29", "E30"):
             slug, _icon, _title, fn = ffs.EXPERIMENTS[eid]
             with self.subTest(experiment=slug):
                 bad = [c["id"] for c in fn()["checks"] if not c["ok"]]
@@ -979,6 +979,160 @@ class Scenes(unittest.TestCase):
         steady = ffs.hub_steady("gold")
         for name in ("vault", "bank-a", "town"):
             self.assertAlmostEqual(last[name], steady[name] / 8.0, delta=0.75)  # 1 段 = 8 t、±半段 + 行き渡る途中
+
+
+class Circulation(unittest.TestCase):
+    """🫀 心臓 → 動脈 → 器官 7 つ → 静脈 → 肺 → 心臓。"""
+
+    def test_steady_adds_up_and_every_tank_is_flow_times_transit(self):
+        p, tau = ffs.CIRCULATION, ffs.circulation_taus()
+        for dt in (None, p["dt"]):
+            st = ffs.circulation_steady(dt=dt)
+            with self.subTest(dt=dt):
+                self.assertFalse(st["limited"])
+                self.assertAlmostEqual(sum(st[n] for n in ffs.circulation_columns()), p["blood"], places=12)
+        st = ffs.circulation_steady()
+        for organ, share in p["flows"].items():  # 中心容積の原理 V = F·T（どの器官も滞在時間は同じ）
+            self.assertAlmostEqual(st[organ], p["output"] * share * tau["organ"], places=12)
+        self.assertAlmostEqual(st["heart"], p["blood"] * 0.07, places=12)  # 表の残り 7 % が心臓
+        self.assertAlmostEqual(sum(p["flows"].values()), 1.0, places=12)
+
+    def test_heart_sends_only_what_comes_back(self):
+        p = ffs.CIRCULATION
+        base = ffs.circulation_steady(dt=p["dt"])
+        keep = base["heart"] - base["output"] * p["dt"]  # これだけ失っても送る速さは変わらない
+        for item in random_scales(300, 6, n_min=1, n_max=3):  # 失う割合 0.1〜99.9 %
+            x = item["value"]
+            st = ffs.circulation_steady(blood=p["blood"] * (1.0 - x), dt=p["dt"])
+            with self.subTest(loss=item["label"]):
+                self.assertEqual(st["limited"], p["blood"] * x > keep)
+                if st["limited"]:  # 空の心臓: 送る速さは血液量に比例
+                    self.assertAlmostEqual(st["output"] / (1.0 - x), p["blood"] / (base["rest_time"] + p["dt"]),
+                                           places=12)
+                    self.assertAlmostEqual(st["heart"], st["output"] * p["dt"], places=12)
+                else:
+                    self.assertEqual(st["output"], p["output"])
+
+    def test_total_is_exact_and_brain_balance_settles_to_zero(self):
+        net = ffs.circulation_network()
+        total = net.total_q()
+        for n in range(400):
+            net.step(n)
+            self.assertEqual(net.total_q(), total)
+        self.assertEqual(total, to_q(ffs.CIRCULATION["blood"]))
+        res = ffs.circulation_network().run(40.0 * ffs.circulation_taus()["vein"])
+        r = ffs.node_rates(res)["brain"]
+        self.assertAlmostEqual(r["in"], r["out"], places=12)
+        self.assertAlmostEqual(r["in"] * 60.0, 0.15 * 5.0, places=9)  # 脳 750 mL/min
+
+    def test_scene_heart_drains_and_others_fill(self):
+        self.assertEqual(ffs.scene_arg("🫀"), "circulation")
+        res, cols = ffs.rig_section("circulation")
+        self.assertEqual(cols, ffs.circulation_columns())
+        view = pw.network_frames(res, cols, frames=None, rows=16)
+        heart = [fr["counts"][0] for fr in view["frames"]]
+        self.assertEqual(heart, sorted(heart, reverse=True))  # 心臓は減るだけ（行き渡るまで戻りが送る速さに届かない）
+        for col in range(1, len(cols)):
+            filled = [fr["counts"][col] for fr in view["frames"]]
+            self.assertEqual(filled, sorted(filled))
+        self.assertEqual(res["conservation_error_q"], 0)
+
+
+class ThermalPower(unittest.TestCase):
+    """🔥 燃料 → 熱が溜まる段 → 電気・煙突・海（エネルギーだけを流す）。"""
+
+    def test_plan_meets_the_efficiency_and_every_stage_splits_to_one(self):
+        for kind, p in ffs.THERMAL["plants"].items():
+            plan = ffs.thermal_plan(kind)
+            st = ffs.thermal_steady(kind)
+            with self.subTest(plant=kind):
+                for _name, _tau, outs in plan["stages"]:
+                    self.assertAlmostEqual(sum(outs.values()), 1.0, places=12)
+                    self.assertTrue(all(0.0 < v < 1.0 for v in outs.values()))
+                self.assertAlmostEqual(st["gross"] / st["fuel_lhv"], p["efficiency"], places=12)
+                out = st["grid"] + st["aux"] + st["stack"] + st["sea"]  # 定常では燃やした HHV が全部どこかへ出る
+                self.assertAlmostEqual(out / st["fuel_hhv"], 1.0, places=12)
+                self.assertGreater(st["sea"] + st["stack"], st["grid"] * (1.0 - p["efficiency"]) / p["efficiency"] * 0.9)
+
+    def test_combined_cycle_formula(self):
+        outs = {name: o for name, _t, o in ffs.thermal_plan("lng")["stages"]}
+        gt, rec, st = outs["gt"]["power"], outs["hrsg"]["steam"], outs["steam"]["power"]
+        self.assertAlmostEqual(gt + (1.0 - gt) * rec * st, ffs.THERMAL["plants"]["lng"]["efficiency"], places=12)
+
+    def test_curzon_ahlborn_table_and_carnot(self):
+        published = {"West Thurrock": (0.64, 0.40), "CANDU": (0.48, 0.28), "Larderello": (0.33, 0.178)}
+        for name, tc, th, _seen in ffs.THERMAL["curzon_ahlborn"]:
+            cn, ca = published[name]
+            with self.subTest(plant=name):
+                self.assertAlmostEqual(ffs.carnot(tc, th), cn, delta=0.0051)  # Larderello は 0.325（表により 0.33 / 0.32）
+                self.assertAlmostEqual(ffs.curzon_ahlborn(tc, th), ca, delta=0.0005 if name == "Larderello" else 0.005)
+        for item in random_scales(310, 6, n_min=-3, n_max=-2):  # 高温 100〜9990 °C
+            th = item["value"]
+            with self.subTest(t_hot=item["label"]):
+                self.assertLess(ffs.curzon_ahlborn(25.0, th), ffs.carnot(25.0, th))
+
+    def test_lag_scales_with_slow_and_shares_do_not(self):
+        for kind in ffs.THERMAL["plants"]:
+            base = ffs.thermal_steady(kind)
+            for item in random_scales(311, 4, n_min=-1, n_max=1):  # 0.1〜99.9 倍
+                c = item["value"]
+                st = ffs.thermal_steady(kind, slow=c)
+                with self.subTest(plant=kind, slow=item["label"]):
+                    self.assertAlmostEqual(st["lag"] / base["lag"], c, places=9)
+                    self.assertAlmostEqual(st["grid"], base["grid"], places=9)
+
+    def test_scenes(self):
+        self.assertEqual((ffs.scene_arg("🪨"), ffs.scene_arg("🌀")), ("coal-power", "combined-cycle"))
+        for scene, kind in ffs.THERMAL_SCENES.items():
+            res, cols = ffs.rig_section(scene)
+            self.assertEqual(cols, ffs.thermal_columns(kind))
+            view = pw.network_frames(res, cols, frames=None, rows=16)
+            fuel = [fr["counts"][0] for fr in view["frames"]]
+            self.assertEqual(fuel, sorted(fuel, reverse=True))
+            for col in range(len(cols) - 4, len(cols)):  # 出口は溜まる一方
+                got = [fr["counts"][col] for fr in view["frames"]]
+                self.assertEqual(got, sorted(got))
+            self.assertEqual(res["volumes_q"]["fuel"], 0)  # ちょうど燃やし切る
+            self.assertEqual(res["conservation_error_q"], 0)
+
+
+class HeatPump(unittest.TestCase):
+    """❄️ 電気 + 外気の熱 → 部屋（🔥 の裏返し）。"""
+
+    def test_cop_balance_and_carnot(self):
+        p = ffs.HEAT_PUMP
+        st = ffs.heat_pump_steady()
+        self.assertAlmostEqual(st["cop"], p["heat"] / p["power"], places=12)
+        self.assertAlmostEqual(st["room"], p["heat"], places=12)
+        self.assertLess(st["cop"], ffs.carnot_cop(p["t_out"], p["t_room"]))
+        for item in random_scales(320, 6, n_min=-2, n_max=0):  # Tc 1〜999 °C、Th = Tc + 0.1〜99.9 K
+            tc = item["value"]
+            th = tc + item["A"] * 10 ** (-item["N"] - 1)
+            with self.subTest(t_cold=item["label"]):
+                self.assertAlmostEqual(ffs.carnot_cop(tc, th) * ffs.carnot(tc, th), 1.0, places=12)
+                self.assertGreater(ffs.carnot_cop(tc, th), 1.0)
+
+    def test_running_on_plant_power_beats_burning_at_home(self):
+        cop = ffs.heat_pump_steady()["cop"]
+        for kind in ffs.THERMAL["plants"]:
+            ts = ffs.thermal_steady(kind)
+            eta = ts["grid"] / ts["fuel_hhv"]
+            with self.subTest(plant=kind):
+                self.assertGreater(eta * cop, 1.0)
+                self.assertLess(eta, 1.0)
+
+    def test_scene(self):
+        self.assertEqual(ffs.scene_arg("❄️"), "heat-pump")
+        res, cols = ffs.rig_section("heat-pump")
+        self.assertEqual(cols, ffs.heat_pump_columns())
+        view = pw.network_frames(res, cols, frames=None, rows=16)
+        for col in (0, 1):  # 電気と外気は減るだけ、部屋は溜まるだけ
+            got = [fr["counts"][col] for fr in view["frames"]]
+            self.assertEqual(got, sorted(got, reverse=True))
+        room = [fr["counts"][-1] for fr in view["frames"]]
+        self.assertEqual(room, sorted(room))
+        self.assertEqual((res["volumes_q"]["power"], res["volumes_q"]["outdoor"]), (0, 0))
+        self.assertEqual(res["conservation_error_q"], 0)
 
 
 if __name__ == "__main__":

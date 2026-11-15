@@ -367,6 +367,54 @@
               "alt": "D23 outlet-count"
             }
           ]
+        },
+        {
+          "type": "card",
+          "title": "D24 🫀 circulation",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D24_circulation_water.gif",
+              "alt": "D24 circulation"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "D25 🪨 coal-power",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D25_coal-power_water.gif",
+              "alt": "D25 coal-power"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "D26 🌀 combined-cycle",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D26_combined-cycle_water.gif",
+              "alt": "D26 combined-cycle"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "D27 ❄️ heat-pump",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D27_heat-pump_water.gif",
+              "alt": "D27 heat-pump"
+            }
+          ]
         }
       ]
     },
