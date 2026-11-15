@@ -25,7 +25,7 @@ log(Euler/厳密)=-T*a²*h/2+O(h²)。
 
 ## 追加回帰
 
-tests/test_single_valve_review.py は次を解析式と照合する。
+tests/test_network.py の `SingleValveReview` は次を解析式と照合する。
 
 - 開度0、1/4、1/2、3/4、1と刻み1/8、1/64。
 - 弁1本と2本（合計開度を同じにする）。

@@ -21,6 +21,14 @@ G = 9.80665  # 標準重力加速度 [m/s²]
 RE_LAMINAR = 2300.0
 
 
+def bisection(below, lo: float, hi: float, steps: int = 200) -> float:
+    """単調な条件の境目を二分法で探す。``below(x)`` が真なら境目は x より上（lo を x へ）。``steps`` 回後の中点。"""
+    for _ in range(steps):
+        mid = 0.5 * (lo + hi)
+        lo, hi = (mid, hi) if below(mid) else (lo, mid)
+    return 0.5 * (lo + hi)
+
+
 @dataclass(frozen=True)
 class Fluid:
     key: str
@@ -253,13 +261,9 @@ class Section:
             return 0.0
         if self.shape == "rect":
             return area / self.size
-        lo, hi = 0.0, self.size
-        if area >= self.area(hi):
-            return hi
-        for _ in range(60):
-            mid = 0.5 * (lo + hi)
-            lo, hi = (mid, hi) if self.area(mid) < area else (lo, mid)
-        return 0.5 * (lo + hi)
+        if area >= self.area(self.size):
+            return self.size
+        return bisection(lambda h: self.area(h) < area, 0.0, self.size, 60)
 
 
 def hydraulic_radius(section: Section, h: float) -> float:
@@ -290,14 +294,8 @@ def channel_flow(section: Section, h: float, slope: float, law: str, *, nu: floa
 def normal_depth(section: Section, q: float, slope: float, law: str, *, nu: float, h_max: float,
                  n_manning: float = 0.010, beta: float | None = None, g: float = G) -> float:
     """一様な流れの水深（等流水深）を二分法で求める。"""
-    lo, hi = 0.0, h_max
-    for _ in range(200):
-        mid = 0.5 * (lo + hi)
-        if channel_flow(section, mid, slope, law, nu=nu, n_manning=n_manning, beta=beta, g=g) < q:
-            lo = mid
-        else:
-            hi = mid
-    return 0.5 * (lo + hi)
+    return bisection(lambda h: channel_flow(section, h, slope, law, nu=nu, n_manning=n_manning, beta=beta, g=g) < q,
+                     0.0, h_max)
 
 
 def channel_reynolds(section: Section, h: float, q: float, nu: float) -> float:
@@ -354,11 +352,7 @@ def viscous_orifice(h: float, diameter: float, nu: float, cd_inf: float = 0.61, 
     if h <= 0:
         return 0.0, 0.0
     k = math.sqrt(2.0 * g * h) * diameter / nu
-    lo, hi = 0.0, cd_inf
-    for _ in range(60):
-        mid = 0.5 * (lo + hi)
-        lo, hi = (mid, hi) if orifice_cd(mid * k, cd_inf, delta) > mid else (lo, mid)
-    cd = 0.5 * (lo + hi)
+    cd = bisection(lambda c: orifice_cd(c * k, cd_inf, delta) > c, 0.0, cd_inf, 60)
     return cd, cd * k
 
 
@@ -427,11 +421,7 @@ def overland_recession(section: Section, intensity: float, length: float, slope:
         return channel_flow(section, h, slope, law, **kw) / (intensity * b) + wave_celerity(
             section, h, slope, law, **kw) * t_after
 
-    lo, hi = 0.0, eq["h_e"]
-    for _ in range(200):
-        mid = 0.5 * (lo + hi)
-        lo, hi = (mid, hi) if reach(mid) < length else (lo, mid)
-    return channel_flow(section, 0.5 * (lo + hi), slope, law, **kw)
+    return channel_flow(section, bisection(lambda h: reach(h) < length, 0.0, eq["h_e"]), slope, law, **kw)
 
 
 def overland_power_law(slope: float, law: str, *, nu: float, n_manning: float = 0.010, beta: float = 3.0,
@@ -601,14 +591,7 @@ def moles_for_abv(abv_percent: float, volume_m3: float) -> tuple[float, float]:
     """度数と体積 [m³] から (エタノール, 水) のモル数。質量分率を二分法で探す。"""
     if not 0.0 <= abv_percent <= 100.0 or volume_m3 < 0:
         raise ValueError("abv must be within 0..100 and volume >= 0")
-    lo, hi = 0.0, 1.0
-    for _ in range(80):
-        mid = 0.5 * (lo + hi)
-        if abv(mid / M_ETHANOL, (1 - mid) / M_WATER) < abv_percent:
-            lo = mid
-        else:
-            hi = mid
-    w = 0.5 * (lo + hi)
+    w = bisection(lambda w: abv(w / M_ETHANOL, (1 - w) / M_WATER) < abv_percent, 0.0, 1.0, 80)
     mass = volume_m3 * density_20(w)
     return mass * w / M_ETHANOL, mass * (1 - w) / M_WATER
 
