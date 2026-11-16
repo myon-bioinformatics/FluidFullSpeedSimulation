@@ -3638,14 +3638,16 @@ def _startup_checks(seed: int) -> tuple[list[dict], dict]:
 # 🌀 西名古屋 7-1 号の 1 段目の割合（排熱のうち蒸気へ・蒸気タービンの出力）に、H 級の 3 圧・再熱の蒸気（GE GER-3936A の表 2）を当てた
 #    排熱回収ボイラ: 高圧 165 bar(g)・565 °C、再熱 23.8 bar(g)・565 °C、低圧 2.2 bar(g)・277 °C、排気 0.04064 bar(a)。h・s は蒸気表、
 #    hp_s・ip_s は高圧・中圧の等エントロピー膨張の行き先（再熱・低圧の圧力。再熱器の圧損は入れない）。saturation は排気の圧力の飽和。
-#    高圧 : 中圧 : 低圧 の蒸気の量 split [t/h] は南港新 1 号機。中圧の出口 = 低圧の入口（GE は低圧の入口を中圧の排気に揃える）、
-#    中圧の過熱器を出た蒸気 = 高圧の排気（再熱器の前で混ぜても冷えない）と置く。
+#    drums は高圧・中圧（= 再熱の圧力）・低圧のドラムの飽和 (°C, h_f, h_g)、pinch は蒸発器の出口のガスと飽和の温度差 [K]
+#    （ふつう 5〜15 K）。中圧の出口 = 低圧の入口（GE は低圧の入口を中圧の排気に揃える）、中圧の過熱器を出た蒸気 = 高圧の排気
+#    （再熱器の前で混ぜても冷えない）と置く。plant は西名古屋 7 号系列（環境アセスの審査書、1 系列・大気 5 °C）: 煙突の出口 °C、
+#    排熱回収ボイラ 3 基の 高圧・中圧・低圧の蒸発量 [t/h/基]、GT・ST の出力 [MW]、復水器の冷却水 [m³/s]。
 # losses はデータに無い損（Thermoflow の 900 MW 級の熱勘定）: (蒸気タービンの軸の仕事 kW, 発電機 kWe, 給水ポンプを回すタービン kW,
 #    排気損 kJ/kg = 8.377 BTU/lb)。発電機の効率 = 発電機 / 軸、🪨 給水ポンプ = 出力 × ポンプ / 発電機（仕事は給水に入る）。
 #    排気損（羽根を出る蒸気の速さの分）は、排気の乾き度を出すときにエネルギーの釣り合いの h から引く。
 # saturation は 5 kPa の飽和 (h_f, h_g, s_f, s_g)、wet は火力の低圧排気の乾き度の目安（湿り 10 % 前後）。
 # cooling は (取放水の温度差 K, 海水の比熱 kJ/(kg·K), 密度 kg/m³)、nanko は関西電力 南港の既設（汽力 60 万 kW）の冷却水
-# (m³/s, MW) と新 1 号機（GTCC）の GT・ST の出力（万 kW）。
+# (m³/s, MW)。
 STEAM_LOOP = {
     "power": 1050.0, "main": 3000.0 / 3.6, "reheat": 2490.0 / 3.6, "boiler_efficiency": 0.94, "t_hot": 600.0,
     "h": {"feed": 1270.11, "boiler": 3492.58, "hp": 3063.79, "reheater": 3694.89, "condenser": 134.09},
@@ -3655,9 +3657,10 @@ STEAM_LOOP = {
     "losses": (1088803.0, 1077400.0, 42894.0, 8.377 * 2.326),
     "lng": {"h": {"hp": 3474.73, "hp_s": 2932.05, "reheat": 3608.14, "ip_s": 2979.81, "lp": 3022.14},
             "s": {"hp": 6.50996, "lp": 7.58779}, "saturation": (122.54, 2554.16, 0.42619, 8.46769),
-            "split": (400.0, 50.0, 50.0),
+            "drums": ((350.35, 1673.79, 2561.23), (223.55, 960.05, 2801.85), (135.88, 571.51, 2728.04)), "pinch": 10.0,
+            "plant": {"stack": 88.0, "steam": (246.0, 59.0, 36.0), "gt_st": (769.5, 388.5), "cooling": 25.0},
             "taus": {"gt": 4.0, "exhaust": 16.0, "hrsg": 120.0, "st": 8.0, "condenser": 120.0}},
-    "cooling": (7.0, 3.99, 1025.0), "nanko": {"cooling": (26.4, 600.0), "gt_st": (40.0, 20.0)},
+    "cooling": (7.0, 3.99, 1025.0), "nanko": {"cooling": (26.4, 600.0)},
     "dt": 1.0, "scene": (2048.0, 16),
 }
 
@@ -3686,41 +3689,59 @@ def _coal_lp(stages: int, h_ex: float, m: float, r: float, pump: float) -> dict:
 
 
 def _hrsg_plan(eta_g: float, ex_loss: float) -> dict:
-    """🌀 3 圧・再熱: 復水器 → 高圧・中圧・低圧の節（量の割合は南港）→ 高圧タービン → 再熱器（中圧の蒸気と合流）→ 中圧タービン →
-    低圧タービン（低圧の蒸気と合流）→ 復水器。高圧・低圧タービンの内部効率 η（共通）を、1 段目で解いた蒸気タービンの出力 ÷
-    発電機の効率 に合うように解く（中圧は出口が低圧の入口なので、データから決まる）。"""
+    """🌀 3 圧・再熱: 復水器 → 高圧・中圧・低圧の節 → 高圧タービン → 再熱器（中圧の蒸気と合流）→ 中圧タービン → 低圧タービン
+    （低圧の蒸気と合流）→ 復水器。📍 節ごとの蒸気の量は pinch で解く: ガスの温度は熱を渡すほど一直線に下がり（比熱一定、
+    煙突の損と煙突の温度から）、高圧・中圧の蒸発器の出口でガスは飽和 + pinch。そこより熱い側で渡せる熱で、高圧（蒸発・過熱・
+    再熱）、中圧（高圧の節炭・中圧の蒸発と過熱・低圧の過熱）を、残りを低圧と節炭器へ。高圧・低圧タービンの内部効率 η（共通）を、
+    1 段目で解いた蒸気タービンの出力 ÷ 発電機の効率 に合うように解く（中圧は出口が低圧の入口なので、データから決まる）。"""
     q = STEAM_LOOP["lng"]
     h, (h_f, h_g, s_f, s_g), t = q["h"], q["saturation"], q["taus"]
+    (t_h, f_h, _g_h), (t_i, f_i, _g_i), (t_l, f_l, g_l) = q["drums"]
     plant = THERMAL["plants"]["lng"]
     stage = {name: outs for name, _t, outs in thermal_plan("lng")["stages"]}
     fuel = plant["gross"] / plant["efficiency"]
-    q_steam = fuel * stage["gt"]["hrsg"] * stage["hrsg"]["steam"]
+    q_exhaust = fuel * stage["gt"]["hrsg"]
+    q_steam = q_exhaust * stage["hrsg"]["steam"]
     power = q_steam * stage["steam"]["power"]  # 蒸気タービンの発電端
-    a, b, c = (x / sum(q["split"]) for x in q["split"])
+    c_g = q_exhaust * stage["hrsg"]["stack"] / (q["plant"]["stack"] - THERMAL["t_cold"])  # ガスの熱容量流量 MW/K
+    t_exh = q["plant"]["stack"] + q_steam / c_g  # ガスタービンの出口
+    hot = [c_g * (t_exh - t_s - q["pinch"]) * 1e3 for t_s in (t_h, t_i)]  # 高圧・中圧の pinch より熱い側で渡せる熱 kW
     h_lps = h_f + (q["s"]["lp"] - s_f) / (s_g - s_f) * (h_g - h_f)  # 低圧の入口から等エントロピーで膨張した排気
 
-    def cycle(eta: float) -> tuple[float, float, float, float]:
+    def det(m: list) -> float:
+        return (m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+                + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]))
+
+    def cycle(eta: float) -> tuple:
         h_crh, h_ex = h["hp"] - eta * (h["hp"] - h["hp_s"]), h["lp"] - eta * (h["lp"] - h_lps)
-        m = q_steam * 1e3 / (a * (h["hp"] - h_f) + b * (h_crh - h_f) + (a + b) * (h["reheat"] - h_crh) + c * (h["lp"] - h_f))
-        return m, h_crh, h_ex, m * (a * (h["hp"] - h_crh) + (a + b) * (h["reheat"] - h["lp"]) + h["lp"] - h_ex) / 1e3
+        rows = [[h["hp"] - f_h + h["reheat"] - h_crh, h["reheat"] - h_crh, 0.0, hot[0]],  # 高圧の pinch より熱い側
+                [f_h - f_i, h_crh - f_i, h["lp"] - g_l, hot[1] - hot[0]],  # 高圧と中圧の pinch のあいだ
+                [h["hp"] - h_f + h["reheat"] - h_crh, h["reheat"] - h_f, h["lp"] - h_f, q_steam * 1e3]]  # 全部
+        d = det([r[:3] for r in rows])
+        m_hp, m_ip, m_lp = (det([[r[3] if k == j else r[k] for k in range(3)] for r in rows]) / d for j in range(3))
+        m = m_hp + m_ip + m_lp
+        work = (m_hp * (h["hp"] - h_crh) + (m_hp + m_ip) * (h["reheat"] - h["lp"]) + m * (h["lp"] - h_ex)) / 1e3
+        return (m_hp, m_ip, m_lp), h_crh, h_ex, work
 
     eta = bisection(lambda e: cycle(e)[3] < power / eta_g, 0.5, 1.0)
-    m, h_crh, h_ex, _shaft = cycle(eta)
+    (m_hp, m_ip, m_lp), h_crh, h_ex, _shaft = cycle(eta)
+    m = m_hp + m_ip + m_lp
+    t_lp = t_exh - (hot[1] + (m_hp + m_ip) * (f_i - f_l) + m_lp * (g_l - f_l)) / c_g / 1e3  # 低圧の蒸発器の出口のガス
     gen = {k: v for k, v in (("grid", eta_g), ("sea", 1.0 - eta_g)) if v > 0}
-    water = {"hp-hrsg": {"flow": a * m, "h": h["hp"], "tau": t["hrsg"], "outs": {"hp-st": 1.0}},
-             "hp-st": {"flow": a * m, "h": h_crh, "tau": t["st"], "outs": {"reheater": 1.0}, "pull": (h["hp"], gen)},
-             "ip-hrsg": {"flow": b * m, "h": h_crh, "tau": t["hrsg"], "outs": {"reheater": 1.0}},
-             "reheater": {"flow": (a + b) * m, "h": h["reheat"], "tau": t["hrsg"], "outs": {"ip-st": 1.0}},
-             "ip-st": {"flow": (a + b) * m, "h": h["lp"], "tau": t["st"], "outs": {"lp-st": 1.0}, "pull": (h["reheat"], gen)},
-             "lp-hrsg": {"flow": c * m, "h": h["lp"], "tau": t["hrsg"], "outs": {"lp-st": 1.0}},
+    water = {"hp-hrsg": {"flow": m_hp, "h": h["hp"], "tau": t["hrsg"], "outs": {"hp-st": 1.0}},
+             "hp-st": {"flow": m_hp, "h": h_crh, "tau": t["st"], "outs": {"reheater": 1.0}, "pull": (h["hp"], gen)},
+             "ip-hrsg": {"flow": m_ip, "h": h_crh, "tau": t["hrsg"], "outs": {"reheater": 1.0}},
+             "reheater": {"flow": m_hp + m_ip, "h": h["reheat"], "tau": t["hrsg"], "outs": {"ip-st": 1.0}},
+             "ip-st": {"flow": m_hp + m_ip, "h": h["lp"], "tau": t["st"], "outs": {"lp-st": 1.0}, "pull": (h["reheat"], gen)},
+             "lp-hrsg": {"flow": m_lp, "h": h["lp"], "tau": t["hrsg"], "outs": {"lp-st": 1.0}},
              "lp-st": {"flow": m, "h": h_ex, "tau": t["st"], "outs": {"condenser": 1.0}, "pull": (h["lp"], gen)},
-             "condenser": {"flow": m, "h": h_f, "tau": t["condenser"], "outs": {"hp-hrsg": a, "ip-hrsg": b, "lp-hrsg": c},
-                           "pull": (h_ex, {"sea": 1.0})}}
+             "condenser": {"flow": m, "h": h_f, "tau": t["condenser"],
+                           "outs": {"hp-hrsg": m_hp / m, "ip-hrsg": m_ip / m, "lp-hrsg": m_lp / m}, "pull": (h_ex, {"sea": 1.0})}}
     duty = {n: water[n]["flow"] * (water[n]["h"] - h_in) / 1e3
             for n, h_in in (("hp-hrsg", h_f), ("ip-hrsg", h_f), ("reheater", h_crh), ("lp-hrsg", h_f))}
     steam = stage["hrsg"]["steam"]
     return {"fuel": ("gt", fuel), "cold": h_f, "power": plant["gross"], "eta": eta, "eta_g": eta_g, "h_ex": h_ex,
-            "x": (h_ex - ex_loss - h_f) / (h_g - h_f),
+            "x": (h_ex - ex_loss - h_f) / (h_g - h_f), "t_exh": t_exh, "lp_pinch": t_lp - t_l,
             "heat": {"gt": {"tau": t["gt"], "outs": {"grid": stage["gt"]["power"], "exhaust": stage["gt"]["hrsg"]}},
                      "exhaust": {"tau": t["exhaust"], "outs": {**{n: steam * d / q_steam for n, d in duty.items()},
                                                                "stack": stage["hrsg"]["stack"]}}},
@@ -3897,29 +3918,40 @@ def _steam_loop_checks(seed: int) -> tuple[list[dict], dict]:
               note=f"海へ出す {plan['sea']:.0f} MW を 7 °C 上げる海水 = {cooling:.1f} m³/s（100 MW あたり {per_100:.2f}）。"
                    "南港の既設 26.4 m³/s / 600 MW（補機の冷却水込み・古い汽力）と 1 割以内"),
     ]
-    # 🌀 3 圧・再熱: 解いた内部効率、排気の湿り（再熱なしと比べる）、蒸気の量、GT : ST
+    # 🌀 3 圧・再熱: pinch で解いた節の割合、解いた内部効率、排気の湿り（再熱なしと比べる）、蒸気の量、GT : ST、冷却水
     lng, q = steam_loop_plan("lng"), p["lng"]
-    h, (h_f, h_g, s_f, s_g) = q["h"], q["saturation"]
+    h, (h_f, h_g, s_f, s_g), nn = q["h"], q["saturation"], q["plant"]
     eta_ip = (h["reheat"] - h["lp"]) / (h["reheat"] - h["ip_s"])
     h_once = h["hp"] - lng["eta"] * (h["hp"] - (h_f + (q["s"]["hp"] - s_f) / (s_g - s_f) * (h_g - h_f)))
     wet, wet_once = 1.0 - lng["x"], 1.0 - (h_once - ex_loss - h_f) / (h_g - h_f)
     st = lng["work"]["st"]
-    gt_st = lng["work"]["gt"] / st
-    nanko_ratio = p["nanko"]["gt_st"][0] / p["nanko"]["gt_st"][1]
-    per_mw = lng["water"]["condenser"]["flow"] * 3.6 / st
-    nanko_flow = sum(q["split"]) / (10.0 * p["nanko"]["gt_st"][1])  # t/h / MW
+    flows = [lng["water"][n]["flow"] for n in ("hp-hrsg", "ip-hrsg", "lp-hrsg")]
+    split, nn_split = [f / sum(flows) for f in flows], [f / sum(nn["steam"]) for f in nn["steam"]]
+    gt_st, nn_ratio = lng["work"]["gt"] / st, nn["gt_st"][0] / nn["gt_st"][1]
+    per_mw, nn_flow = sum(flows) * 3.6 / st, 3.0 * sum(nn["steam"]) / nn["gt_st"][1]  # t/h / MW
+    rise = lng["sea"] / (c_p * nn["cooling"] * rho / 1e3)  # 西名古屋の冷却水で何 °C 上がるか
     checks += [
+        check("lng:loop:pinch", "📍", max(abs(a - b) for a, b in zip(split, nn_split)) <= 0.03, value=split[0],
+              expected=nn_split[0], tol=0.03,
+              note=f"高圧・中圧の蒸発器の出口でガス = 飽和 + {q['pinch']:.0f} K と置いて解いた 高圧 : 中圧 : 低圧 = "
+                   + " : ".join(f"{x:.1%}" for x in split) + "。西名古屋 7 号系列の蒸発量（246 : 59 : 36 t/h）は "
+                   + " : ".join(f"{x:.1%}" for x in nn_split) + f"、どれも 3 点以内（ガスタービンの出口 {lng['t_exh']:.0f} °C）"),
+        check("lng:loop:lp-pinch", "📍", lng["lp_pinch"] >= q["pinch"], value=lng["lp_pinch"], expected=q["pinch"],
+              note=f"残りで作る低圧の蒸発器の出口でも、ガスは飽和より {lng['lp_pinch']:.1f} K 熱い（{q['pinch']:.0f} K 以上なので作れる）"),
         check("lng:loop:isentropic", "📐", 0.85 <= lng["eta"] <= 0.95 and 0.85 <= eta_ip <= 0.95, value=lng["eta"],
               expected=0.9,
               note=f"蒸気タービンの出力に合わせて解いた 高圧・低圧の内部効率 {lng['eta']:.3f}、データから決まる中圧 {eta_ip:.3f}"
                    "（565 °C・23.8 bar(g) → 277 °C・2.2 bar(g)）。どちらも大型の蒸気タービンの範囲（摩擦で 1 割ほど失う）"),
         check("lng:loop:reheat", "💦", wet < 0.12 < wet_once, value=wet, expected=0.12,
               note=f"3 圧・再熱の排気の湿りは {wet:.1%}。同じ η で再熱しないと {wet_once:.1%} で、翼の寿命が縮む目安 12 % を超える"),
-        check("lng:loop:flow", "🚿", abs(per_mw / nanko_flow - 1.0) <= 0.10, value=per_mw, expected=nanko_flow, tol=0.10,
-              note=f"蒸気 {lng['water']['condenser']['flow'] * 3.6:,.0f} t/h で 蒸気タービン {st:.0f} MW（1 MW あたり {per_mw:.2f} t/h）。"
-                   "南港新 1 号機の 約 500 t/h / 約 20 万 kW と 1 割以内"),
-        check("lng:loop:gt-st", "🌀", abs(gt_st / nanko_ratio - 1.0) <= 0.10, value=gt_st, expected=nanko_ratio, tol=0.10,
-              note="ガスタービン : 蒸気タービン の出力 ≈ 南港新 1 号機の 約 40 万 kW : 約 20 万 kW と 1 割以内"),
+        check("lng:loop:flow", "🚿", abs(per_mw / nn_flow - 1.0) <= 0.10, value=per_mw, expected=nn_flow, tol=0.10,
+              note=f"蒸気 {sum(flows) * 3.6:,.0f} t/h で 蒸気タービン {st:.0f} MW（1 MW あたり {per_mw:.2f} t/h）。"
+                   f"西名古屋 7 号系列の {3.0 * sum(nn['steam']):,.0f} t/h / {nn['gt_st'][1]:.1f} MW（{nn_flow:.2f}）と 1 割以内"),
+        check("lng:loop:gt-st", "🌀", abs(gt_st / nn_ratio - 1.0) <= 0.10, value=gt_st, expected=nn_ratio, tol=0.10,
+              note=f"ガスタービン : 蒸気タービン の出力 = {gt_st:.2f}。西名古屋 7 号系列の 769.5 : 388.5 MW（{nn_ratio:.2f}）と 1 割以内"),
+        check("lng:loop:cooling", "🌊", rise <= d_t, value=rise, expected=d_t,
+              note=f"海へ出す {lng['sea']:.0f} MW を西名古屋の冷却水 {nn['cooling']:.0f} m³/s で受けると {rise:.1f} °C 上がる"
+                   f"（取放水の温度差 {d_t:.0f} °C 以下に収まる）"),
     ]
     for item in random_scales(seed + 10, 2, n_min=1, n_max=1):  # 🎲 どの τ も c 倍（0.1〜0.999）: 状態点は変わらない
         c = item["value"]
@@ -3930,9 +3962,9 @@ def _steam_loop_checks(seed: int) -> tuple[list[dict], dict]:
                        "steam_to_power": share, "q_in_mw": plan["q_in"], "sea_mw": plan["sea"],
                        "plant_lhv": p["power"] / plan["fuel"][1], "cooling_m3_s": cooling, "cooling_per_100mw": per_100,
                        "condenser_share_of_main": plan["water"]["condenser"]["flow"] / p["main"]}
-    summary["lng"] = {"steam_t_h": lng["water"]["condenser"]["flow"] * 3.6, "h_ex": lng["h_ex"], "eta": lng["eta"],
-                      "eta_ip": eta_ip, "wetness": wet, "wetness_no_reheat": wet_once, "t_h_per_mw": per_mw,
-                      "gt_st": gt_st, "sea_mw": lng["sea"]}
+    summary["lng"] = {"steam_t_h": sum(flows) * 3.6, "split": split, "t_exh": lng["t_exh"], "lp_pinch": lng["lp_pinch"],
+                      "h_ex": lng["h_ex"], "eta": lng["eta"], "eta_ip": eta_ip, "wetness": wet, "wetness_no_reheat": wet_once,
+                      "t_h_per_mw": per_mw, "gt_st": gt_st, "sea_mw": lng["sea"], "cooling_rise": rise}
     return checks, summary
 
 

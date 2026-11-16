@@ -1153,9 +1153,16 @@ class SteamLoop(unittest.TestCase):
         self.assertEqual(set(plan["water"]["condenser"]["outs"]), {"hp-hrsg", "ip-hrsg", "lp-hrsg"})
         self.assertTrue(0.85 <= plan["eta"] <= 0.95)
         self.assertLess(1.0 - plan["x"], 0.12)  # 再熱で湿りは翼の目安より下
-        split = ffs.STEAM_LOOP["lng"]["split"]
-        hp, ip = (plan["water"][n]["flow"] for n in ("hp-st", "ip-hrsg"))
-        self.assertAlmostEqual(hp / ip, split[0] / split[1], places=9)  # 量の割合は南港のまま
+        q = ffs.STEAM_LOOP["lng"]
+        w, h = plan["water"], q["h"]
+        m_hp, m_ip = w["hp-hrsg"]["flow"], w["ip-hrsg"]["flow"]
+        (t_h, f_h, _g), (t_i, f_i, _g), (_t, _f, g_l) = q["drums"]
+        c_g = plan["q_in"] / (plan["t_exh"] - q["plant"]["stack"])  # MW/K（ガスは一直線に冷える）
+        above_hp = m_hp * (h["hp"] - f_h) + (m_hp + m_ip) * (h["reheat"] - w["hp-st"]["h"])
+        self.assertAlmostEqual(above_hp / 1e3, c_g * (plan["t_exh"] - t_h - q["pinch"]), places=6)  # 高圧の pinch
+        between = m_hp * (f_h - f_i) + m_ip * (w["hp-st"]["h"] - f_i) + w["lp-hrsg"]["flow"] * (h["lp"] - g_l)
+        self.assertAlmostEqual((above_hp + between) / 1e3, c_g * (plan["t_exh"] - t_i - q["pinch"]), places=6)  # 中圧の pinch
+        self.assertGreaterEqual(plan["lp_pinch"], q["pinch"])  # 残りの低圧でも温度は交差しない
         self.assertGreater(plan["eta"], ffs.steam_loop_plan("lng", losses=False)["eta"])  # 発電機の損の分、軸は多く働く
 
     def test_water_does_not_move_while_the_plant_heats_up(self):
