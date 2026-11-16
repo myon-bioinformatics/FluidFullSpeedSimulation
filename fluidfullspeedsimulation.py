@@ -3376,9 +3376,15 @@ def thermal_network(kind: str, *, load=1.0, slow: float = 1.0, t_fuel: float | N
     plan_load = [(0.0, load)] if isinstance(load, (int, float)) else list(load)
     for i, (start, x) in enumerate(plan_load):
         until = plan_load[i + 1][0] if i + 1 < len(plan_load) else None
-        lhv = (1.0 - a) * x * full
+        if willans:
+            lhv = (1.0 - a) * x * full
+            stack = lhv * latent
+        else:
+            # Preserve the legacy arithmetic before fixed-Q rounding.
+            lhv, hhv = thermal_fuel(kind, x)
+            stack = hhv - lhv
         net.pump("fuel", plan["stages"][0][0], rate=lhv, start=start, until=until)
-        net.pump("fuel", "stack", rate=lhv * latent, start=start, until=until)
+        net.pump("fuel", "stack", rate=stack, start=start, until=until)
     steps = int(round(t_end / net.dt))
     net.nodes["fuel"]["v"] = sum(  # ポンプの量（Q）を、動いているステップの数だけ（ちょうど燃やし切る）
         ln["amount"] * max(0, min(steps, ln["until_step"] or steps) - ln["start_step"]) for ln in net.links)
