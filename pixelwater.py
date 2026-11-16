@@ -984,38 +984,104 @@ def section_png_bytes(view: dict, frame: int = -1, *, scale: int = SECTION_SCALE
     return _png(rows, section_palette(view["fluid"], view["fill"]))
 
 
+# --- 🕰️ 時空図（横 = 列、縦 = 時刻、色の濃さ = 水深） ----------------------------------------
+# 断面図と同じ列の並びで、1 時刻を 1 行（scale/2 px）に積む。水の先端の届き方が斜めの境目に、🍜 の通り道が斜めの線になる
+# （傾き = 速さ、横に進まない縦の線 = 溜まって待つ）。GIF は時刻を 1 行ずつ足していく。
+
+
+def kymo_palette(fluid: str, fill: str | None = None, rows: int = SECTION_GIF_ROWS) -> list[tuple[int, int, int]]:
+    """断面図の 7 色 + 水深の rows 段（空の色から流体の shadow へ線形に。1 段目がいちばん淡い）。"""
+    pal = section_palette(fluid, fill)
+    lo, hi = pal[S_EMPTY], derive_palette(*block_color(fluid, fill))[2][:3]
+    return pal + [tuple(round(a + (b - a) * k / rows) for a, b in zip(lo, hi)) for k in range(1, rows + 1)]
+
+
+def kymo_layout(view: dict, scale: int = SECTION_SCALE, tank_tiles: int = TANK_TILES) -> dict:
+    """列の (x, 幅) は断面図と同じ。縦は 余白 + 時刻 × scale/2 + 余白（40 時刻・scale 8 なら 176 px）。"""
+    lay = section_layout(view, scale, tank_tiles)
+    row_h = max(1, scale // 2)
+    return {**lay, "row_h": row_h, "height": 2 * scale + len(view["frames"]) * row_h}
+
+
+def kymo_pixels(view: dict, frame: int = -1, *, scale: int = SECTION_SCALE, gap: int = 0,
+                tank_tiles: int = TANK_TILES, layout: dict | None = None) -> list[bytearray]:
+    """時空図の frame 番目までの時刻を色番号のピクセル行へ（その先は背景のまま）。
+
+    水深 n 段の列は色 S_BAR + n（空は S_EMPTY）。🍜 は列の真ん中半分を gold、管は中の 🍜 があれば gold・無ければ管の色。
+    既定の gap は 0（同じ組の列は継ぎ目なしの面に。組の間は断面図と同じく 1 マス空く）。
+    """
+    if not 0 <= gap < scale:
+        raise ValueError("gap must be in [0, scale)")
+    lay = layout or kymo_layout(view, scale, tank_tiles)
+    last = frame % len(view["frames"])
+    px = [bytearray(lay["width"]) for _ in range(lay["height"])]
+    row_h, kinds = lay["row_h"], view["kinds"]
+    for i, fr in enumerate(view["frames"][:last + 1]):
+        y0 = scale + i * row_h
+        for c, (x, cw) in enumerate(lay["spans"]):
+            w = cw - gap
+            cells = [fr["cells"][r][c] for r in range(view["rows"])]
+            if kinds[c] == "pipe":
+                color = S_CARRIED if CELL_IN_PIPE in cells else S_PIPE
+                segs = [(x + w // 4, x + w - w // 4, color)]
+            else:
+                n = fr["counts"][c]
+                segs = [(x, x + w, S_BAR + n if n else S_EMPTY)]
+                if CELL_CARRIED in cells or CELL_IN_PIPE in cells:
+                    segs.append((x + w // 4, x + w - w // 4, S_CARRIED))
+            for a, b, color in segs:
+                for y in range(y0, y0 + row_h):
+                    px[y][a:b] = bytes([color]) * (b - a)
+    return px
+
+
+def kymo_gif_bytes(view: dict, *, scale: int = SECTION_SCALE, gap: int = 0, tank_tiles: int = TANK_TILES,
+                   delays=SECTION_DELAYS) -> bytes:
+    """時空図を、時刻を 1 行ずつ足していくアニメーション GIF に（色表は 7 色 + 段数）。"""
+    lay = kymo_layout(view, scale, tank_tiles)
+    grids = [kymo_pixels(view, i, scale=scale, gap=gap, layout=lay) for i in range(len(view["frames"]))]
+    return _gif(grids, kymo_palette(view["fluid"], view["fill"], view["rows"]),
+                delays=_section_delays(len(grids), delays))
+
+
+def kymo_png_bytes(view: dict, *, scale: int = SECTION_SCALE, gap: int = 0, tank_tiles: int = TANK_TILES) -> bytes:
+    """時空図の全部（最後の時刻まで）を PNG に。"""
+    rows = kymo_pixels(view, -1, scale=scale, gap=gap, tank_tiles=tank_tiles)
+    return _png(rows, kymo_palette(view["fluid"], view["fill"], view["rows"]))
+
+
 def draw_section(res: dict, columns, scene: str, out_dir: str = "build/pixel", *,
                  frames: int | None = SECTION_GIF_FRAMES, rows: int = SECTION_GIF_ROWS, cap_mode: str = "run-max",
                  caps: dict | None = None, fill: str | None = None, scale: int = SECTION_SCALE,
                  formats=("gif", "png"), file_prefix: str = "", file_suffix: str = "",
-                 plan: dict | None = None) -> dict:
+                 plan: dict | None = None, kymo: bool = False) -> dict:
     """断面図の GIF（時刻を追う）と PNG（最後の時刻）を書き、隣に受領記録 <name>.json を置く（draw と同じ考え方）。
 
     名前は <prefix><場面>_<流体>_n<時刻の数>_h<段数>_r<NN><suffix>。plan には呼んだ側の再現の引数
-    （水温・粘度など）を足す。
+    （水温・粘度など）を足す。kymo=True なら 🕰️ 時空図（名前は n の前に kymo_、PNG は全部の時刻）。
     """
     view = network_frames(res, columns, frames=frames, rows=rows, cap_mode=cap_mode, caps=caps, fill=fill)
     fluid = view["fluid"]
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     stem = file_stem(scene, fluid, None, 0, out_dir, file_prefix, file_suffix,
-                     conditions=f"n{len(view['frames']):03d}_h{rows:02d}")
+                     conditions=f"{'kymo_' if kymo else ''}n{len(view['frames']):03d}_h{rows:02d}")
     blobs = {}
     if "gif" in formats:
-        blobs["gif"] = section_gif_bytes(view, scale=scale)
+        blobs["gif"] = (kymo_gif_bytes if kymo else section_gif_bytes)(view, scale=scale)
     if "png" in formats:
-        blobs["png"] = section_png_bytes(view, -1, scale=scale)
+        blobs["png"] = kymo_png_bytes(view, scale=scale) if kymo else section_png_bytes(view, -1, scale=scale)
     paths, files = {}, {}
     for kind, data in blobs.items():
         p = stem.with_name(f"{stem.name}.{kind}")
         p.write_bytes(data)
         paths[kind] = str(p)
         files[kind] = {"name": p.name, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
-    lay = section_layout(view, scale)
+    lay = (kymo_layout if kymo else section_layout)(view, scale)
     receipt = {
         "schema": SECTION_RECEIPT_SCHEMA, "files": files, "frames": len(view["frames"]),
         "canvas": f"{lay['width']}x{lay['height']}",
         "plan": {"scene": scene, "fluid": fluid, "frames": frames, "rows": rows, "cap_mode": cap_mode,
-                 "fill": view["fill"], "scale": scale, **(plan or {})},
+                 "fill": view["fill"], "scale": scale, **({"view": "kymo"} if kymo else {}), **(plan or {})},
         "columns": view["columns"], "t": [view["times"][0], view["times"][-1]],
         "readback_error": view["readback_error"], "half_block": view["half_block"],
         "conservation_error_q": res.get("conservation_error_q"),

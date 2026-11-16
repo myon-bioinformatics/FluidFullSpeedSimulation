@@ -4873,7 +4873,7 @@ def section_run(scene: str, fluid: str = "water", temp_c: float | None = None, m
 
 
 def _draw(args) -> int:
-    files = args.view == "files"
+    files = args.view in ("files", "kymo")
     if args.scene in RIG_SCENES or args.scene in pw.SECTION_CASES:
         res, cols = section_run(args.scene, args.fluid, args.temp_c, **_visc(args))
         if files:
@@ -4883,7 +4883,7 @@ def _draw(args) -> int:
             out = pw.draw_section(res, cols, args.scene, args.out_dir, frames=frames, rows=rows,
                                   cap_mode=args.cap_mode, fill=args.fill, scale=args.scale,
                                   formats=_formats(args), file_prefix=args.file_prefix,
-                                  file_suffix=args.file_suffix, plan=replay)
+                                  file_suffix=args.file_suffix, plan=replay, kymo=args.view == "kymo")
             for kind, path in out["paths"].items():
                 print(f"{FILE_ICONS[kind]} {path}")
             print(f"🎬 {out['frames']}  📐 {out['canvas']}  📏 ±{out['half_block']:.3g} m  "
@@ -4893,6 +4893,9 @@ def _draw(args) -> int:
         print(pw.render_frames(pw.network_frames(res, cols, frames=frames, rows=args.rows or pw.SECTION_ROWS,
                                                  cap_mode=args.cap_mode, fill=args.fill)))
         return 0 if res["conservation_error_q"] == 0 else 1
+    if args.view == "kymo":
+        print("🕰️ 時空図は断面図の場面だけ（ドット絵の場面は frames・frame・files）", file=sys.stderr)
+        return 2
     if files:
         out = pw.draw(args.scene, args.fluid, args.out_dir, ticks=args.ticks, seed=args.seed, scale=args.scale,
                       frame_every=args.frame_every, formats=_formats(args), file_prefix=args.file_prefix,
@@ -4914,7 +4917,8 @@ def _formats(args) -> tuple[str, ...]:
 
 # --- 🎞️ README のデモ（場面ごとに GIF 1 枚） ----------------------------------------
 
-# (場面, 流体, 塗り)。塗りは色だけ（物理は流体で決まる）。⚗️ はエタノールの 🟨、👼 は琥珀の 🟧、🫀 は血の 🟥、🪨 🌀 は熱の 🟧 で塗る
+# (場面, 流体, 塗り[, 見せ方])。塗りは色だけ（物理は流体で決まる）。⚗️ はエタノールの 🟨、👼 は琥珀の 🟧、🫀 は血の 🟥、
+# 🪨 🌀 は熱の 🟧 で塗る。見せ方 "kymo" は 🕰️ 時空図（同じ場面を、横 = 列・縦 = 時刻で。既定は断面図）
 DEMOS = (("moniac-rig", "water", None), ("moniac-drain", "water", None), ("flume", "water", None),
          ("flume-hopper", "water", None), ("somen-flume", "water", None), ("noodle-length", "water", None),
          ("noodle-clog", "water", None), ("chopsticks", "water", None), ("cold-water", "water", None),
@@ -4927,7 +4931,8 @@ DEMOS = (("moniac-rig", "water", None), ("moniac-drain", "water", None), ("flume
          ("heat-pump", "water", "🟧"), ("csf", "water", None),
          ("steam-loop", "water", "🟧"), ("hrsg-loop", "water", "🟧"),
          ("part-load", "water", "🟧"), ("startup", "water", "🟧"),
-         ("metal", "water", "🟥"), ("r32-loop", "water", "🟧"), ("house", "water", "🟥"))
+         ("metal", "water", "🟥"), ("r32-loop", "water", "🟧"), ("house", "water", "🟥"),
+         ("flume", "water", None, "kymo"), ("rain-runoff", "water", None, "kymo"))
 DEMOS_SCHEMA = "fluidfullspeedsimulation-demos/1"
 _NEEDS_VS16 = set("🏛🕳🍽🌧⚗⛏❄♨🌡")  # 絵文字で出すには U+FE0F が要るもの
 
@@ -4937,8 +4942,10 @@ def scene_icon(scene: str) -> str:
     return icon + "️" if icon in _NEEDS_VS16 else icon
 
 
-def demo_gif(scene: str, fluid: str = "water", fill: str | None = None, *, scale: int = 8) -> tuple[bytes, dict]:
-    """デモの GIF 1 枚（既定の引数だけ）。断面図は 16 段・40 時刻、ドット絵は draw --view files と同じ。"""
+def demo_gif(scene: str, fluid: str = "water", fill: str | None = None, *, scale: int = 8,
+             kymo: bool = False) -> tuple[bytes, dict]:
+    """デモの GIF 1 枚（既定の引数だけ）。断面図は 16 段・40 時刻、ドット絵は draw --view files と同じ。
+    kymo=True なら同じ 16 段・40 時刻の 🕰️ 時空図。"""
     if scene in pw.SCENES:
         res = pw.run_pixels(scene, fluid)
         data = pw.gif_bytes(res, scale=scale)
@@ -4946,9 +4953,9 @@ def demo_gif(scene: str, fluid: str = "water", fill: str | None = None, *, scale
                       "kind": "pixel", "conserved": res["count_error"] == 0}
     res, cols = section_run(scene, fluid)
     view = pw.network_frames(res, cols, frames=pw.SECTION_GIF_FRAMES, rows=pw.SECTION_GIF_ROWS, fill=fill)
-    lay = pw.section_layout(view, scale)
-    return pw.section_gif_bytes(view, scale=scale), {
-        "frames": len(view["frames"]), "canvas": f"{lay['width']}x{lay['height']}", "kind": "section",
+    lay = (pw.kymo_layout if kymo else pw.section_layout)(view, scale)
+    return (pw.kymo_gif_bytes if kymo else pw.section_gif_bytes)(view, scale=scale), {
+        "frames": len(view["frames"]), "canvas": f"{lay['width']}x{lay['height']}", "kind": "kymo" if kymo else "section",
         "columns": view["columns"], "t": [view["times"][0], view["times"][-1]],
         "conserved": res["conservation_error_q"] == 0}
 
@@ -4961,7 +4968,7 @@ def demo_arg(text: str) -> str:
     """--only: 'D01'・'d1'・場面の名前・場面の絵文字（🏛️ など）のどれでも D<NN> に直す。"""
     k = _plain(text)
     scene = SCENE_ICONS.get(k, k)
-    for did, (name, _fluid, _fill) in zip(demo_ids(), DEMOS):
+    for did, (name, *_rest) in zip(demo_ids(), DEMOS):
         if scene == name or k.upper() == did or (k[:1] in "dD" and k[1:].isdigit() and int(k[1:]) == int(did[1:])):
             return did
     return text
@@ -4978,12 +4985,12 @@ def write_demos(out_dir: str = "docs/demos", *, check: bool = False, scale: int 
     out = Path(out_dir)
     wanted = None if only is None else {demo_arg(k) for k in only}
     items = []
-    for did, (scene, fluid, fill) in zip(demo_ids(), DEMOS):
+    for did, (scene, fluid, fill, *how) in zip(demo_ids(), DEMOS):
         if wanted is not None and did not in wanted:
             continue
-        n = int(did[1:])
-        data, info = demo_gif(scene, fluid, fill, scale=scale)
-        name = f"{file_prefix}D{n:02d}_{scene}_{fluid}{file_suffix}.gif"
+        n, kymo = int(did[1:]), how == ["kymo"]
+        data, info = demo_gif(scene, fluid, fill, scale=scale, kymo=kymo)
+        name = f"{file_prefix}D{n:02d}_{scene}{'-kymo' if kymo else ''}_{fluid}{file_suffix}.gif"
         path = out / name
         status = "written"
         if check:
@@ -4991,7 +4998,8 @@ def write_demos(out_dir: str = "docs/demos", *, check: bool = False, scale: int 
         else:
             out.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
-        items.append({"id": f"D{n:02d}", "scene": scene, "icon": scene_icon(scene), "fluid": fluid, "fill": fill,
+        items.append({"id": f"D{n:02d}", "scene": scene, "icon": ("🕰️" if kymo else "") + scene_icon(scene),
+                      "fluid": fluid, "fill": fill,
                       "file": name, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(),
                       "status": status, **info})
     if not check:
@@ -5048,8 +5056,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="場面（名前か 🏛️ 🥢 🍜 🧱 🍽️ 🧊 🪵 🌧️ 🎍 🍷 🫗 🏺 🚧 ⚗️ 👼 🎋 🫙 🌊 🕳️）")
     drw.add_argument("block", nargs="?", type=block_arg,
                      help="流体のブロック・アイコン（🟦 🟨 🟧 🟩 🟪 / 💧 🍶 🧴 🟢 ☠️）か、塗りたい好きな絵文字")
-    drw.add_argument("--view", choices=("frames", "frame", "files"), default="frames",
-                     help="frames = 時刻ごとの断面図 / frame = 最後の 1 枚 / files = GIF・PNG・受領記録 JSON")
+    drw.add_argument("--view", choices=("frames", "frame", "files", "kymo"), default="frames",
+                     help="frames = 時刻ごとの断面図 / frame = 最後の 1 枚 / files = GIF・PNG・受領記録 JSON / "
+                          "kymo = 🕰️ 時空図（横 = 列・縦 = 時刻）の GIF・PNG・JSON")
     drw.add_argument("--fluid", type=fluid_arg, choices=ALL_FLUID_KEYS, default=None,
                      help="作動流体（キーか絵文字。🏷️ 仮置きも選べる。既定 water）")
     drw.add_argument("--fill", help="水のブロック（色は自由。既定は流体ごと: 🟦 水 🟨 エタノール 🟧 メタノール "

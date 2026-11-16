@@ -408,10 +408,69 @@ class DrawSection(unittest.TestCase):
         self.assertEqual(len(out.getvalue().splitlines()), 6 * (1 + pw.SECTION_ROWS))
 
 
+class KymoImages(unittest.TestCase):
+    """🕰️ 時空図: 横 = 断面図と同じ列、縦 = 時刻（1 時刻 = scale/2 px）、色 = 水深の段、🍜 の通り道は gold。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.res, cls.cols = pw.section_case("flume")
+        cls.view = pw.network_frames(cls.res, cls.cols, frames=24, rows=16)
+
+    def test_every_gif_frame_is_the_kymo_pixels(self):
+        for scale, gap in ((8, 0), (4, 1), (16, 2)):
+            with self.subTest(scale=scale, gap=gap):
+                gif = pw.read_gif(pw.kymo_gif_bytes(self.view, scale=scale, gap=gap))
+                self.assertEqual(len(gif["frames"]), len(self.view["frames"]))
+                for i, frame in enumerate(gif["frames"]):
+                    self.assertEqual(frame, flat(pw.kymo_pixels(self.view, i, scale=scale, gap=gap)), i)
+        png = pw.read_png(pw.kymo_png_bytes(self.view))
+        self.assertEqual(flat(png["rows"]), flat(pw.kymo_pixels(self.view, -1)))
+
+    def test_rows_are_times_and_colours_are_depths(self):
+        lay = pw.kymo_layout(self.view)
+        self.assertEqual((lay["width"] % 8, lay["height"] % 8), (0, 0))
+        self.assertEqual(lay["height"], 8 * 2 + 24 * 4)
+        self.assertEqual(len(pw.kymo_palette("water", rows=16)), 7 + 16)
+        px = pw.kymo_pixels(self.view, -1, layout=lay)
+        half = pw.kymo_pixels(self.view, 11, layout=lay)
+        gold = 0
+        for i, fr in enumerate(self.view["frames"]):
+            y = 8 + i * lay["row_h"]
+            for c, (x, w) in enumerate(lay["spans"]):
+                n = fr["counts"][c]
+                with self.subTest(t=i, column=c):
+                    self.assertEqual(px[y][x], pw.S_BAR + n if n else pw.S_EMPTY)  # 端は水深の色
+                    cells = {fr["cells"][r][c] for r in range(16)}
+                    carried = bool(cells & {pw.CELL_CARRIED, pw.CELL_IN_PIPE})  # 管の列が無いと ⏳ は行き先の底
+                    self.assertEqual(px[y][x + w // 2] == pw.S_CARRIED, carried)  # 真ん中は 🍜 ⏳ があれば gold
+                    self.assertEqual(half[y][x], px[y][x] if i <= 11 else pw.S_BG)  # まだの時刻は背景
+                gold += carried
+        self.assertGreater(gold, 0)
+        arrivals = self.view["arrivals"]
+        self.assertEqual(arrivals, sorted(arrivals))  # 水の先端は下流ほど遅く届く（時空図の斜めの境目）
+        self.assertLess(arrivals[0], arrivals[-1])
+
+    def test_cli_kymo_files_and_pixel_scenes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = ffs.main(["draw", "🎋", "--view", "kymo", "--frames", "8", "--rows", "8", "--out-dir", tmp])
+            self.assertEqual(code, 0)
+            names = sorted(p.name for p in Path(tmp).iterdir())
+            self.assertEqual(names, [f"flume_water_kymo_n008_h08_r01.{e}" for e in ("gif", "json", "png")])
+            receipt = json.loads((Path(tmp) / names[1]).read_text(encoding="utf-8"))
+            self.assertEqual((receipt["plan"]["view"], receipt["canvas"]), ("kymo", "176x48"))
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(ffs.main(["draw", "🌊", "--view", "kymo"]), 2)  # ドット絵の場面には列がない
+        self.assertIn("🕰️", err.getvalue())
+
+
 class Demos(unittest.TestCase):
     def test_one_demo_per_draw_scene(self):
-        scenes = [scene for scene, _f, _fill in ffs.DEMOS]
+        scenes = [scene for scene, _f, _fill, *how in ffs.DEMOS if not how]
         self.assertEqual(sorted(scenes), sorted(ffs.RIG_SCENES + pw.SECTION_CASES + pw.SCENES))
+        kymo = [scene for scene, _f, _fill, *how in ffs.DEMOS if how]
+        self.assertTrue(kymo and set(kymo) <= set(ffs.RIG_SCENES + pw.SECTION_CASES))  # 🕰️ は断面図の場面の見せ方
+        self.assertEqual({tuple(d[3:]) for d in ffs.DEMOS if len(d) > 3}, {("kymo",)})
         self.assertEqual(ffs.demo_ids()[0], "D01")
         for text, want in (("D03", "D03"), ("d3", "D03"), ("🏛️", "D01"), ("flume-hopper", "D04")):
             self.assertEqual(ffs.demo_arg(text), want)
@@ -450,9 +509,9 @@ class Demos(unittest.TestCase):
         self.assertEqual(manifest["schema"], ffs.DEMOS_SCHEMA)
         self.assertEqual([d["id"] for d in manifest["demos"]], ffs.demo_ids())
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        for d, (scene, fluid, fill) in zip(manifest["demos"], ffs.DEMOS):
+        for d, (scene, fluid, fill, *how) in zip(manifest["demos"], ffs.DEMOS):
             with self.subTest(demo=d["id"]):
-                self.assertEqual((d["scene"], d["fluid"], d["fill"]), (scene, fluid, fill))
+                self.assertEqual((d["scene"], d["fluid"], d["fill"], d["kind"] == "kymo"), (scene, fluid, fill, bool(how)))
                 data = (DEMO_DIR / d["file"]).read_bytes()
                 self.assertEqual(hashlib.sha256(data).hexdigest(), d["sha256"])
                 gif = pw.read_gif(data)
