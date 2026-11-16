@@ -1448,6 +1448,10 @@ class HeatPump(unittest.TestCase):
         self.assertAlmostEqual(ffs.heat_pump_max(t_b), ffs.house_load(t_b), places=6)
         self.assertGreater(ffs.heat_pump_max(t_b + 1.0), ffs.house_load(t_b + 1.0))
         self.assertLess(ffs.heat_pump_max(t_b - 1.0), ffs.house_load(t_b - 1.0))
+        ratio, heat_per_cool = p["house"]["load"]
+        self.assertAlmostEqual(ffs.house_load(p["house"]["t100"]), ratio * heat_per_cool * p["max"]["cooling"], places=12)
+        self.assertAlmostEqual(ffs.house_load(p["house"]["t100"], iso=True), ratio * p["heat"], places=12)  # ISO の表 2
+        self.assertLessEqual(abs(ffs.house_balance(iso=True) - t_b), 1.0)  # どちらの読みでもほぼ同じ
 
     def test_house_scene(self):
         self.assertEqual(ffs.scene_arg("🏠"), "house")

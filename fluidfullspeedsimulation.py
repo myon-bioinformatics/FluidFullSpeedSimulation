@@ -4093,7 +4093,9 @@ def _steam_loop_checks(seed: int) -> tuple[list[dict], dict]:
 # max は 🏠 外気で落ちる最大出力: 建築研究所の式（最大出力比 = a₂(θ−7)² + a₁(θ−7) + a₀、a = b·最大能力比 + c、
 # b・c = 傾き × 定格冷房能力 [kW] + 切片）と、この機種の定格冷房 2.8 kW・最大暖房 8.8 kW、カタログの低温の最大能力 (°C, kW)。
 # frost °C 未満は着霜として除霜の補正を掛ける。house は JIS の APF の家（同じ部屋の冷暖房）: 暖房負荷は外気 t0 °C で 0、
-# t100 °C で 0.82 × 1.25 × 定格冷房能力（ISO 16358-2 の負荷線、経産省 WG）。tau は部屋の熱の滞在時間 [s]（仮置き、
+# t100 °C で 0.82 × (1.25 × 定格冷房能力)（ISO 16358-2 の表 2 は 0.82 × 7 °C の暖房の全負荷能力。0.82 は 0 °C で出せる
+# 能力の 7 °C に対する比。JIS は同じ部屋にするため暖房の能力を 冷房 × 1.25 に置く: 経産省 WG）。load = (0.82, 1.25)。
+# tau は部屋の熱の滞在時間 [s]（仮置き、
 # 行き渡った後の温度には効かない）、outs は並べる 2 部屋の外気 °C。
 HEAT_PUMP = {"heat": 3.6, "power": 0.705, "t_room": 20.0, "t_out": 7.0, "dt": 1.0, "scene": (256.0, 2),
              "stages": (("evaporator", 16.0), ("compressor", 8.0), ("condenser", 32.0)),
@@ -4103,7 +4105,7 @@ HEAT_PUMP = {"heat": 3.6, "power": 0.705, "t_room": 20.0, "t_out": 7.0, "dt": 1.
              "max": {"cooling": 2.8, "heat_max": 8.8, "frost": 5.0, "catalog": ((2.0, 6.4), (-7.0, 5.9), (-15.0, 5.2)),
                      "bri": ((0.000181, 0.002322, 0.003556), (-0.000184, 0.013904, 0.993431),
                              (-0.000173, -0.003980, -0.002870), (0.000367, 0.003983, 0.006376))},
-             "house": {"t0": 17.0, "t100": 0.0, "load": 0.82 * 1.25, "tau": 1800.0, "outs": (2.0, -15.0),
+             "house": {"t0": 17.0, "t100": 0.0, "load": (0.82, 1.25), "tau": 1800.0, "outs": (2.0, -15.0),
                        "scene": (4.0 * 3600.0, 30)}}
 
 
@@ -4119,16 +4121,20 @@ def heat_pump_max(t_out: float) -> float:
     return (a2 * x * x + a1 * x + a0) * p["heat"] * (p["r32"]["defrost"] if t_out < m["frost"] else 1.0)
 
 
-def house_load(t_out: float) -> float:
+def house_load(t_out: float, *, iso: bool = False) -> float:
     """🏠 JIS の家の暖房負荷 [kW]: 外気 t0 で 0、t100 で 0.82 × 1.25 × 定格冷房能力 の直線（室温 20 °C を保つのに要る熱。
-    t0 が 20 °C より低いのは、人・家電・日射の熱で 3 K ぶんまかなえるから）。"""
-    h, cooling = HEAT_PUMP["house"], HEAT_PUMP["max"]["cooling"]
-    return h["load"] * cooling * (h["t0"] - t_out) / (h["t0"] - h["t100"])
+    t0 が 20 °C より低いのは、人・家電・日射の熱で 3 K ぶんまかなえるから）。iso=True は ISO 16358-2 のまま
+    （t100 で 0.82 × 定格暖房能力）。"""
+    p = HEAT_PUMP
+    h = p["house"]
+    ratio, heat_per_cool = h["load"]
+    full = p["heat"] if iso else heat_per_cool * p["max"]["cooling"]
+    return ratio * full * (h["t0"] - t_out) / (h["t0"] - h["t100"])
 
 
-def house_balance() -> float:
+def house_balance(*, iso: bool = False) -> float:
     """🏠 バランス点 °C: 最大暖房出力 = 家の暖房負荷 になる外気。これより冷たいと 1 台では 20 °C を保てない。"""
-    return bisection(lambda t: heat_pump_max(t) < house_load(t), -40.0, HEAT_PUMP["max"]["frost"])
+    return bisection(lambda t: heat_pump_max(t) < house_load(t, iso=iso), -40.0, HEAT_PUMP["max"]["frost"])
 
 
 def house_network(t_outs=None, *, t_end: float | None = None, dt: float | None = None) -> Network:
@@ -4279,9 +4285,15 @@ def e32_heat_pump(seed: int = 32) -> dict:
     (t1, c1), (t2, c2) = mx["catalog"][1:]
     ua = house_load(h["t100"]) / (h["t0"] - h["t100"])
     t_cat = bisection(lambda t: c1 + (c2 - c1) * (t - t1) / (t2 - t1) < house_load(t), -40.0, t1)  # カタログの 2 点を直線で
-    checks.append(check("house:balance", "🏠", abs(t_b - t_cat) <= 1.0, value=t_b, expected=t_cat, tol=1.0,
-                        note=f"JIS の家（0 °C で {house_load(0.0):.2f} kW、UA {ua * 1e3:.0f} W/K）を 1 台で 20 °C に保てるのは外気 "
-                             f"{t_b:.1f} °C まで（建築研究所の式）。カタログの −7・−15 °C を直線で結ぶと {t_cat:.1f} °C で 1 K 以内"))
+    t_iso = house_balance(iso=True)
+    checks += [
+        check("house:balance", "🏠", abs(t_b - t_cat) <= 1.0, value=t_b, expected=t_cat, tol=1.0,
+              note=f"JIS の家（0 °C で {house_load(0.0):.2f} kW、UA {ua * 1e3:.0f} W/K）を 1 台で 20 °C に保てるのは外気 "
+                   f"{t_b:.1f} °C まで（建築研究所の式）。カタログの −7・−15 °C を直線で結ぶと {t_cat:.1f} °C で 1 K 以内"),
+        check("house:balance:iso", "📚", abs(t_iso - t_b) <= 1.0, value=t_iso, expected=t_b, tol=1.0,
+              note=f"ISO 16358-2 のまま（0 °C で 0.82 × 定格暖房 = {house_load(0.0, iso=True):.2f} kW）でもバランス点は {t_iso:.1f} °C。"
+                   "JIS の 冷房 × 1.25 との違いは 1 K 以内で、どちらの読みでも結論は同じ"),
+    ]
     t_room = 64.0 * h["tau"]
     net = house_network(t_end=t_room)
     res = net.run(t_room)
@@ -4294,7 +4306,7 @@ def e32_heat_pump(seed: int = 32) -> dict:
                             note=f"外気 {t:g} °C の部屋は {t + q_in / ua:.2f} °C で落ち着く（入る熱 {q_in:.2f} kW = 逃げる熱 UA·(室温 − 外気)）"
                                  + ("。バランス点より冷たいので最大出力でも 20 °C に届かない" if short else "。要る分だけ出して 20 °C")))
     checks.append(conserved("house:conserve", res))
-    summary_house = {"ua_kw_k": ua, "balance_c": t_b, "balance_catalog_c": t_cat,
+    summary_house = {"ua_kw_k": ua, "balance_c": t_b, "balance_catalog_c": t_cat, "balance_iso_c": t_iso,
                      "room_c": {f"{t:g}": t + (min(house_load(t), heat_pump_max(t)) + ua * (p["t_room"] - h["t0"])) / ua
                                 for t in h["outs"]},
                      "max_kw": {f"{t:g}": heat_pump_max(t) for t, _c in mx["catalog"]}}

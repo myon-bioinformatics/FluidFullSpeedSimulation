@@ -566,11 +566,12 @@ uv run python fluidfullspeedsimulation.py draw 🫗 🟩                     # �
 | 🧩 | 値 |
 |---|---|
 | 📉 最大暖房出力 | 建築研究所の式: 定格暖房 3.6 kW × 最大出力比（外気の 2 次式。係数はこの機種の 定格冷房 2.8 kW・最大暖房 8.8 kW から）× 除霜 0.77（5 °C 未満） |
-| 🏠 家の暖房負荷 | JIS の APF の家（同じ部屋の冷暖房）: 外気 17 °C で 0、0 °C で 0.82 × 1.25 × 定格冷房 2.8 = 2.87 kW の直線（UA 169 W/K。17 °C で 0 なのは人・家電・日射の分 3 K） |
-| ⚖️ バランス点 | −13.5 °C（カタログの −7・−15 °C を直線で結ぶと −14.2 °C） |
+| 🏠 家の暖房負荷 | JIS の APF の家（同じ部屋の冷暖房）: 外気 17 °C で 0、0 °C で 0.82 × 1.25 × 定格冷房 2.8 = 2.87 kW の直線（UA 169 W/K。17 °C で 0 なのは人・家電・日射の分 3 K）。ISO 16358-2 の表 2 は 0 °C で 0.82 × 7 °C の暖房能力（0.82 は 0 °C で出せる能力の比）で、JIS は同じ部屋にするため暖房の能力を 冷房 × 1.25 に置く |
+| ⚖️ バランス点 | −13.5 °C（カタログの −7・−15 °C を直線で結ぶと −14.2 °C、ISO のまま 0.82 × 定格暖房 3.6 = 2.95 kW なら −12.8 °C） |
 
 - 📚 最大暖房出力は カタログの 2 °C 6.4・−7 °C 5.9・−15 °C 5.2 kW に対して 6.25・5.50・5.09 kW（−2.4 %・−6.8 %・−2.1 %）。多くの機種から作った式で、この機種を 1 割以内で当てる（−15 °C は着霜の条件が書かれていないので除霜ありとして）
 - 🏠 外気 2 °C の部屋は、要る 2.53 kW だけ出して 20 °C で落ち着く。−15 °C の部屋は最大の 5.09 kW を出しても 18.2 °C まで（入る熱 = 逃げる熱 UA·(室温 − 外気)、エンジンと閉じた式が 1e-9）
+- 📚 負荷線の読み方（JIS の 冷房 × 1.25 か、ISO の 定格暖房 か）で 0 °C の負荷は 2.87 / 2.95 kW と 3 % 違うが、バランス点は 0.7 K しか動かず、−15 °C の部屋はどちらも 20 °C に届かない（18.2 / 17.3 °C）
 - 🔁 部屋から逃げた熱は外気へ戻る: 外気の熱は冷媒に乗って部屋へ入り、壁と換気から外気へ帰る（熱も回っている）
 - ⚠️ 置いたもの: 部屋の熱の滞在時間 τ = 30 分（落ち着いた温度には効かない）。部分負荷の COP（期間の効率・APF）は計算しない
 
@@ -716,7 +717,7 @@ uv run python fluidfullspeedsimulation.py draw 🫗 🟩                     # �
 | 📉 部分負荷（E31） | 熱消費率 100・50 % の 2 点、所内率の 2 点 | 75 % の熱消費率（0.3 %）、試験の効率の比（0.8 点） | 🌀 は直線を当てただけ |
 | 🌅 🧱 起動（E31） | Agora の hot の起動時間・負荷上げ、τ 70 h、2 K/min | cold の起動時間が Agora の範囲、τ からのターニングの時間 | 暖機は無負荷の燃料、どの厚い部分も同じ τ |
 | 🫧 冷媒（E32） | R32 の物性、建築研究所の式、効率 0.70、カタログに合う凝縮 39 °C | 7 → 2 °C の COP の比 vs 同じ級のカタログ（3 % 以内）、凝縮 > 吹き出し | 凝縮温度は外気によらない |
-| 🏠 部屋（E32） | 建築研究所の最大出力の式、JIS の家の負荷線 | 最大出力 vs カタログ 3 点（1 割以内）、バランス点 vs カタログの直線（1 K 以内） | 部屋の τ（落ち着いた温度には効かない） |
+| 🏠 部屋（E32） | 建築研究所の最大出力の式、JIS の家の負荷線 | 最大出力 vs カタログ 3 点（1 割以内）、バランス点 vs カタログの直線・ISO の負荷線（どちらも 1 K 以内） | 部屋の τ（落ち着いた温度には効かない） |
 | 🧠 脳脊髄液（E33） | 作る速さ 0.35 mL/min、量 150 mL | 1 日の入れ替わり 3.36 回 vs 3〜4 回 | 吸収のしきい値・拍動なし |
 
 - 🧭 循環系はここで一区切り。🫀 🔥 ❄️ 🧠 は同じ形（どの槽も入る = 出る、量 = 流れ × 滞在時間）で、運ぶ物（血液・燃料の熱・水と熱・冷媒と熱・脳脊髄液）だけが違う
@@ -787,7 +788,7 @@ uv run python fluidfullspeedsimulation.py draw 🫗 🟩                     # �
 - [NCASI: HHV → LHV の換算（天然ガス 0.90）](https://www.ncasi.org/wp-content/uploads/2025/09/NCASI_FS-25-01_Conversion-of-HHVs-to-LHVs-for-Various-Fuels-Used-in-the-FPI_09.2025.pdf)、[GREET の発熱量表（瀝青炭 LHV 26.1・HHV 27.3 MJ/kg）](https://courses.grainger.illinois.edu/npre470/sp2018/web/Lower_and_Higher_Heating_Values_of_Gas_Liquid_and_Solid_Fuels.pdf)
 - [Endoreversible thermodynamics — Wikipedia（Curzon & Ahlborn 1975 の表: West Thurrock・CANDU・Larderello）](https://en.wikipedia.org/wiki/Endoreversible_thermodynamics)、[DTU: Curzon-Ahlborn-virkningsgraden（Avedøre 2003 は 0.52 で CA 0.41 を超える）](https://dcwww.fysik.dtu.dk/~oltr/Xdrev/evigenergi/noter/0CURZON.DOC)
 - [Panasonic CS-TX286D2 仕様（暖房能力 3.6 kW・消費電力 705 W）](https://panasonic.jp/aircon/p-db/CS-TX286D2_spec.html)、[Panasonic TX シリーズ（冷媒 R32・封入量 1.06 kg）](https://panasonic.jp/aircon/26TXseries.html)
-- [日本冷凍空調学会 次世代冷媒 2021 Part4（2.8 kW 級 M社 の暖房 標準 3.6 kW / 910 W・低温 3.5 kW / 1,320 W、吹き出し 32.4）](https://jsrae.or.jp/committee/jisedai_R/2021_ProgressR_Part4.pdf)、[建築研究所 4-2（暖房の蒸発温度・過冷却度・過熱度の式 24〜26）](https://www.kenken.go.jp/becc/documents/house/4-2_241202_v14.pdf)、[建築研究所 4-3（除霜の補正 0.77: 5 °C 未満・湿度 80 % 以上、最大暖房出力の式 (1)〜(3)）](https://www.kenken.go.jp/becc/documents/house/4-3_250401_v08.pdf)、[経産省 WG（JIS C 9612:2013 の暖房負荷 100 % = 0.82 × 冷房 × 1.25）](https://www.meti.go.jp/shingikai/enecho/shoene_shinene/sho_energy/air_denki/pdf/003_03_00.pdf)、[ISO 16358-2（暖房の負荷線: 17 °C で 0、0 °C で 100 %）](https://standards.iteh.ai/catalog/standards/iso/6011cc36-50b4-4329-b6e2-53c3bed6c61e/iso-16358-2-2013)、[Taira ほか（Daikin）2014 Purdue: R32 の圧縮機の効率 70 %（モータの損込み）](https://core.ac.uk/download/77942345.pdf)、[エアコンのカタログ（JIS C 9612 の暖房能力は外気 7 °C・室内 20 °C）](https://www.edion.com/download/2800070304637.pdf)
+- [日本冷凍空調学会 次世代冷媒 2021 Part4（2.8 kW 級 M社 の暖房 標準 3.6 kW / 910 W・低温 3.5 kW / 1,320 W、吹き出し 32.4）](https://jsrae.or.jp/committee/jisedai_R/2021_ProgressR_Part4.pdf)、[建築研究所 4-2（暖房の蒸発温度・過冷却度・過熱度の式 24〜26）](https://www.kenken.go.jp/becc/documents/house/4-2_241202_v14.pdf)、[建築研究所 4-3（除霜の補正 0.77: 5 °C 未満・湿度 80 % 以上、最大暖房出力の式 (1)〜(3)）](https://www.kenken.go.jp/becc/documents/house/4-3_250401_v08.pdf)、[経産省 WG（JIS C 9612:2013 の暖房負荷 100 % = 0.82 × 冷房 × 1.25）](https://www.meti.go.jp/shingikai/enecho/shoene_shinene/sho_energy/air_denki/pdf/003_03_00.pdf)、[ISO 16358-2（6.2 表 2: 暖房の負荷は 17 °C で 0、0 °C で 0.82 × φful(H1)）](https://standards.iteh.ai/catalog/standards/iso/6011cc36-50b4-4329-b6e2-53c3bed6c61e/iso-16358-2-2013)、[Taira ほか（Daikin）2014 Purdue: R32 の圧縮機の効率 70 %（モータの損込み）](https://core.ac.uk/download/77942345.pdf)、[エアコンのカタログ（JIS C 9612 の暖房能力は外気 7 °C・室内 20 °C）](https://www.edion.com/download/2800070304637.pdf)
 - [OpenStax College Physics 15.5: ヒートポンプは逆に回した熱機関、COP_hp = 1/Eff](https://openstax.org/books/college-physics/pages/15-5-applications-of-thermodynamics-heat-pumps-and-refrigerators)
 - [StatPearls: Physiology, Cerebrospinal Fluid（NCBI Bookshelf: 約 150 mL = くも膜下腔 125 + 脳室 25、主に脈絡叢、くも膜顆粒から静脈洞へ）](https://www.ncbi.nlm.nih.gov/books/NBK519007/)
 - [Kanani, Head Injury I – Physiology（Cambridge: 140〜150 mL、0.35 mL/min ≈ 500 mL/日）](https://www.cambridge.org/core/product/identifier/CBO9780511584251A039/type/BOOK_PART)、[Cambridge の章の抜粋（頭蓋内 1600〜1700 mL、Monro–Kellie、1 日に量の 3〜4 倍作る）](https://assets.cambridge.org/97811070/31777/excerpt/9781107031777_excerpt.pdf)
