@@ -463,6 +463,18 @@
               "alt": "D31 part-load"
             }
           ]
+        },
+        {
+          "type": "card",
+          "title": "D32 🌅 startup",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D32_startup_water.gif",
+              "alt": "D32 startup"
+            }
+          ]
         }
       ]
     },

@@ -1097,34 +1097,66 @@ class ThermalPower(unittest.TestCase):
 
 
 class SteamLoop(unittest.TestCase):
-    """💧 E31 の 2 段目: 水は回り、熱は水に乗って運ばれる（🪨 橘湾 2 号の流量 + 蒸気表、🌀 単圧の排熱回収ボイラ）。"""
+    """💧 E31 の 2 段目: 水は回り、熱は水に乗って運ばれる（🪨 橘湾 2 号の流量 + 蒸気表、🌀 3 圧・再熱の排熱回収ボイラ）。"""
 
     def _balance(self, plan):
-        inflow, heat = {}, {}
+        """入る水と熱（水に乗って・熱だけを抜いて別の水の槽へ）、⚡ 🌊 へ抜く熱。"""
+        inflow, heat, pulled = {}, {}, 0.0
         for src, w in plan["water"].items():
             for dst, share in w["outs"].items():
                 inflow[dst] = inflow.get(dst, 0.0) + w["flow"] * share
                 heat[dst] = heat.get(dst, 0.0) + w["flow"] * share * w["h"]
-        return inflow, heat
+            if "pull" in w:
+                h_in, outs = w["pull"]
+                self.assertAlmostEqual(sum(outs.values()), 1.0, places=12)
+                for dst, share in outs.items():
+                    q = w["flow"] * (h_in - w["h"]) * share
+                    if dst in plan["water"]:  # 🪨 給水ポンプの仕事は給水へ
+                        heat[dst] = heat.get(dst, 0.0) + q
+                    else:
+                        pulled += q / 1e3
+        return inflow, heat, pulled
 
     def test_every_tank_balances_water_and_mixing(self):
-        for kind, n in (("coal", None), ("lng", None), ("coal", 1), ("coal", 3), ("coal", 8)):
-            plan = ffs.steam_loop_plan(kind, n)
-            inflow, heat = self._balance(plan)
+        for kind, n, losses in (("coal", None, True), ("lng", None, True), ("coal", 1, True), ("coal", 3, True),
+                                ("coal", 8, True), ("coal", None, False), ("lng", None, False)):
+            plan = ffs.steam_loop_plan(kind, n, losses=losses)
+            inflow, heat, pulled = self._balance(plan)
             heated = {d for spec in plan["heat"].values() for d in spec["outs"]}
-            with self.subTest(kind=kind, stages=n):
+            with self.subTest(kind=kind, stages=n, losses=losses):
                 for name, w in plan["water"].items():
                     self.assertAlmostEqual(inflow[name] / w["flow"], 1.0, places=9)  # 入る水 = 出る水
                     if name not in heated and "pull" not in w:  # 混ざるだけの槽（給水加熱器・給水）は混ざった h
                         self.assertAlmostEqual(heat[name] / inflow[name], w["h"], places=6)
-                q_in = plan["q_in"]
-                self.assertAlmostEqual(q_in, sum(plan["work"].values()) - plan["work"].get("gt", 0.0) + plan["sea"], places=6)
+                self.assertAlmostEqual(pulled, plan["q_in"], places=6)  # 水に入る熱 = ⚡ + 🌊（第 1 法則）
+                self.assertAlmostEqual(plan["sea"], plan["q_in"] - plan["power"] + plan["work"].get("gt", 0.0), places=6)
 
     def test_more_stages_move_the_exhaust_towards_wet(self):
-        h_f, h_g = ffs.STEAM_LOOP["saturation"][:2]
-        xs = [(ffs.steam_loop_plan("coal", n)["h_ex"] - h_f) / (h_g - h_f) for n in range(1, 9)]
+        xs = [ffs.steam_loop_plan("coal", n)["x"] for n in range(1, 9)]
         self.assertEqual(xs, sorted(xs, reverse=True))
         self.assertGreater(xs[0], 1.0)  # まとめた 1 本だと過熱に見える
+
+    def test_losses_and_flow_move_the_exhaust_towards_ten_percent_wet(self):
+        wet = ffs.STEAM_LOOP["wet"]
+        x0, x = ffs.steam_loop_plan("coal", losses=False)["x"], ffs.steam_loop_plan("coal")["x"]
+        self.assertGreater(x0, x)  # 発電機・給水ポンプ・排気損の分だけ湿る
+        self.assertGreater(x, wet)  # それでも湿り 10 % には届かない
+        self.assertLess(ffs.steam_loop_plan("coal", scale=0.9)["x"], wet)  # 蒸気が最大の 9 割なら越える
+        for item in random_scales(314, 3, n_min=1, n_max=1):  # 🎲 量の倍率 0.5〜1（少ないほど 1 kg あたり多く働いて湿る）
+            c = 0.5 + 0.5 * item["value"]
+            with self.subTest(scale=item["label"]):
+                self.assertLess(ffs.steam_loop_plan("coal", scale=c)["x"], x)
+
+    def test_three_pressure_reheat(self):
+        plan = ffs.steam_loop_plan("lng")
+        self.assertEqual(list(plan["water"]), ffs.steam_loop_columns("lng"))
+        self.assertEqual(set(plan["water"]["condenser"]["outs"]), {"hp-hrsg", "ip-hrsg", "lp-hrsg"})
+        self.assertTrue(0.85 <= plan["eta"] <= 0.95)
+        self.assertLess(1.0 - plan["x"], 0.12)  # 再熱で湿りは翼の目安より下
+        split = ffs.STEAM_LOOP["lng"]["split"]
+        hp, ip = (plan["water"][n]["flow"] for n in ("hp-st", "ip-hrsg"))
+        self.assertAlmostEqual(hp / ip, split[0] / split[1], places=9)  # 量の割合は南港のまま
+        self.assertGreater(plan["eta"], ffs.steam_loop_plan("lng", losses=False)["eta"])  # 発電機の損の分、軸は多く働く
 
     def test_water_does_not_move_while_the_plant_heats_up(self):
         for kind in ("coal", "lng"):
@@ -1139,7 +1171,7 @@ class SteamLoop(unittest.TestCase):
 
     def test_scenes(self):
         self.assertEqual((ffs.scene_arg("💧"), ffs.scene_arg("♨️")), ("steam-loop", "hrsg-loop"))
-        for scene, hot, cold in (("steam-loop", "reheater", "condenser"), ("hrsg-loop", "hrsg", "condenser")):
+        for scene, hot, cold in (("steam-loop", "reheater", "condenser"), ("hrsg-loop", "reheater", "condenser")):
             res, cols = ffs.rig_section(scene)
             got = dict(zip(cols, pw.network_frames(res, cols, frames=None, rows=16)["frames"][-1]["counts"]))
             with self.subTest(scene=scene):
@@ -1171,6 +1203,47 @@ class PartLoad(unittest.TestCase):
         self.assertEqual(res["conservation_error_q"], 0)
         net = ffs.thermal_network("coal", willans=False)
         self.assertEqual(len([ln for ln in net.links if ln["kind"] == "pump"]), 2)  # 全負荷・線形は今までどおり 2 本
+        fixed = [ln for ln in ffs.thermal_network("coal", willans=True).links if ln["src"] == "grid"]
+        self.assertEqual([ln["dst"] for ln in fixed], ["aux"])  # 所内電力の固定の分は 🔌 から 🏠 へ一定の速さ
+        self.assertEqual([ln for ln in ffs.thermal_network("lng", willans=True).links if ln["src"] == "grid"], [])
+
+    def test_aux_share_rises_at_low_load(self):
+        (x1, s1), (x2, s2) = ffs.THERMAL["plants"]["coal"]["part_load"]["aux"]
+        self.assertAlmostEqual(ffs.aux_share("coal", x2) / ffs.aux_share("coal", x1), s2 / s1, places=12)  # 出典の 2 点の比
+        self.assertAlmostEqual(ffs.aux_share("coal", 1.0), ffs.THERMAL["plants"]["coal"]["aux"], places=12)
+        self.assertTrue(0.0 < ffs.aux_fixed("coal") < 1.0)
+        xs = sorted(item["value"] for item in random_scales(315, 6, n_min=1, n_max=1))
+        shares = [ffs.aux_share("coal", x) for x in xs]
+        self.assertEqual(shares, sorted(shares, reverse=True))  # 出力を下げるほど所内率は上がる
+        self.assertEqual({ffs.aux_share("lng", x) for x in xs}, {ffs.THERMAL["plants"]["lng"]["aux"]})  # データが無いので比例
+
+
+class Startup(unittest.TestCase):
+    """🌅 起動: 暖機（無負荷の燃料、電気は出さない）→ 最低負荷で並列 → 1 分ごとに負荷上げ → 全負荷。"""
+
+    def test_schedule(self):
+        for kind, p in ffs.THERMAL["plants"].items():
+            for item in random_scales(316, 3, n_min=1, n_max=1):
+                hot, cold = (ffs.thermal_startup(kind, start, at=item["value"]) for start in ("hot", "cold"))
+                with self.subTest(kind=kind, at=item["label"]):
+                    for load in (hot, cold):
+                        self.assertEqual(load[0], (0.0, 0.0))
+                        self.assertEqual(load[1][1], p["min_load"])
+                        self.assertEqual(load[-1][1], 1.0)
+                        self.assertTrue(all(t % 60.0 == 0.0 for t, _x in load))  # 分の刻み
+                        steps = [b - a for (_t, a), (_u, b) in zip(load[1:], load[2:])]
+                        self.assertLessEqual(max(steps), p["startup"]["ramp"][1] / 100.0 + 1e-12)
+                    self.assertGreater(cold[1][0], hot[1][0])  # 止まっていた時間が長いほど暖機が長い
+
+    def test_scene(self):
+        self.assertEqual(ffs.scene_arg("🌅"), "startup")
+        res, cols = ffs.rig_section("startup")
+        self.assertEqual(cols, ffs.thermal_columns("coal"))
+        self.assertEqual(res["volumes_q"]["fuel"], 0)
+        self.assertEqual(res["conservation_error_q"], 0)
+        sync = ffs.thermal_startup("coal")[1][0]
+        before = [row for row in res["series"] if row["t"] < sync]
+        self.assertTrue(before and all(row["h:grid"] == 0.0 for row in before))  # 並列までは送電しない
 
 
 class HeatPump(unittest.TestCase):
