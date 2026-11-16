@@ -1437,6 +1437,26 @@ class HeatPump(unittest.TestCase):
                     got = res["parts_q"][name]
                     self.assertAlmostEqual(got["heat"] / got["water"] * 1e3 / x["h"], 1.0, places=6)
 
+    def test_max_output_and_balance_point(self):
+        p = ffs.HEAT_PUMP
+        self.assertAlmostEqual(ffs.heat_pump_max(p["t_out"]) / p["max"]["heat_max"], 1.0, delta=0.01)  # 7 °C は最大能力
+        temps = sorted(-20.0 + 20.0 * item["value"] for item in random_scales(319, 6, n_min=1, n_max=1))  # 🎲 −20〜0 °C
+        caps = [ffs.heat_pump_max(t) for t in temps]
+        self.assertEqual(caps, sorted(caps))  # 冷たいほど出せない
+        self.assertAlmostEqual(ffs.house_load(p["house"]["t0"]), 0.0, places=12)
+        t_b = ffs.house_balance()
+        self.assertAlmostEqual(ffs.heat_pump_max(t_b), ffs.house_load(t_b), places=6)
+        self.assertGreater(ffs.heat_pump_max(t_b + 1.0), ffs.house_load(t_b + 1.0))
+        self.assertLess(ffs.heat_pump_max(t_b - 1.0), ffs.house_load(t_b - 1.0))
+
+    def test_house_scene(self):
+        self.assertEqual(ffs.scene_arg("🏠"), "house")
+        res, cols = ffs.rig_section("house")
+        self.assertEqual(cols, ["room+2", "room-15"])
+        self.assertEqual(res["conservation_error_q"], 0)
+        last = res["series"][-1]
+        self.assertGreater(last["h:room+2"] / res["caps"]["room+2"], last["h:room-15"] / res["caps"]["room-15"])
+
     def test_refrigerant_scene(self):
         self.assertEqual(ffs.scene_arg("🫧"), "r32-loop")
         res, cols = ffs.rig_section("r32-loop")

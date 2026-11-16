@@ -499,6 +499,18 @@
               "alt": "D34 r32-loop"
             }
           ]
+        },
+        {
+          "type": "card",
+          "title": "D35 🏠 house",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D35_house_water.gif",
+              "alt": "D35 house"
+            }
+          ]
         }
       ]
     },

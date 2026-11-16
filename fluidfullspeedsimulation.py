@@ -4090,11 +4090,65 @@ def _steam_loop_checks(seed: int) -> tuple[list[dict], dict]:
 # 39 °C（送風機の分は入れない）。outlet は 2.8 kW 級の暖房定格で測った吹き出しの空気 °C（JSRAE）。low は外気 2 °C（JIS の
 # 暖房低温）の h、defrost は 5 °C 未満・湿度 8 割以上で掛ける除霜の補正（建築研究所）、jsrae は同じ 2.8 kW 級（M社）の
 # カタログの暖房 (kW, W): 標準（外気 7 °C）・低温（2 °C）。
+# max は 🏠 外気で落ちる最大出力: 建築研究所の式（最大出力比 = a₂(θ−7)² + a₁(θ−7) + a₀、a = b·最大能力比 + c、
+# b・c = 傾き × 定格冷房能力 [kW] + 切片）と、この機種の定格冷房 2.8 kW・最大暖房 8.8 kW、カタログの低温の最大能力 (°C, kW)。
+# frost °C 未満は着霜として除霜の補正を掛ける。house は JIS の APF の家（同じ部屋の冷暖房）: 暖房負荷は外気 t0 °C で 0、
+# t100 °C で 0.82 × 1.25 × 定格冷房能力（ISO 16358-2 の負荷線、経産省 WG）。tau は部屋の熱の滞在時間 [s]（仮置き、
+# 行き渡った後の温度には効かない）、outs は並べる 2 部屋の外気 °C。
 HEAT_PUMP = {"heat": 3.6, "power": 0.705, "t_room": 20.0, "t_out": 7.0, "dt": 1.0, "scene": (256.0, 2),
              "stages": (("evaporator", 16.0), ("compressor", 8.0), ("condenser", 32.0)),
              "r32": {"h": {"evaporator": 519.12, "compressor": 582.81, "condenser": 257.36}, "t_cnd": 39.0, "charge": 1.06,
                      "outlet": 32.4, "low": {"t_out": 2.0, "evaporator": 517.94, "compressor": 592.30},
-                     "defrost": 0.77, "jsrae": ((3.6, 910.0), (3.5, 1320.0)), "scene": (512.0, 4)}}
+                     "defrost": 0.77, "jsrae": ((3.6, 910.0), (3.5, 1320.0)), "scene": (512.0, 4)},
+             "max": {"cooling": 2.8, "heat_max": 8.8, "frost": 5.0, "catalog": ((2.0, 6.4), (-7.0, 5.9), (-15.0, 5.2)),
+                     "bri": ((0.000181, 0.002322, 0.003556), (-0.000184, 0.013904, 0.993431),
+                             (-0.000173, -0.003980, -0.002870), (0.000367, 0.003983, 0.006376))},
+             "house": {"t0": 17.0, "t100": 0.0, "load": 0.82 * 1.25, "tau": 1800.0, "outs": (2.0, -15.0),
+                       "scene": (4.0 * 3600.0, 30)}}
+
+
+def heat_pump_max(t_out: float) -> float:
+    """🏠 外気 t_out °C での最大暖房出力 [kW]: 建築研究所の式（定格暖房 × 最大出力比、外気の 2 次式）× 除霜の補正
+    （frost °C 未満）。外気が冷たいほど蒸発温度が下がり、吸い込む冷媒が薄くなって 1 回転で運べる熱が減る。"""
+    p = HEAT_PUMP
+    m = p["max"]
+    b1, b0, c1, c0 = m["bri"]
+    ratio = m["heat_max"] / p["heat"]
+    a2, a1, a0 = ((b1[i] * m["cooling"] + b0[i]) * ratio + c1[i] * m["cooling"] + c0[i] for i in range(3))
+    x = t_out - p["t_out"]
+    return (a2 * x * x + a1 * x + a0) * p["heat"] * (p["r32"]["defrost"] if t_out < m["frost"] else 1.0)
+
+
+def house_load(t_out: float) -> float:
+    """🏠 JIS の家の暖房負荷 [kW]: 外気 t0 で 0、t100 で 0.82 × 1.25 × 定格冷房能力 の直線（室温 20 °C を保つのに要る熱。
+    t0 が 20 °C より低いのは、人・家電・日射の熱で 3 K ぶんまかなえるから）。"""
+    h, cooling = HEAT_PUMP["house"], HEAT_PUMP["max"]["cooling"]
+    return h["load"] * cooling * (h["t0"] - t_out) / (h["t0"] - h["t100"])
+
+
+def house_balance() -> float:
+    """🏠 バランス点 °C: 最大暖房出力 = 家の暖房負荷 になる外気。これより冷たいと 1 台では 20 °C を保てない。"""
+    return bisection(lambda t: heat_pump_max(t) < house_load(t), -40.0, HEAT_PUMP["max"]["frost"])
+
+
+def house_network(t_outs=None, *, t_end: float | None = None, dt: float | None = None) -> Network:
+    """🏠 部屋ごと（room+2 など、外気 °C）の熱: ヒートポンプは要る分（家の暖房負荷）を出し、最大出力が足りなければ最大のまま。
+    人・家電・日射の分 UA·(室温 − t0) も入る。部屋の熱は壁と換気から外気へ UA·(室温 − 外気) で逃げる（τ の弁）。
+    槽の面積 = 熱容量 UA·τ [kJ/K] なので、高さ = 室温 − 外気 [K]。外気の温度の部屋から始める。"""
+    p = HEAT_PUMP
+    h = p["house"]
+    net = Network(dt=p["dt"] if dt is None else dt)
+    ua = house_load(h["t100"]) / (h["t0"] - h["t100"])  # kW/K
+    t_end = h["scene"][0] if t_end is None else t_end
+    net.tank("heat", 1.0).tank("outdoor", 1.0)
+    for t in h["outs"] if t_outs is None else t_outs:
+        name = f"room{t:+g}"
+        net.tank(name, ua * h["tau"])
+        net.pump("heat", name, rate=min(house_load(t), heat_pump_max(t)) + ua * (p["t_room"] - h["t0"]))
+        net.valve(name, "outdoor", tau=h["tau"])
+    steps = int(round(t_end / net.dt))
+    net.nodes["heat"]["v"] = sum(ln["amount"] for ln in net.links if ln["src"] == "heat") * steps
+    return net
 
 
 def heat_pump_columns() -> list[str]:
@@ -4140,7 +4194,8 @@ def carnot_cop(t_cold: float, t_hot: float) -> float:
 def e32_heat_pump(seed: int = 32) -> dict:
     """❄️ ヒートポンプは 🔥 の裏返し: 電気 W で外気から Q_c を汲み、部屋に W + Q_c を出す（COP = (W + Q_c)/W > 1）。
     上限は Carnot の COP = 1/η_Carnot。🔥 の発電所の電気で回すと、燃料 1 から部屋に η·COP の熱が届く。
-    🫧 2 段目は冷媒（R32）の輪（冷媒は回り、熱は冷媒に乗る）。外気が冷たいと蒸発温度が下がり、COP も下がる。"""
+    🫧 2 段目は冷媒（R32）の輪（冷媒は回り、熱は冷媒に乗る）。外気が冷たいと蒸発温度が下がり、COP も下がる。
+    🏠 3 段目は外気で落ちる最大出力と部屋から逃げる熱: 交わる外気（バランス点）より冷たいと 1 台では 20 °C を保てない。"""
     p, checks = HEAT_PUMP, []
     t_end = 32.0 * max(t for _n, t in p["stages"])
     st = heat_pump_steady(dt=p["dt"])
@@ -4212,8 +4267,39 @@ def e32_heat_pump(seed: int = 32) -> dict:
                    f"除霜の補正 {q['defrost']:g} を掛けて {ratio:.3f} 倍。2.8 kW 級（M社）のカタログ 3.6 kW / 910 W → "
                    f"3.5 kW / 1,320 W の {want:.3f} 倍と 3 % 以内"),
     ]
+    # 🏠 3 段目: 外気で落ちる最大出力 × 部屋から逃げる熱 → バランス点。逃げた熱は外気へ戻る（熱も外気から来て外気へ帰る）
+    mx, h = p["max"], p["house"]
+    for t, cap in mx["catalog"]:
+        got = heat_pump_max(t)
+        checks.append(check(f"max:{t:+g}c", "📚", abs(got / cap - 1.0) <= 0.10, value=got, expected=cap, tol=0.10,
+                            note=f"外気 {t:g} °C の最大暖房出力: 建築研究所の式 × 除霜 {p['r32']['defrost']:g} = {got:.2f} kW、"
+                                 f"カタログ {cap:g} kW（{got / cap - 1:+.1%}）。多くの機種から作った式なので 1 割以内を目安に"
+                                 + ("。−15 °C は着霜の条件が書かれていないので除霜ありとして" if t < -10 else "")))
+    t_b = house_balance()
+    (t1, c1), (t2, c2) = mx["catalog"][1:]
+    ua = house_load(h["t100"]) / (h["t0"] - h["t100"])
+    t_cat = bisection(lambda t: c1 + (c2 - c1) * (t - t1) / (t2 - t1) < house_load(t), -40.0, t1)  # カタログの 2 点を直線で
+    checks.append(check("house:balance", "🏠", abs(t_b - t_cat) <= 1.0, value=t_b, expected=t_cat, tol=1.0,
+                        note=f"JIS の家（0 °C で {house_load(0.0):.2f} kW、UA {ua * 1e3:.0f} W/K）を 1 台で 20 °C に保てるのは外気 "
+                             f"{t_b:.1f} °C まで（建築研究所の式）。カタログの −7・−15 °C を直線で結ぶと {t_cat:.1f} °C で 1 K 以内"))
+    t_room = 64.0 * h["tau"]
+    net = house_network(t_end=t_room)
+    res = net.run(t_room)
+    for t in h["outs"]:
+        q_in = min(house_load(t), heat_pump_max(t)) + ua * (p["t_room"] - h["t0"])
+        got = t + from_q(res["volumes_q"][f"room{t:+g}"]) / (ua * h["tau"])
+        want = t + q_in / ua  # 一定の入り + 量に比例する出口は、エンジンでも連続の式どおり
+        short = t < t_b
+        checks.append(close(f"house:room{t:+g}", "🥶" if short else "🏠", got, want, 1e-9,
+                            note=f"外気 {t:g} °C の部屋は {t + q_in / ua:.2f} °C で落ち着く（入る熱 {q_in:.2f} kW = 逃げる熱 UA·(室温 − 外気)）"
+                                 + ("。バランス点より冷たいので最大出力でも 20 °C に届かない" if short else "。要る分だけ出して 20 °C")))
+    checks.append(conserved("house:conserve", res))
+    summary_house = {"ua_kw_k": ua, "balance_c": t_b, "balance_catalog_c": t_cat,
+                     "room_c": {f"{t:g}": t + (min(house_load(t), heat_pump_max(t)) + ua * (p["t_room"] - h["t0"])) / ua
+                                for t in h["outs"]},
+                     "max_kw": {f"{t:g}": heat_pump_max(t) for t, _c in mx["catalog"]}}
     summary = {"cop": st["cop"], "carnot_cop": limit, "share_of_carnot": st["cop"] / limit, "lag_s": st["lag"],
-               "outdoor_share": 1.0 - 1.0 / st["cop"], "chain": chain,
+               "outdoor_share": 1.0 - 1.0 / st["cop"], "chain": chain, "house": summary_house,
                "r32": {"flow_g_s": m, "loop_s": q["charge"] * 1e3 / m, "cop": loop["cop"], "cop_2c": cop_low,
                        "cop_2c_defrost": cop_low * q["defrost"], "outdoor_kw": loop["fuel"]["outdoor"][1],
                        "compressor_kw": loop["work"]["compressor"], "taus": {k: w["tau"] for k, w in loop["water"].items()}}}
@@ -4359,7 +4445,7 @@ EXPERIMENTS = {
             e30_circulation),
     "E31": ("thermal-power", "🔥", "火力発電（燃料 → 熱が溜まる段 → 電気・煙突・海: 効率は割合の積、遅れは τ の和、Carnot・Curzon–Ahlborn と比べる。💧 水・蒸気の循環、📉 部分負荷、🌅 起動）",
             e31_thermal_power),
-    "E32": ("heat-pump", "❄️", "ヒートポンプ（🔥 の裏返し: 電気 + 外気の熱 → 部屋、COP = 1/η_Carnot が上限、発電所の電気で回すと燃料 1 から部屋に η·COP。🫧 冷媒の輪、外気で変わる COP）",
+    "E32": ("heat-pump", "❄️", "ヒートポンプ（🔥 の裏返し: 電気 + 外気の熱 → 部屋、COP = 1/η_Carnot が上限、発電所の電気で回すと燃料 1 から部屋に η·COP。🫧 冷媒の輪、外気で変わる COP、🏠 バランス点）",
             e32_heat_pump),
     "E33": ("csf", "🧠", "脳脊髄液（血液 → 脳室 → くも膜下腔 → 血液: 頭の中は入る = 出る、1 日 3〜4 回入れ替わる、吸収が止まると作る速さで溜まる）",
             e33_csf),
@@ -4421,7 +4507,7 @@ SCENE_ICONS = {"🏛": "moniac-rig", "🥢": "somen-flume", "🎋": "flume", "�
                "🍷": "pythagorean-cup", "🫗": "mariotte", "🏺": "water-clock", "🚧": "inertia-limits",
                "⚗": "distillation", "👼": "angels-share", "💴": "money-flow", "🪙": "gold-flow", "⛏": "rare-metal",
                "🚿": "outlet-count", "🫀": "circulation",
-               "🪨": "coal-power", "🌀": "combined-cycle", "❄": "heat-pump", "🧠": "csf", "💧": "steam-loop", "♨": "hrsg-loop", "📉": "part-load", "🌅": "startup", "🌡": "metal", "🫧": "r32-loop"}
+               "🪨": "coal-power", "🌀": "combined-cycle", "❄": "heat-pump", "🧠": "csf", "💧": "steam-loop", "♨": "hrsg-loop", "📉": "part-load", "🌅": "startup", "🌡": "metal", "🫧": "r32-loop", "🏠": "house"}
 
 
 def fluid_arg(text: str) -> str:
@@ -4430,7 +4516,7 @@ def fluid_arg(text: str) -> str:
 
 
 def scene_arg(text: str) -> str:
-    """draw の場面: 名前でも 🏛️ 🥢 🎋 🫙 🌊 🕳️ 🧊 🪵 🍜 🧱 🍽️ 🌧️ 🎍 🍷 🫗 🏺 🚧 ⚗️ 👼 💴 🪙 ⛏️ 🚿 🫀 🪨 🌀 ❄️ 🧠 💧 ♨️ 📉 🌅 🌡️ 🫧 でもよい。"""
+    """draw の場面: 名前でも 🏛️ 🥢 🎋 🫙 🌊 🕳️ 🧊 🪵 🍜 🧱 🍽️ 🌧️ 🎍 🍷 🫗 🏺 🚧 ⚗️ 👼 💴 🪙 ⛏️ 🚿 🫀 🪨 🌀 ❄️ 🧠 💧 ♨️ 📉 🌅 🌡️ 🫧 🏠 でもよい。"""
     return SCENE_ICONS.get(_plain(text), text)
 
 
@@ -4624,6 +4710,14 @@ def rig_section(scene: str, fluid: str = "water", temp_c: float | None = None, m
         cols = ["ventricles-1", "subarachnoid-1", "ventricles-2", "subarachnoid-2"]
         res["caps"] = dict.fromkeys(cols[1::2], max(from_q(res["volumes_q"][c]) for c in cols[1::2]))
         return res, cols
+    if scene == "house":  # 🏠 外気 2 °C ｜ −15 °C の部屋（高さ = 室温 − 外気、縦いっぱい = 20 °C、⏱️ は h）
+        t_end, every = HEAT_PUMP["house"]["scene"]
+        res = house_network().run(t_end, sample_every=every)
+        for row in res["series"]:
+            row["t"] = round(row["t"] / 3600.0, 6)
+        outs = HEAT_PUMP["house"]["outs"]
+        res["caps"] = {f"room{t:+g}": HEAT_PUMP["t_room"] - t for t in outs}
+        return res, [f"room{t:+g}" for t in outs]
     if scene == "metal":  # 🌡️ 🪨 止まって 8 h ｜ 48 h で温め直す厚い金属（高さ = 外気より何 K 熱いか、⏱️ は h）
         t_end, every = THERMAL["metal"]["scene"]
         offs = tuple(THERMAL["metal"]["off"].values())
@@ -4662,7 +4756,7 @@ HUB_SCENES = {"money-flow": ("money", 64.0, 4), "gold-flow": ("gold", 64.0, 4), 
 THERMAL_SCENES = {"coal-power": "coal", "combined-cycle": "lng"}
 RIG_SCENES = ("moniac-rig", "somen-flume", "noodle-length", "noodle-clog", "chopsticks", "cold-water",
               "bamboo-wear", "rain-runoff", "shishi-odoshi", "pythagorean-cup", "mariotte", "water-clock",
-              "inertia-limits", "distillation", "angels-share", *HUB_SCENES, "outlet-count", "circulation", *THERMAL_SCENES, "heat-pump", "csf", "steam-loop", "hrsg-loop", "part-load", "startup", "metal", "r32-loop")
+              "inertia-limits", "distillation", "angels-share", *HUB_SCENES, "outlet-count", "circulation", *THERMAL_SCENES, "heat-pump", "csf", "steam-loop", "hrsg-loop", "part-load", "startup", "metal", "r32-loop", "house")
 
 
 def _visc(args) -> dict:
@@ -4736,7 +4830,7 @@ DEMOS = (("moniac-rig", "water", None), ("moniac-drain", "water", None), ("flume
          ("heat-pump", "water", "🟧"), ("csf", "water", None),
          ("steam-loop", "water", "🟧"), ("hrsg-loop", "water", "🟧"),
          ("part-load", "water", "🟧"), ("startup", "water", "🟧"),
-         ("metal", "water", "🟥"), ("r32-loop", "water", "🟧"))
+         ("metal", "water", "🟥"), ("r32-loop", "water", "🟧"), ("house", "water", "🟥"))
 DEMOS_SCHEMA = "fluidfullspeedsimulation-demos/1"
 _NEEDS_VS16 = set("🏛🕳🍽🌧⚗⛏❄♨🌡")  # 絵文字で出すには U+FE0F が要るもの
 

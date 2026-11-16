@@ -1083,6 +1083,28 @@
         512.0
       ],
       "conserved": true
+    },
+    {
+      "id": "D35",
+      "scene": "house",
+      "icon": "🏠",
+      "fluid": "water",
+      "fill": "🟥",
+      "file": "D35_house_water.gif",
+      "bytes": 5054,
+      "sha256": "de930284b8190c88bf493cdb9fb173f5d93024e20f715564b129534620817a91",
+      "frames": 40,
+      "canvas": "88x160",
+      "kind": "section",
+      "columns": [
+        "room+2",
+        "room-15"
+      ],
+      "t": [
+        0.008333,
+        4.0
+      ],
+      "conserved": true
     }
   ]
 }
