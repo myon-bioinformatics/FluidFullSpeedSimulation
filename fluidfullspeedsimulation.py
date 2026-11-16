@@ -3256,8 +3256,8 @@ def e30_circulation(seed: int = 30) -> dict:
                              "artery": exact["artery"] / exact["output"], "heart": exact["heart"] / exact["output"]},
                "lap": lap_got, "loss_before_output_falls": reserve / p["blood"],
                "max_output_l_min": 60.0 * p["blood"] / (exact["rest_time"] + dt)}
-    return {"params": {"circulation": p, "seed": seed}, "summary": summary, "runs": {"circulation": res["series"]},
-            "checks": checks}
+    return {"params": {"circulation": p, "seed": seed}, "summary": summary, "checks": checks,
+            "runs": {"circulation": res["series"], "blood": flow_rows(*blood_links(), "L/min")}}
 
 
 # --- E31 火力発電（🔥 燃料 → 熱 → 電気。エネルギーだけを流す） ------------------------------
@@ -3534,8 +3534,11 @@ def e31_thermal_power(seed: int = 31) -> dict:
     loop_checks, summary["steam_loop"] = _steam_loop_checks(seed)
     checks += loop_checks
     return {"params": {"thermal": t, "steam_loop": STEAM_LOOP, "seed": seed}, "summary": summary, "checks": checks,
-            "runs": {kind: thermal_network(kind).run(t["scene"][0], sample_every=t["scene"][1])["series"]
-                     for kind in t["plants"]}}
+            "runs": {**{kind: thermal_network(kind).run(t["scene"][0], sample_every=t["scene"][1])["series"]
+                        for kind in t["plants"]},
+                     **{f"energy:{kind}": flow_rows(*energy_links(kind), "%") for kind in t["plants"]},
+                     "tq": tq_rows(), "startup": startup_rows(), "sensitivity": sensitivity_rows(),
+                     "rate-window": rate_window_rows()}}
 
 
 def _part_load_checks(seed: int, t_end: float) -> tuple[list[dict], dict]:
@@ -3744,6 +3747,7 @@ def _startup_checks(seed: int) -> tuple[list[dict], dict]:
 # 🌀 西名古屋 7-1 号の 1 段目の割合（排熱のうち蒸気へ・蒸気タービンの出力）に、H 級の 3 圧・再熱の蒸気（GE GER-3936A の表 2）を当てた
 #    排熱回収ボイラ: 高圧 165 bar(g)・565 °C、再熱 23.8 bar(g)・565 °C、低圧 2.2 bar(g)・277 °C、排気 0.04064 bar(a)。h・s は蒸気表、
 #    hp_s・ip_s は高圧・中圧の等エントロピー膨張の行き先（再熱・低圧の圧力。再熱器の圧損は入れない）。saturation は排気の圧力の飽和。
+#    t_steam は高圧・再熱の出口 °C（📒 T–Q の記録の熱い端）。
 #    drums は高圧・中圧（= 再熱の圧力）・低圧のドラムの飽和 (°C, h_f, h_g)、pinch は蒸発器の出口のガスと飽和の温度差
 #    (下限, 使う値, 上限) [K]（ふつう 5〜15 K）。中圧の出口 = 低圧の入口（GE は低圧の入口を中圧の排気に揃える）、中圧の過熱器を出た蒸気 = 高圧の排気
 #    （再熱器の前で混ぜても冷えない）と置く。plant は西名古屋 7 号系列（環境アセスの審査書、1 系列・大気 5 °C）: 煙突の出口 °C、
@@ -3761,7 +3765,7 @@ STEAM_LOOP = {
              "furnace": 4.0},
     "stages": 6, "saturation": (137.73, 2560.76, 0.47614, 8.39389), "wet": 0.90,
     "losses": (1088803.0, 1077400.0, 42894.0, 8.377 * 2.326),
-    "lng": {"h": {"hp": 3474.73, "hp_s": 2932.05, "reheat": 3608.14, "ip_s": 2979.81, "lp": 3022.14},
+    "lng": {"h": {"hp": 3474.73, "hp_s": 2932.05, "reheat": 3608.14, "ip_s": 2979.81, "lp": 3022.14}, "t_steam": 565.0,
             "s": {"hp": 6.50996, "lp": 7.58779}, "saturation": (122.54, 2554.16, 0.42619, 8.46769),
             "drums": ((350.35, 1673.79, 2561.23), (223.55, 960.05, 2801.85), (135.88, 571.51, 2728.04)),
             "pinch": (5.0, 10.0, 15.0),
@@ -4401,7 +4405,8 @@ def e32_heat_pump(seed: int = 32) -> dict:
                        "cop_2c_defrost": cop_low * q["defrost"], "outdoor_kw": loop["fuel"]["outdoor"][1],
                        "compressor_kw": loop["work"]["compressor"], "taus": {k: w["tau"] for k, w in loop["water"].items()}}}
     return {"params": {"heat_pump": p, "seed": seed}, "summary": summary, "checks": checks,
-            "runs": {"heat-pump": heat_pump_network().run(p["scene"][0], sample_every=p["scene"][1])["series"]}}
+            "runs": {"heat-pump": heat_pump_network().run(p["scene"][0], sample_every=p["scene"][1])["series"],
+                     "balance": balance_rows()}}
 
 
 # --- E33 脳脊髄液（🧠 血液 → 脳室 → くも膜下腔 → 血液） ---------------------------------------
@@ -4696,6 +4701,154 @@ def write_jsonl(path: str, results: list[dict]) -> None:
                     fh.write("\n")
 
 
+# --- 📒 記録（静止の図の元になる行）----------------------------------------------------------------
+# FFSS が描くのは時間で動く GIF（断面図・🕰️ 時空図・ドット絵）まで。サンキー図・T–Q 線図・トルネード図のような静止の図は
+# DRAgoWing が描く: ここでは実験の runs に 1 行 = 1 つの値として入れ、`verify --jsonl` の記録として渡すだけ。
+
+def energy_links(kind: str = "coal") -> tuple[tuple, tuple]:
+    """🔀 燃料 100 の行き先（1 段目の割合のまま。エンジンは thermal_network でこれを ±0 で運ぶ）。
+    (ノード (名前, 組), リンク (元, 先, 量))。組は heat・water・power・loss。"""
+    p = thermal_plan(kind)
+    st = {name: outs for name, _t, outs in p["stages"]}
+    gross = 100.0 * p["efficiency"]
+    aux = gross * p["aux"]
+    if kind == "coal":
+        steam = 100.0 * st["boiler"]["steam"]
+        nodes = (("燃料", "heat"), ("ボイラ", "heat"), ("煙突", "loss"), ("蒸気", "water"), ("発電端", "power"),
+                 ("海（復水器）", "loss"), ("送電端", "power"), ("所内", "loss"))
+        return nodes, ((0, 1, 100.0), (1, 2, 100.0 - steam), (1, 3, steam), (3, 4, gross), (3, 5, steam - gross),
+                       (4, 6, gross - aux), (4, 7, aux))
+    exhaust = 100.0 * st["gt"]["hrsg"]
+    steam = exhaust * st["hrsg"]["steam"]
+    st_power = steam * st["steam"]["power"]
+    nodes = (("燃料", "heat"), ("ガスタービン", "heat"), ("排熱回収ボイラ", "heat"), ("煙突", "loss"), ("蒸気", "water"),
+             ("海（復水器）", "loss"), ("発電端", "power"), ("送電端", "power"), ("所内", "loss"))
+    return nodes, ((0, 1, 100.0), (1, 6, 100.0 - exhaust), (1, 2, exhaust), (2, 3, exhaust - steam), (2, 4, steam),
+                   (4, 6, st_power), (4, 5, steam - st_power), (6, 7, gross - aux), (6, 8, aux))
+
+
+def blood_links() -> tuple[tuple, tuple]:
+    """🔀 🫀 心拍出量 [L/min] の行き先（教科書の器官の割合）→ 静脈 → 肺。形は energy_links と同じ。"""
+    p = CIRCULATION
+    names = {"brain": "脳", "coronary": "冠動脈", "kidney": "腎臓", "gut-liver": "消化管・肝臓", "muscle": "筋肉",
+             "skin": "皮膚", "other": "その他"}
+    out, organs = p["output"] * 60.0, list(p["flows"])
+    nodes = (("心臓（左）", "heart"), *((names[o], "organ") for o in organs), ("静脈", "vein"), ("肺", "lung"))
+    vein = len(organs) + 1
+    return nodes, (*((0, i + 1, out * p["flows"][o]) for i, o in enumerate(organs)),
+                   *((i + 1, vein, out * p["flows"][o]) for i, o in enumerate(organs)), (vein, vein + 1, out))
+
+
+def flow_rows(nodes, links, unit: str) -> list[dict]:
+    """リンク 1 本 = 1 行（元・先の名前と組、量、単位）。"""
+    return [{"source": nodes[a][0], "target": nodes[b][0], "source_group": nodes[a][1], "target_group": nodes[b][1],
+             "value": v, "unit": unit} for a, b, v in links]
+
+
+def tq_lines(pinch: float | None = None) -> dict:
+    """🌡️ 🌀 排熱回収ボイラの T–Q（煙突の側から渡した熱 [MW] と温度 [°C]）。ガスは一直線（比熱一定）、水・蒸気は 3 圧の
+    合成: 蒸発は平らで量は h_g − h_f から正確、節炭・過熱はつなぐ直線（比熱一定の近似）。復水の温度は h_f ÷ 4.18。"""
+    q = STEAM_LOOP["lng"]
+    pl = steam_loop_plan("lng", pinch=pinch)
+    w = pl["water"]
+    m_hp, m_ip, m_lp = (w[n]["flow"] for n in ("hp-hrsg", "ip-hrsg", "lp-hrsg"))
+    (t_h, f_h, g_h), (t_i, f_i, g_i), (t_l, f_l, g_l) = q["drums"]
+    h_c, stack, q_all = q["saturation"][0], q["plant"]["stack"], pl["q_in"]
+    c_g = q_all / (pl["t_exh"] - stack)
+    q_lp = (m_hp + m_ip + m_lp) * (f_l - h_c) / 1e3
+    q_ip, q_hp = c_g * (t_i + pl["pinch"] - stack), c_g * (t_h + pl["pinch"] - stack)
+    water = [(0.0, h_c / 4.18), (q_lp, t_l), (q_lp + m_lp * (g_l - f_l) / 1e3, t_l), (q_ip, t_i),
+             (q_ip + m_ip * (g_i - f_i) / 1e3, t_i), (q_hp, t_h), (q_hp + m_hp * (g_h - f_h) / 1e3, t_h),
+             (q_all, q["t_steam"])]
+    pinches = [(x, t, stack + x / c_g) for x, t in ((q_lp, t_l), (q_ip, t_i), (q_hp, t_h))]
+    return {"gas": [(0.0, stack), (q_all, pl["t_exh"])], "water": water, "pinches": pinches,
+            "lp_join": q_lp + m_lp * (g_l - f_l) / 1e3 + (m_hp + m_ip) * (f_i - f_l) / 1e3}
+
+
+def tq_rows(pinch: float | None = None) -> list[dict]:
+    """T–Q の点 1 つ = 1 行（stream は gas・water・pinch。pinch の行はガスと水の温度と差 ΔT、どの圧か）。"""
+    tq = tq_lines(pinch)
+    rows = [{"stream": k, "q_mw": x, "t_c": t} for k in ("gas", "water") for x, t in tq[k]]
+    return rows + [{"stream": "pinch", "drum": d, "q_mw": x, "t_c": t_w, "t_gas_c": t_g, "dt_k": t_g - t_w}
+                   for (x, t_w, t_g), d in zip(tq["pinches"], ("lp", "ip", "hp"))]
+
+
+def startup_rows(at: float = 0.5) -> list[dict]:
+    """📅 🌅 起動の手順: 金属によらない手順 → 🧱 暖機 → 最低負荷から全負荷へ [分]（hot = 8 h・cold = 48 h 止まった後）。
+    agora は出典の起動時間（並列まで）の範囲。"""
+    rows = []
+    for kind, p in THERMAL["plants"].items():
+        for start in ("hot", "cold"):
+            plan = thermal_startup(kind, start, at=at)
+            warm = metal_warmup(kind, THERMAL["metal"]["off"][start]) / 60.0
+            sync, full = plan[1][0] / 60.0, plan[-1][0] / 60.0
+            lo, hi = p["startup"][start]
+            for phase, a, b in (("steps", 0.0, sync - warm), ("warmup", sync - warm, sync), ("ramp", sync, full)):
+                rows.append({"plant": kind, "start": start, "phase": phase, "from_min": a, "to_min": b,
+                             "agora_lo_min": lo, "agora_hi_min": hi, "at": at})
+    return rows
+
+
+def sensitivity_rows(samples: int = 33) -> list[dict]:
+    """🎚️ 振った仮定ごとに、🔮 のずれ ÷ 許容（1 以下なら 🔮 のまま）を幅の中の samples 点で。use は使った値の行。"""
+    q, hp, m = STEAM_LOOP["lng"], HEAT_PUMP, THERMAL["metal"]
+    nn = [f / sum(q["plant"]["steam"]) for f in q["plant"]["steam"]]
+
+    def pinch(x: float) -> float:
+        fl = [steam_loop_plan("lng", pinch=x)["water"][n]["flow"] for n in ("hp-hrsg", "ip-hrsg", "lp-hrsg")]
+        return max(abs(f / sum(fl) - b) for f, b in zip(fl, nn)) / 0.03
+
+    def metal(tau: float, rate: float) -> float:
+        out = 0.0
+        for kind, p in THERMAL["plants"].items():
+            lo, hi = p["startup"]["cold"]
+            for at in (0.0, 1.0):
+                c = thermal_startup(kind, "cold", at=at, tau=tau, rate=rate)[1][0] / 60.0
+                out = max(out, abs(c - (lo + hi) / 2) / ((hi - lo) / 2))
+        return out
+
+    (q7, w7), (q2, w2) = hp["r32"]["jsrae"]
+    want, h3 = (q2 / w2) / (q7 / w7), hp["r32"]["h"]["condenser"]
+
+    def eta(e: float) -> float:
+        low = r32_h(low=True, eta=e)
+        c = (low["compressor"] - h3) / (low["compressor"] - low["evaporator"])
+        return abs(c / _refrigerant_plan(e)["cop"] * hp["r32"]["defrost"] / want - 1.0) / 0.03
+
+    share = STEAM_LOOP["power"] / steam_loop_plan("coal")["q_in"]
+    eff = thermal_plan("coal")["efficiency"]
+    spans = (("pinch", "K", pinch, q["pinch"]), ("metal-rate", "K/min", lambda r: metal(m["tau"][1], r), m["rate"]),
+             ("metal-tau", "h", lambda t: metal(t, m["rate"][1]), m["tau"]), ("compressor-eta", "", eta, hp["r32"]["eta"]),
+             ("boiler", "", lambda b: abs(share - eff / b) / 0.03, (0.90, 0.94, 0.96)))
+    rows = []
+    for name, unit, f, (lo, use, hi) in spans:  # ボイラの幅だけは出典がなく仮（source_range = False）
+        for x, used in [(lo + (hi - lo) * k / (samples - 1), False) for k in range(samples)] + [(use, True)]:
+            rows.append({"assumption": name, "x": x, "unit": unit, "metric": f(x), "use": used, "lo": lo, "hi": hi,
+                         "source_range": name != "boiler"})
+    return rows
+
+
+def rate_window_rows() -> list[dict]:
+    """🧱 τ × 温め直しの速さ: cold の起動時間の Agora の範囲からのずれ ÷ 半幅（1 以下が中）。"""
+    lo_hi = {k: p["startup"]["cold"] for k, p in THERMAL["plants"].items()}
+
+    def worst(tau: float, rate: float) -> float:
+        return max(abs(thermal_startup(k, "cold", at=at, tau=tau, rate=rate)[1][0] / 60.0 - (lo + hi) / 2) / ((hi - lo) / 2)
+                   for k, (lo, hi) in lo_hi.items() for at in (0.0, 1.0))
+
+    return [{"tau_h": 60.0 + 2.0 * i, "rate_k_min": 1.0 + 0.1 * j, "metric": worst(60.0 + 2.0 * i, 1.0 + 0.1 * j)}
+            for i in range(11) for j in range(47)]
+
+
+def balance_rows() -> list[dict]:
+    """✖️ 🏠 外気ごとの最大暖房出力（建築研究所の式 × 除霜）と家の暖房負荷（JIS・ISO）[kW]。catalog はカタログの低温の点。"""
+    rows = [{"kind": "curve", "t_out": t, "max_kw": heat_pump_max(t), "load_jis_kw": house_load(t),
+             "load_iso_kw": house_load(t, iso=True)} for t in (-20.0 + 0.5 * k for k in range(75))]
+    return rows + [{"kind": "catalog", "t_out": t, "max_kw": q} for t, q in HEAT_PUMP["max"]["catalog"]] + \
+        [{"kind": "balance", "t_out": house_balance(), "iso": False}, {"kind": "balance", "t_out": house_balance(iso=True),
+                                                                      "iso": True}]
+
+
 def rig_section(scene: str, fluid: str = "water", temp_c: float | None = None, mu: float | None = None,
                 mu_scale: float | None = None) -> tuple[dict, list[str]]:
     """断面図で見る試験台（run の結果, 列）。moniac-rig は頭・貯める・戻りの管・横の槽（下の槽は水源なので省く）、
@@ -4873,7 +5026,7 @@ def section_run(scene: str, fluid: str = "water", temp_c: float | None = None, m
 
 
 def _draw(args) -> int:
-    files = args.view == "files"
+    files = args.view in ("files", "kymo")
     if args.scene in RIG_SCENES or args.scene in pw.SECTION_CASES:
         res, cols = section_run(args.scene, args.fluid, args.temp_c, **_visc(args))
         if files:
@@ -4883,7 +5036,7 @@ def _draw(args) -> int:
             out = pw.draw_section(res, cols, args.scene, args.out_dir, frames=frames, rows=rows,
                                   cap_mode=args.cap_mode, fill=args.fill, scale=args.scale,
                                   formats=_formats(args), file_prefix=args.file_prefix,
-                                  file_suffix=args.file_suffix, plan=replay)
+                                  file_suffix=args.file_suffix, plan=replay, kymo=args.view == "kymo")
             for kind, path in out["paths"].items():
                 print(f"{FILE_ICONS[kind]} {path}")
             print(f"🎬 {out['frames']}  📐 {out['canvas']}  📏 ±{out['half_block']:.3g} m  "
@@ -4893,6 +5046,9 @@ def _draw(args) -> int:
         print(pw.render_frames(pw.network_frames(res, cols, frames=frames, rows=args.rows or pw.SECTION_ROWS,
                                                  cap_mode=args.cap_mode, fill=args.fill)))
         return 0 if res["conservation_error_q"] == 0 else 1
+    if args.view == "kymo":
+        print("🕰️ 時空図は断面図の場面だけ（ドット絵の場面は frames・frame・files）", file=sys.stderr)
+        return 2
     if files:
         out = pw.draw(args.scene, args.fluid, args.out_dir, ticks=args.ticks, seed=args.seed, scale=args.scale,
                       frame_every=args.frame_every, formats=_formats(args), file_prefix=args.file_prefix,
@@ -4914,7 +5070,8 @@ def _formats(args) -> tuple[str, ...]:
 
 # --- 🎞️ README のデモ（場面ごとに GIF 1 枚） ----------------------------------------
 
-# (場面, 流体, 塗り)。塗りは色だけ（物理は流体で決まる）。⚗️ はエタノールの 🟨、👼 は琥珀の 🟧、🫀 は血の 🟥、🪨 🌀 は熱の 🟧 で塗る
+# (場面, 流体, 塗り[, 見せ方])。塗りは色だけ（物理は流体で決まる）。⚗️ はエタノールの 🟨、👼 は琥珀の 🟧、🫀 は血の 🟥、
+# 🪨 🌀 は熱の 🟧 で塗る。見せ方 "kymo" は 🕰️ 時空図（同じ場面を、横 = 列・縦 = 時刻で。既定は断面図）
 DEMOS = (("moniac-rig", "water", None), ("moniac-drain", "water", None), ("flume", "water", None),
          ("flume-hopper", "water", None), ("somen-flume", "water", None), ("noodle-length", "water", None),
          ("noodle-clog", "water", None), ("chopsticks", "water", None), ("cold-water", "water", None),
@@ -4927,7 +5084,8 @@ DEMOS = (("moniac-rig", "water", None), ("moniac-drain", "water", None), ("flume
          ("heat-pump", "water", "🟧"), ("csf", "water", None),
          ("steam-loop", "water", "🟧"), ("hrsg-loop", "water", "🟧"),
          ("part-load", "water", "🟧"), ("startup", "water", "🟧"),
-         ("metal", "water", "🟥"), ("r32-loop", "water", "🟧"), ("house", "water", "🟥"))
+         ("metal", "water", "🟥"), ("r32-loop", "water", "🟧"), ("house", "water", "🟥"),
+         ("flume", "water", None, "kymo"), ("rain-runoff", "water", None, "kymo"))
 DEMOS_SCHEMA = "fluidfullspeedsimulation-demos/1"
 _NEEDS_VS16 = set("🏛🕳🍽🌧⚗⛏❄♨🌡")  # 絵文字で出すには U+FE0F が要るもの
 
@@ -4937,8 +5095,10 @@ def scene_icon(scene: str) -> str:
     return icon + "️" if icon in _NEEDS_VS16 else icon
 
 
-def demo_gif(scene: str, fluid: str = "water", fill: str | None = None, *, scale: int = 8) -> tuple[bytes, dict]:
-    """デモの GIF 1 枚（既定の引数だけ）。断面図は 16 段・40 時刻、ドット絵は draw --view files と同じ。"""
+def demo_gif(scene: str, fluid: str = "water", fill: str | None = None, *, scale: int = 8,
+             kymo: bool = False) -> tuple[bytes, dict]:
+    """デモの GIF 1 枚（既定の引数だけ）。断面図は 16 段・40 時刻、ドット絵は draw --view files と同じ。
+    kymo=True なら同じ 16 段・40 時刻の 🕰️ 時空図。"""
     if scene in pw.SCENES:
         res = pw.run_pixels(scene, fluid)
         data = pw.gif_bytes(res, scale=scale)
@@ -4946,9 +5106,9 @@ def demo_gif(scene: str, fluid: str = "water", fill: str | None = None, *, scale
                       "kind": "pixel", "conserved": res["count_error"] == 0}
     res, cols = section_run(scene, fluid)
     view = pw.network_frames(res, cols, frames=pw.SECTION_GIF_FRAMES, rows=pw.SECTION_GIF_ROWS, fill=fill)
-    lay = pw.section_layout(view, scale)
-    return pw.section_gif_bytes(view, scale=scale), {
-        "frames": len(view["frames"]), "canvas": f"{lay['width']}x{lay['height']}", "kind": "section",
+    lay = (pw.kymo_layout if kymo else pw.section_layout)(view, scale)
+    return (pw.kymo_gif_bytes if kymo else pw.section_gif_bytes)(view, scale=scale), {
+        "frames": len(view["frames"]), "canvas": f"{lay['width']}x{lay['height']}", "kind": "kymo" if kymo else "section",
         "columns": view["columns"], "t": [view["times"][0], view["times"][-1]],
         "conserved": res["conservation_error_q"] == 0}
 
@@ -4961,7 +5121,7 @@ def demo_arg(text: str) -> str:
     """--only: 'D01'・'d1'・場面の名前・場面の絵文字（🏛️ など）のどれでも D<NN> に直す。"""
     k = _plain(text)
     scene = SCENE_ICONS.get(k, k)
-    for did, (name, _fluid, _fill) in zip(demo_ids(), DEMOS):
+    for did, (name, *_rest) in zip(demo_ids(), DEMOS):
         if scene == name or k.upper() == did or (k[:1] in "dD" and k[1:].isdigit() and int(k[1:]) == int(did[1:])):
             return did
     return text
@@ -4978,12 +5138,12 @@ def write_demos(out_dir: str = "docs/demos", *, check: bool = False, scale: int 
     out = Path(out_dir)
     wanted = None if only is None else {demo_arg(k) for k in only}
     items = []
-    for did, (scene, fluid, fill) in zip(demo_ids(), DEMOS):
+    for did, (scene, fluid, fill, *how) in zip(demo_ids(), DEMOS):
         if wanted is not None and did not in wanted:
             continue
-        n = int(did[1:])
-        data, info = demo_gif(scene, fluid, fill, scale=scale)
-        name = f"{file_prefix}D{n:02d}_{scene}_{fluid}{file_suffix}.gif"
+        n, kymo = int(did[1:]), how == ["kymo"]
+        data, info = demo_gif(scene, fluid, fill, scale=scale, kymo=kymo)
+        name = f"{file_prefix}D{n:02d}_{scene}{'-kymo' if kymo else ''}_{fluid}{file_suffix}.gif"
         path = out / name
         status = "written"
         if check:
@@ -4991,7 +5151,8 @@ def write_demos(out_dir: str = "docs/demos", *, check: bool = False, scale: int 
         else:
             out.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
-        items.append({"id": f"D{n:02d}", "scene": scene, "icon": scene_icon(scene), "fluid": fluid, "fill": fill,
+        items.append({"id": f"D{n:02d}", "scene": scene, "icon": ("🕰️" if kymo else "") + scene_icon(scene),
+                      "fluid": fluid, "fill": fill,
                       "file": name, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(),
                       "status": status, **info})
     if not check:
@@ -5048,8 +5209,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="場面（名前か 🏛️ 🥢 🍜 🧱 🍽️ 🧊 🪵 🌧️ 🎍 🍷 🫗 🏺 🚧 ⚗️ 👼 🎋 🫙 🌊 🕳️）")
     drw.add_argument("block", nargs="?", type=block_arg,
                      help="流体のブロック・アイコン（🟦 🟨 🟧 🟩 🟪 / 💧 🍶 🧴 🟢 ☠️）か、塗りたい好きな絵文字")
-    drw.add_argument("--view", choices=("frames", "frame", "files"), default="frames",
-                     help="frames = 時刻ごとの断面図 / frame = 最後の 1 枚 / files = GIF・PNG・受領記録 JSON")
+    drw.add_argument("--view", choices=("frames", "frame", "files", "kymo"), default="frames",
+                     help="frames = 時刻ごとの断面図 / frame = 最後の 1 枚 / files = GIF・PNG・受領記録 JSON / "
+                          "kymo = 🕰️ 時空図（横 = 列・縦 = 時刻）の GIF・PNG・JSON")
     drw.add_argument("--fluid", type=fluid_arg, choices=ALL_FLUID_KEYS, default=None,
                      help="作動流体（キーか絵文字。🏷️ 仮置きも選べる。既定 water）")
     drw.add_argument("--fill", help="水のブロック（色は自由。既定は流体ごと: 🟦 水 🟨 エタノール 🟧 メタノール "

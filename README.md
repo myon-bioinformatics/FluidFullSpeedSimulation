@@ -21,7 +21,7 @@
 
 ## 🎞️ デモ（場面ごとに GIF 1 枚）
 
-`draw` の場面を既定の引数で 1 枚ずつ。断面図は 16 段・40 時刻（最初と最後で一息）、ドット絵は `draw --view files` と同じ。
+`draw` の場面を既定の引数で 1 枚ずつ。断面図は 16 段・40 時刻（最初と最後で一息）、ドット絵は `draw --view files` と同じ。🕰️ は同じ場面を時空図（横 = 列、縦 = 時刻）で見たもの。
 
 | 🎞️ | 見どころ |
 |---|---|
@@ -60,9 +60,13 @@
 | ![D33](docs/demos/D33_metal_water.gif) | **D33 🌡️ `metal` 🟥**<br>列: 止まって 8 h ｜ 48 h（🪨 の厚い金属、高さ = 外気より何 K 熱いか、縦いっぱい = 600 °C）。どちらも動いている温度で止まって外気へ冷え、8 h ではほとんど冷えずに 33 分で戻るが、48 h では 315 °C まで下がって 2 K/min で 150 分かけて戻る（0〜52 時間） |
 | ![D34](docs/demos/D34_r32-loop_water.gif) | **D34 🫧 `r32-loop` 🟧**<br>列: 室外の熱交換器 ｜ 圧縮機 ｜ 室内の熱交換器（❄️ の冷媒の輪、高さは比エンタルピー、縦いっぱい = 583 kJ/kg）。凝縮した液から回し始め、外気の熱で蒸発し、圧縮機で縦いっぱいまで上がり、部屋へ熱を出して液に戻る（0〜512 秒） |
 | ![D35](docs/demos/D35_house_water.gif) | **D35 🏠 `house` 🟥**<br>列: 外気 2 °C ｜ −15 °C の部屋（高さ = 室温 − 外気、縦いっぱい = 20 °C）。外気の温度から暖め始め、2 °C の部屋は要る分だけ出して 20 °C に、−15 °C の部屋はバランス点（−13.5 °C）より冷たいので最大出力でも 18.2 °C で止まる（0〜4 時間） |
+| ![D36](docs/demos/D36_flume-kymo_water.gif) | **D36 🕰️🎋 `flume`**<br>D03 を時空図で（横 = 樋の 20 区間、下へ時刻 0〜60 秒）。右上の空いた三角が先端の遅れ（境目の傾き = 先端の速さ）、🟨 の点線が 🍜 の通り道（傾き = 運ばれる速さ） |
+| ![D37](docs/demos/D37_rain-runoff-kymo_water.gif) | **D37 🕰️🌧️ `rain-runoff`**<br>D11 を時空図で（横 = 斜面の 20 区間 ｜ 受け皿、下へ時刻 0〜286 秒）。雨で下流ほど濃くなり、やむと上流から斜めに引いていく。受け皿は遅れて溜まり続ける |
 
 - 🟦 1 段 = 縦いっぱい / 16。縦いっぱいは走らせた中の最大（樋は全区間で共通、水槽はそれぞれ）。いちばん上の段は明るい色（水面）。💴 は中央銀行を除く槽、🪙 ⛏️ は全槽で縦いっぱいを揃えてあるので、その範囲内で列をまたいで量を比べられる。💴 の中央銀行は別スケールで、他の槽と高さを比較できない。🫀 は槽ごと（脳 52.5 mL も静脈 3.2 L も、満ちれば縦いっぱい）。🪨 🌀 は出口 4 つ（送電・所内・煙突・海）を揃え、燃料と段は槽ごと。❄️ は 電気・外気・部屋 を揃える。🧠 はくも膜下腔 2 つを揃え、脳室は槽ごと。💧 ♨️ は比エンタルピーをいちばん熱い槽の値で揃える。📉 🌅 は 🪨 と同じ。🌡️ は 2 つとも動いているときの温度（外気 + 575 K）を縦いっぱいにする。🫧 は 💧 と同じ。🏠 は 2 部屋とも 20 °C を縦いっぱいにする
 - 🟨 は運ばれる物（🍜）、灰色の帯は遅れのある管、下の帯は時刻（最初 → 最後）。色は Ironmate の色 ID と派生規則
+- 🕰️ 時空図: 1 行 = 1 時刻（下へ進む）、濃さ = 水深の段（空 → 流体の shadow を 16 段）。同じ組の列は継ぎ目なしの面。斜めの境目・線が遅れと速さ、縦にまっすぐな線は溜まって待っている所。`draw 🎋 --view kymo` で 1 場面だけ（GIF + PNG + 🧾）
+- 🖼️ 描き分け: 🌊 ここは流量・流体が時間で動く GIF まで。サンキー図・T–Q 線図・トルネード図のような静止の図は [DRAgoWing](https://github.com/myon-bioinformatics/DRAgoWing) が `--jsonl` の 📒 記録から描く（SVG は親の [`plotly_min`](https://github.com/myon-bioinformatics/myon-bioinformatics/blob/main/docs/plotly-min.md)）
 - 🔁 作り直す: `uv run python fluidfullspeedsimulation.py demos`（`docs/demos/` の GIF と `demos.json` に bytes・sha256）。`demos --check` は書かずにバイト単位で比べ、違えば終了コード 1（CI で確かめる）。`--only 🏛️ D03` で一部だけ
 - 🖼️ 1 場面だけ好きな引数で: `draw 🥢 --view files --frames 60 --rows 24 --fill 🟥`（GIF + PNG + 🧾 受領記録 JSON）
 
@@ -74,6 +78,7 @@ uv run python fluidfullspeedsimulation.py verify        # ✅ 全実験 → 終�
 uv run python fluidfullspeedsimulation.py list          # 🗂️ 実験の一覧
 uv run python fluidfullspeedsimulation.py fluids        # 🧪 流体の物性
 uv run python fluidfullspeedsimulation.py run flume -v --jsonl plot.jsonl   # 🎋 1 本だけ + 記録
+uv run python fluidfullspeedsimulation.py run E31 --jsonl e31.jsonl       # 📒 静止の図の元（energy:coal・tq・startup・sensitivity・rate-window）→ DRAgoWing が描く
 uv run python fluidfullspeedsimulation.py run 🥢                             # 実験はアイコンでも選べる
 uv run python fluidfullspeedsimulation.py draw 🏛️ 🟩                         # 場面と流体（ブロック）を絵文字のまま
 uv run python fluidfullspeedsimulation.py draw 🥢 🟥                          # 流体でない絵文字は、その色で塗るだけ
@@ -96,7 +101,7 @@ uv run python -m pytest -q                              # 🧪 テスト（pytho
 | 🧮 | `tests/test_fixedq.py` | Q 整数・遅れ・カム |
 | 🧪 | `tests/test_fluids.py` | 物性・閉じた式・🧊 水温・🍯 粘度・🍷 混合物 |
 | 🌊 | `tests/test_network.py` | 回路・🎋 竹の傷み・🍜 麺・🚰 単弁・🧮 丸め方 |
-| 🔬 | `tests/test_experiments.py` | E01〜E29 |
+| 🔬 | `tests/test_experiments.py` | E01〜E33・📒 記録 |
 | 🟦 | `tests/test_pixelwater.py` | ドット絵・断面図・PNG / GIF・🎞️ デモ |
 | ⌨️ | `tests/test_cli.py` | コマンド・絵文字の引数 |
 | 🔒 | `tests/test_fleet.py` | vendor の lock・親 workflow の固定 commit（親の `fleet_check.py`） |
@@ -722,7 +727,7 @@ uv run python fluidfullspeedsimulation.py draw 🫗 🟩                     # �
 
 ### 🎚️ 🟡 振った仮定
 
-両端と、内側の 1 点（乱数）で振る。境目は二分法。
+両端と、内側の 1 点（乱数）で振る。境目は二分法。図（トルネード図・窓のヒートマップ）は記録 `sensitivity`・`rate-window` から DRAgoWing が描く。
 
 | 仮定 | 振った幅 | 🔮 が通る範囲 | 外れる所 |
 |---|---|---|---|

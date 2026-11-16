@@ -1105,6 +1105,87 @@
         4.0
       ],
       "conserved": true
+    },
+    {
+      "id": "D36",
+      "scene": "flume",
+      "icon": "🕰️🎋",
+      "fluid": "water",
+      "fill": null,
+      "file": "D36_flume-kymo_water.gif",
+      "bytes": 3195,
+      "sha256": "1dfacd0565bad8edb26c96ff13aa19a72c06fe6773265ea9f8beb6f749915420",
+      "frames": 40,
+      "canvas": "176x176",
+      "kind": "kymo",
+      "columns": [
+        "flume:0",
+        "flume:1",
+        "flume:2",
+        "flume:3",
+        "flume:4",
+        "flume:5",
+        "flume:6",
+        "flume:7",
+        "flume:8",
+        "flume:9",
+        "flume:10",
+        "flume:11",
+        "flume:12",
+        "flume:13",
+        "flume:14",
+        "flume:15",
+        "flume:16",
+        "flume:17",
+        "flume:18",
+        "flume:19"
+      ],
+      "t": [
+        0.05,
+        60.0
+      ],
+      "conserved": true
+    },
+    {
+      "id": "D37",
+      "scene": "rain-runoff",
+      "icon": "🕰️🌧️",
+      "fluid": "water",
+      "fill": null,
+      "file": "D37_rain-runoff-kymo_water.gif",
+      "bytes": 6266,
+      "sha256": "edeb1e6cbbf8477a697d04eaba41a041d574ed17bf6033dd50a34fe097ba6ff7",
+      "frames": 40,
+      "canvas": "216x176",
+      "kind": "kymo",
+      "columns": [
+        "plane:0",
+        "plane:1",
+        "plane:2",
+        "plane:3",
+        "plane:4",
+        "plane:5",
+        "plane:6",
+        "plane:7",
+        "plane:8",
+        "plane:9",
+        "plane:10",
+        "plane:11",
+        "plane:12",
+        "plane:13",
+        "plane:14",
+        "plane:15",
+        "plane:16",
+        "plane:17",
+        "plane:18",
+        "plane:19",
+        "basin"
+      ],
+      "t": [
+        1.0,
+        286.0
+      ],
+      "conserved": true
     }
   ]
 }

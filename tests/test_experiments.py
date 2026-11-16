@@ -15,6 +15,8 @@ import contextlib
 import io
 import json
 import math
+import tempfile
+from pathlib import Path
 import unittest
 
 import fluidfullspeedsimulation as ffs
@@ -1530,6 +1532,74 @@ class CerebrospinalFluid(unittest.TestCase):
         self.assertEqual(len(normal), 1)  # ふつうの頭は動かない（±0）
         self.assertEqual(blocked, sorted(blocked))
         self.assertEqual(blocked[-1], 16)
+
+
+class Records(unittest.TestCase):
+    """📒 静止の図の元になる行（DRAgoWing が `verify --jsonl` の記録から描く）。行の数が実験の値と同じか。"""
+
+    def test_energy_and_blood_flows_close(self):
+        for nodes, links, total in (*((*ffs.energy_links(k), 100.0) for k in ("coal", "lng")),
+                                    (*ffs.blood_links(), ffs.CIRCULATION["output"] * 60.0)):
+            sinks = {b for _a, b, _v in links} - {a for a, _b, _v in links}
+            with self.subTest(first=nodes[1][0]):
+                self.assertAlmostEqual(sum(v for _a, b, v in links if b in sinks), total, places=9)  # 全部どこかへ
+                for i in set(range(len(nodes))) - sinks - {0}:  # 途中のノードは 入り = 出
+                    self.assertAlmostEqual(sum(v for _a, b, v in links if b == i), sum(v for a, _b, v in links if a == i),
+                                           places=9)
+        for kind in ("coal", "lng"):
+            rows = ffs.flow_rows(*ffs.energy_links(kind), "%")
+            gross = sum(r["value"] for r in rows if r["target"] in ("送電端", "所内"))
+            self.assertAlmostEqual(gross, 100.0 * ffs.thermal_plan(kind)["efficiency"], places=9)
+
+    def test_tq_water_stays_below_the_gas(self):
+        for pin in ffs.sweep_points(323, ffs.STEAM_LOOP["lng"]["pinch"]):  # 🎚️ pinch を振っても同じ形
+            tq = ffs.tq_lines(pin)
+            (x0, g0), (x1, g1) = tq["gas"]
+            gap = [g0 + (g1 - g0) * (x - x0) / (x1 - x0) - t for x, t in tq["water"]]
+            rows = {r["drum"]: r["dt_k"] for r in ffs.tq_rows(pin) if r["stream"] == "pinch"}
+            with self.subTest(pinch=pin):
+                self.assertAlmostEqual(min(gap[1:]), pin, places=9)  # いちばん近いのは中圧・高圧の蒸発器の入口
+                self.assertAlmostEqual(tq["lp_join"], tq["pinches"][1][0], places=6)  # 低圧の側から積んでも中圧の pinch に着く
+                self.assertAlmostEqual(rows["lp"], ffs.steam_loop_plan("lng", pinch=pin)["lp_pinch"], places=9)
+                self.assertAlmostEqual(rows["ip"], pin, places=9)
+                self.assertEqual([t for _x, t in tq["water"]], sorted(t for _x, t in tq["water"]))
+
+    def test_sensitivity_rows_match_the_checks(self):
+        rows = ffs.sensitivity_rows()
+        by = {}
+        for r in rows:
+            by.setdefault(r["assumption"], []).append(r)
+        self.assertTrue(all(r["metric"] <= 1.0 for r in rows if r["use"]))  # 使った値ではどれも 🔮 のまま
+        pinch = [r["metric"] for r in by["pinch"] if not r["use"]]
+        self.assertTrue(pinch[0] < 1.0 < pinch[-1])  # 15 K では外れる（lng:loop:pinch:sweep の境目 12.4 K）
+        rate = [r["metric"] for r in by["metal-rate"] if not r["use"]]
+        self.assertTrue(rate[0] > 1.0 and rate[-1] > 1.0 and min(rate) <= 1.0)  # 1 K/min も 5.6 K/min も外れ、窓だけ中
+        self.assertEqual({k for k, v in by.items() if not v[0]["source_range"]}, {"boiler"})
+        window = ffs.rate_window_rows()
+        use = next(r for r in window if r["tau_h"] == 70.0 and abs(r["rate_k_min"] - 2.0) < 1e-9)
+        self.assertLessEqual(use["metric"], 1.0)
+
+    def test_startup_rows_are_the_plan(self):
+        rows = ffs.startup_rows()
+        for kind in ffs.THERMAL["plants"]:
+            for start in ("hot", "cold"):
+                plan = ffs.thermal_startup(kind, start, at=0.5)
+                phases = {r["phase"]: r for r in rows if r["plant"] == kind and r["start"] == start}
+                with self.subTest(kind=kind, start=start):
+                    self.assertAlmostEqual(phases["warmup"]["to_min"], plan[1][0] / 60.0, places=9)  # 暖機の終わり = 並列
+                    self.assertAlmostEqual(phases["ramp"]["to_min"], plan[-1][0] / 60.0, places=9)  # 全負荷
+                    self.assertEqual(phases["steps"]["to_min"], phases["warmup"]["from_min"])
+
+    def test_records_go_out_with_jsonl(self):
+        balance = [r for r in ffs.balance_rows() if r["kind"] == "balance"]
+        self.assertEqual([round(r["t_out"], 6) for r in balance],
+                         [round(ffs.house_balance(), 6), round(ffs.house_balance(iso=True), 6)])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "plot.jsonl"
+            ffs.write_jsonl(str(path), [{"id": "E30", "slug": "circulation", "runs": {"blood": ffs.flow_rows(*ffs.blood_links(), "L/min")}}])
+            lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual({(r["id"], r["run"]) for r in lines}, {("E30", "blood")})
+        self.assertEqual(lines[0]["unit"], "L/min")
 
 
 if __name__ == "__main__":

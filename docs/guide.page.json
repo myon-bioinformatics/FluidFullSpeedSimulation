@@ -511,6 +511,30 @@
               "alt": "D35 house"
             }
           ]
+        },
+        {
+          "type": "card",
+          "title": "D36 🕰️🎋 flume",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D36_flume-kymo_water.gif",
+              "alt": "D36 flume kymo"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "D37 🕰️🌧️ rain-runoff",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D37_rain-runoff-kymo_water.gif",
+              "alt": "D37 rain-runoff kymo"
+            }
+          ]
         }
       ]
     },
