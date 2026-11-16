@@ -439,6 +439,30 @@
               "alt": "D29 steam-loop"
             }
           ]
+        },
+        {
+          "type": "card",
+          "title": "D30 ♨️ hrsg-loop",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D30_hrsg-loop_water.gif",
+              "alt": "D30 hrsg-loop"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "D31 📉 part-load",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D31_part-load_water.gif",
+              "alt": "D31 part-load"
+            }
+          ]
         }
       ]
     },

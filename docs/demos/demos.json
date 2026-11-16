@@ -927,21 +927,82 @@
       "fluid": "water",
       "fill": "🟧",
       "file": "D29_steam-loop_water.gif",
-      "bytes": 11745,
-      "sha256": "dfad3757095cb3e7082d7de374dadd51a377b5e79bc7bc4c91d33c0146029aaa",
+      "bytes": 28557,
+      "sha256": "c99115e37f5e9d6dbbb46b6dbedde1b471b9916fa49a35ac8cbf9d184dfe352f",
       "frames": 40,
-      "canvas": "248x160",
+      "canvas": "688x160",
       "kind": "section",
       "columns": [
-        "feed",
         "boiler",
         "hp",
         "reheater",
-        "lp",
+        "lp-1",
+        "lp-2",
+        "lp-3",
+        "lp-4",
+        "lp-5",
+        "lp-6",
+        "condenser",
+        "heater-1",
+        "heater-2",
+        "heater-3",
+        "heater-4",
+        "heater-5",
+        "heater-6",
+        "feed"
+      ],
+      "t": [
+        16.0,
+        2048.0
+      ],
+      "conserved": true
+    },
+    {
+      "id": "D30",
+      "scene": "hrsg-loop",
+      "icon": "♨️",
+      "fluid": "water",
+      "fill": "🟧",
+      "file": "D30_hrsg-loop_water.gif",
+      "bytes": 4782,
+      "sha256": "25e8d6da65d7c2aa895a73dcb3f2eed7bc7f3f62235d078d764aec7605db22cf",
+      "frames": 40,
+      "canvas": "128x160",
+      "kind": "section",
+      "columns": [
+        "hrsg",
+        "st",
         "condenser"
       ],
       "t": [
         16.0,
+        2048.0
+      ],
+      "conserved": true
+    },
+    {
+      "id": "D31",
+      "scene": "part-load",
+      "icon": "📉",
+      "fluid": "water",
+      "fill": "🟧",
+      "file": "D31_part-load_water.gif",
+      "bytes": 35703,
+      "sha256": "4a032362f8cea78d4c7863e6cb2fb5c090969f36b76666bc3b4778b05dcb117e",
+      "frames": 40,
+      "canvas": "288x160",
+      "kind": "section",
+      "columns": [
+        "fuel",
+        "boiler",
+        "steam",
+        "grid",
+        "aux",
+        "stack",
+        "sea"
+      ],
+      "t": [
+        32.0,
         2048.0
       ],
       "conserved": true
