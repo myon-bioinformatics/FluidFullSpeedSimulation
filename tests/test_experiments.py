@@ -1414,6 +1414,35 @@ class HeatPump(unittest.TestCase):
         self.assertEqual((res["volumes_q"]["power"], res["volumes_q"]["outdoor"]), (0, 0))
         self.assertEqual(res["conservation_error_q"], 0)
 
+    def test_refrigerant_loop(self):
+        p, q = ffs.HEAT_PUMP, ffs.HEAT_PUMP["r32"]
+        plan = ffs.steam_loop_plan("r32")
+        w = plan["water"]
+        self.assertEqual(list(w), ffs.steam_loop_columns("r32"))
+        self.assertEqual({x["flow"] for x in w.values()}, {w["condenser"]["flow"]})  # 冷媒は 1 本の輪
+        self.assertAlmostEqual(sum(x["tau"] for x in w.values()) * w["condenser"]["flow"], q["charge"] * 1e3, places=9)
+        work, outdoor = plan["fuel"]["power"][1], plan["fuel"]["outdoor"][1]
+        self.assertAlmostEqual(work + outdoor, p["heat"], places=12)  # 電気 + 外気 = 部屋（第 1 法則）
+        self.assertAlmostEqual(plan["cop"], p["heat"] / work, places=12)
+        low = q["low"]
+        cop_low = (low["compressor"] - q["h"]["condenser"]) / (low["compressor"] - low["evaporator"])
+        self.assertLess(cop_low, plan["cop"])  # 外気が冷たいほど COP は下がる
+        self.assertLess(cop_low, ffs.carnot_cop(low["t_out"], p["t_room"]))
+        for item in random_scales(318, 2, n_min=1, n_max=1):  # 🎲 どの τ も c 倍でも、行き渡った後の h は同じ
+            net = ffs.steam_loop_network("r32", slow=item["value"], t_fuel=4096.0)
+            res = net.run(4096.0)
+            with self.subTest(slow=item["label"]):
+                self.assertEqual(res["parts_error_q"], {"water": 0, "heat": 0})
+                for name, x in w.items():
+                    got = res["parts_q"][name]
+                    self.assertAlmostEqual(got["heat"] / got["water"] * 1e3 / x["h"], 1.0, places=6)
+
+    def test_refrigerant_scene(self):
+        self.assertEqual(ffs.scene_arg("🫧"), "r32-loop")
+        res, cols = ffs.rig_section("r32-loop")
+        self.assertEqual(cols, ["evaporator", "compressor", "condenser"])
+        self.assertEqual(res["parts_error_q"], {"water": 0, "heat": 0})
+
 
 class CerebrospinalFluid(unittest.TestCase):
     """🧠 血液 → 脳室 → くも膜下腔 → 血液。"""

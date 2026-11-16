@@ -1060,6 +1060,29 @@
         52.0
       ],
       "conserved": true
+    },
+    {
+      "id": "D34",
+      "scene": "r32-loop",
+      "icon": "🫧",
+      "fluid": "water",
+      "fill": "🟧",
+      "file": "D34_r32-loop_water.gif",
+      "bytes": 5530,
+      "sha256": "25033244cf1cddbe14515586e59da8f7ed011f378f4508b1b1433e3490d005cf",
+      "frames": 40,
+      "canvas": "128x160",
+      "kind": "section",
+      "columns": [
+        "evaporator",
+        "compressor",
+        "condenser"
+      ],
+      "t": [
+        4.0,
+        512.0
+      ],
+      "conserved": true
     }
   ]
 }
