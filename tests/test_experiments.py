@@ -1154,16 +1154,23 @@ class SteamLoop(unittest.TestCase):
         self.assertTrue(0.85 <= plan["eta"] <= 0.95)
         self.assertLess(1.0 - plan["x"], 0.12)  # 再熱で湿りは翼の目安より下
         q = ffs.STEAM_LOOP["lng"]
-        w, h = plan["water"], q["h"]
-        m_hp, m_ip = w["hp-hrsg"]["flow"], w["ip-hrsg"]["flow"]
+        self.assertEqual(plan["pinch"], q["pinch"][1])
         (t_h, f_h, _g), (t_i, f_i, _g), (_t, _f, g_l) = q["drums"]
-        c_g = plan["q_in"] / (plan["t_exh"] - q["plant"]["stack"])  # MW/K（ガスは一直線に冷える）
-        above_hp = m_hp * (h["hp"] - f_h) + (m_hp + m_ip) * (h["reheat"] - w["hp-st"]["h"])
-        self.assertAlmostEqual(above_hp / 1e3, c_g * (plan["t_exh"] - t_h - q["pinch"]), places=6)  # 高圧の pinch
-        between = m_hp * (f_h - f_i) + m_ip * (w["hp-st"]["h"] - f_i) + w["lp-hrsg"]["flow"] * (h["lp"] - g_l)
-        self.assertAlmostEqual((above_hp + between) / 1e3, c_g * (plan["t_exh"] - t_i - q["pinch"]), places=6)  # 中圧の pinch
-        self.assertGreaterEqual(plan["lp_pinch"], q["pinch"])  # 残りの低圧でも温度は交差しない
-        self.assertGreater(plan["eta"], ffs.steam_loop_plan("lng", losses=False)["eta"])  # 発電機の損の分、軸は多く働く
+        hp_share = []
+        for pin in ffs.sweep_points(319, q["pinch"]):  # 🎚️ 出典の幅の両端と内側でも pinch の式は閉じる
+            plan = ffs.steam_loop_plan("lng", pinch=pin)
+            w, h = plan["water"], q["h"]
+            m_hp, m_ip = w["hp-hrsg"]["flow"], w["ip-hrsg"]["flow"]
+            c_g = plan["q_in"] / (plan["t_exh"] - q["plant"]["stack"])  # MW/K（ガスは一直線に冷える）
+            above_hp = m_hp * (h["hp"] - f_h) + (m_hp + m_ip) * (h["reheat"] - w["hp-st"]["h"])
+            with self.subTest(pinch=pin):
+                self.assertAlmostEqual(above_hp / 1e3, c_g * (plan["t_exh"] - t_h - pin), places=6)  # 高圧の pinch
+                between = m_hp * (f_h - f_i) + m_ip * (w["hp-st"]["h"] - f_i) + w["lp-hrsg"]["flow"] * (h["lp"] - g_l)
+                self.assertAlmostEqual((above_hp + between) / 1e3, c_g * (plan["t_exh"] - t_i - pin), places=6)  # 中圧の pinch
+                self.assertGreaterEqual(plan["lp_pinch"], pin)  # 残りの低圧でも温度は交差しない
+            hp_share.append(m_hp / sum(w[n]["flow"] for n in ("hp-hrsg", "ip-hrsg", "lp-hrsg")))
+        self.assertEqual(hp_share, sorted(hp_share, reverse=True))  # pinch が広いほど高圧で取れる熱は減る
+        self.assertGreater(ffs.steam_loop_plan("lng")["eta"], ffs.steam_loop_plan("lng", losses=False)["eta"])  # 発電機の損の分
 
     def test_water_does_not_move_while_the_plant_heats_up(self):
         for kind in ("coal", "lng"):
@@ -1353,6 +1360,12 @@ class Startup(unittest.TestCase):
                 want = ffs.metal_warmup(kind, m["off"]["cold"]) - ffs.metal_warmup(kind, m["off"]["hot"])
                 self.assertLessEqual(abs(gap - want), 60.0)  # 差 = 冷えた分を温め直す時間（分に丸める）
                 self.assertGreater(ffs.thermal_startup(kind, 100.0)[1][0], ffs.thermal_startup(kind, "cold")[1][0])
+                tau, rate = m["tau"][1], m["rate"][1]
+                self.assertEqual(ffs.thermal_startup(kind, "cold", tau=tau, rate=rate), ffs.thermal_startup(kind, "cold"))
+                rates = sorted(m["rate"][0] + item["value"] * (m["rate"][2] - m["rate"][0])
+                               for item in random_scales(320, 3, n_min=1, n_max=1))  # 🎚️ 出典の速さの幅の中
+                colds = [ffs.thermal_startup(kind, "cold", tau=tau, rate=r)[1][0] for r in rates]
+                self.assertEqual(colds, sorted(colds, reverse=True))  # 速く温めてよいほど cold の起動は短い
 
     def test_metal_scene(self):
         self.assertEqual(ffs.scene_arg("🌡️"), "metal")
@@ -1424,10 +1437,16 @@ class HeatPump(unittest.TestCase):
         work, outdoor = plan["fuel"]["power"][1], plan["fuel"]["outdoor"][1]
         self.assertAlmostEqual(work + outdoor, p["heat"], places=12)  # 電気 + 外気 = 部屋（第 1 法則）
         self.assertAlmostEqual(plan["cop"], p["heat"] / work, places=12)
-        low = q["low"]
-        cop_low = (low["compressor"] - q["h"]["condenser"]) / (low["compressor"] - low["evaporator"])
+        low = ffs.r32_h(low=True)
+        cop_low = (low["compressor"] - low["condenser"]) / (low["compressor"] - low["evaporator"])
+        for item in random_scales(321, 2, n_min=1, n_max=1):  # 🎚️ 圧縮機の効率（0.1〜0.999）: 出口 = 入口 + 等エントロピーの上がり / 効率
+            h = ffs.r32_h(eta=item["value"])
+            self.assertAlmostEqual((h["compressor"] - h["evaporator"]) * item["value"],
+                                   q["h"]["compressor_s"] - q["h"]["evaporator"], places=9)
+        cops = [ffs._refrigerant_plan(e)["cop"] for e in q["eta"]]
+        self.assertEqual(cops, sorted(cops))  # 効率が良いほど COP は高い
         self.assertLess(cop_low, plan["cop"])  # 外気が冷たいほど COP は下がる
-        self.assertLess(cop_low, ffs.carnot_cop(low["t_out"], p["t_room"]))
+        self.assertLess(cop_low, ffs.carnot_cop(q["low"]["t_out"], p["t_room"]))
         for item in random_scales(318, 2, n_min=1, n_max=1):  # 🎲 どの τ も c 倍でも、行き渡った後の h は同じ
             net = ffs.steam_loop_network("r32", slow=item["value"], t_fuel=4096.0)
             res = net.run(4096.0)
@@ -1452,6 +1471,19 @@ class HeatPump(unittest.TestCase):
         self.assertAlmostEqual(ffs.house_load(p["house"]["t100"]), ratio * heat_per_cool * p["max"]["cooling"], places=12)
         self.assertAlmostEqual(ffs.house_load(p["house"]["t100"], iso=True), ratio * p["heat"], places=12)  # ISO の表 2
         self.assertLessEqual(abs(ffs.house_balance(iso=True) - t_b), 1.0)  # どちらの読みでもほぼ同じ
+
+    def test_room_tau_only_sets_the_speed(self):
+        h, t_room = ffs.HEAT_PUMP["house"], ffs.HEAT_PUMP["t_room"]
+        ua = ffs.house_load(h["t100"]) / (h["t0"] - h["t100"])
+        for item in random_scales(322, 2, n_min=0, n_max=1):  # 🟢 部屋の τ を c 倍（0.1〜9.99）
+            c = item["value"]
+            t_end = 48.0 * c * h["tau"]
+            res = ffs.house_network((-7.0,), slow=c, t_end=t_end, dt=60.0).run(t_end)
+            got = -7.0 + ffs.from_q(res["volumes_q"]["room-7"]) / (ua * c * h["tau"])
+            q_in = min(ffs.house_load(-7.0), ffs.heat_pump_max(-7.0)) + ua * (t_room - h["t0"])
+            with self.subTest(slow=item["label"]):
+                self.assertAlmostEqual(got, -7.0 + q_in / ua, places=9)  # 落ち着く室温は τ によらない
+                self.assertEqual(res["conservation_error_q"], 0)
 
     def test_house_scene(self):
         self.assertEqual(ffs.scene_arg("🏠"), "house")

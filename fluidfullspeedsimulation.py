@@ -59,6 +59,12 @@ def close(cid: str, icon: str, value: float, expected: float, tol: float, note: 
     return check(cid, icon, rel_err(value, expected) <= tol, value=value, expected=expected, tol=tol, note=note)
 
 
+def sweep_points(seed: int, span: tuple) -> list[float]:
+    """🎚️ 仮定を振る点: 出典の幅 (下限, 使う値, 上限) の両端と、内側の 1 点（A×10^-1 の A を乱数で）。"""
+    lo, _use, hi = span
+    return [lo, lo + random_scales(seed, 1, n_min=1, n_max=1)[0]["value"] * (hi - lo), hi]
+
+
 def conserved(cid: str, res: dict) -> dict:
     return check(cid, "⚖️", res["conservation_error_q"] == 0, value=res["conservation_error_q"], expected=0,
                  tol=0, note="Σ水槽 + 管の中（Q 整数、ulp）")
@@ -3268,8 +3274,9 @@ def e30_circulation(seed: int = 30) -> dict:
 # min_load は最低負荷の目安（Agora: 最新の石炭 25〜40 %、GTCC 30〜40 %）。startup は Agora の最新の発電所の
 # 起動時間（止まってから 8 時間未満 hot・48 時間超 cold、最低負荷に届くまで、分）と負荷上げの速さ（%/分）の範囲、
 # metal は厚い金属（タービンのロータ・管寄せ・ドラム）が動いているあいだの温度 °C（🪨 主蒸気、🌀 高圧の蒸気）。
-# THERMAL["metal"] は 🧱 起動を決める厚い金属: tau は止まった後に外気へ冷える時定数 [h]（Gülen: 自然に冷える HP ドラム
-# 60〜80 h の真ん中）、rate は温め直してよい速さ [K/分]（Kosman: 超臨界の蒸気タービンで許される 2 K/min）、off は止まって
+# THERMAL["metal"] は 🧱 起動を決める厚い金属。tau・rate は (下限, 使う値, 上限): tau は止まった後に外気へ冷える時定数 [h]
+# （Gülen: 自然に冷える HP ドラム 60〜80 h）、rate は温め直してよい速さ [K/分]（Kosman: 超臨界の蒸気タービンで許される
+# 2 K/min、最適化に使った 1 K/min / Gülen: 蒸気の温度上げ 5〜10 °F/min = 2.8〜5.6 K/min）、off は止まって
 # いた時間 [h]（Agora の hot < 8 h・cold > 48 h の境目）、turning は 1 段目の金属が 1,000 °F（537.8 °C）から 500 °F（260 °C）
 # まで冷えるのにかかる時間 [h] の範囲（米国特許 6,898,935: ターニングで 40〜80 h）。
 # curzon_ahlborn は 1975 年の表（名前, 低温 °C, 高温 °C, 実測の効率）。
@@ -3292,7 +3299,7 @@ THERMAL = {
     },
     "curzon_ahlborn": (("West Thurrock", 25.0, 565.0, 0.36), ("CANDU", 25.0, 300.0, 0.30),
                        ("Larderello", 80.0, 250.0, 0.16)),
-    "metal": {"tau": 70.0, "rate": 2.0, "off": {"hot": 8.0, "cold": 48.0}, "turning": (537.8, 260.0, 40.0, 80.0),
+    "metal": {"tau": (60.0, 70.0, 80.0), "rate": (1.0, 2.0, 5.6), "off": {"hot": 8.0, "cold": 48.0}, "turning": (537.8, 260.0, 40.0, 80.0),
               "dt": 60.0, "scene": (52.0 * 3600.0, 24)},
 }
 
@@ -3573,13 +3580,14 @@ def _part_load_checks(seed: int, t_end: float) -> tuple[list[dict], dict]:
     return checks, summary
 
 
-def metal_warmup(kind: str, off: float) -> float:
+def metal_warmup(kind: str, off: float, *, tau: float | None = None, rate: float | None = None) -> float:
     """🧱 暖機の時間 [s]: 止まっていた off 時間 [h] で、厚い金属は外気へ冷える（θ = θ₀·e^(−t/τ)、θ は外気より何 K 熱いか）。
     許される速さ r で温め直すと、温めているあいだも冷え続けるので（dθ/dt = r − θ/τ）θ₀ に戻るまで τ·ln((rτ − θ_off)/(rτ − θ₀))。"""
     m = THERMAL["metal"]
-    tau, r = 3600.0 * m["tau"], m["rate"] / 60.0
+    tau_h = m["tau"][1] if tau is None else tau  # tau [h]・rate [K/分] を渡すと 🎚️ その値で
+    t, r = 3600.0 * tau_h, (m["rate"][1] if rate is None else rate) / 60.0
     hot = THERMAL["plants"][kind]["startup"]["metal"] - THERMAL["t_cold"]
-    return tau * math.log((r * tau - hot * math.exp(-off / m["tau"])) / (r * tau - hot))
+    return t * math.log((r * t - hot * math.exp(-off / tau_h)) / (r * t - hot))
 
 
 def metal_network(kind: str = "coal", offs=(8.0, 48.0), *, t_end: float | None = None, dt: float | None = None) -> Network:
@@ -3587,7 +3595,7 @@ def metal_network(kind: str = "coal", offs=(8.0, 48.0), *, t_end: float | None =
     τ で冷える。止まっていた時間 off [h] で 🔥 許される速さで温め直し（metal_warmup のあいだ）、戻ったらその温度を保つ。"""
     m = THERMAL["metal"]
     net = Network(dt=m["dt"] if dt is None else dt)
-    tau, r = 3600.0 * m["tau"], m["rate"] / 60.0
+    tau, r = 3600.0 * m["tau"][1], m["rate"][1] / 60.0
     hot = THERMAL["plants"][kind]["startup"]["metal"] - THERMAL["t_cold"]
     t_end = m["scene"][0] if t_end is None else t_end
     net.tank("burner", 1.0).tank("air", 1.0)
@@ -3604,17 +3612,19 @@ def metal_network(kind: str = "coal", offs=(8.0, 48.0), *, t_end: float | None =
     return net
 
 
-def thermal_startup(kind: str, start="hot", *, at: float = 0.0) -> tuple:
+def thermal_startup(kind: str, start="hot", *, at: float = 0.0, tau: float | None = None, rate: float | None = None) -> tuple:
     """🌅 起動の手順（thermal_network の load に渡す切り替え）: 暖機（無負荷の燃料を燃やし、電気は出さない）→ 最低負荷に並列 →
     1 分ごとに負荷上げの速さだけ上げて全負荷へ。起動時間 = 🧱 金属を温め直す時間（start は止まっていた時間: "hot" = 8 h・
     "cold" = 48 h、または h の数）+ 金属によらない手順の分（Agora の hot の起動時間 − 8 h の暖機、負にはしない）。
-    at は出典の範囲のどこか（0 = 速い側、1 = 遅い側）。起動時間は分に丸める（切り替えが刻み dt に揃う）。"""
+    at は出典の範囲のどこか（0 = 速い側、1 = 遅い側）。起動時間は分に丸める（切り替えが刻み dt に揃う）。
+    tau・rate は 🎚️ 金属の仮定を振るとき（metal_warmup と同じ）。"""
     p, m = THERMAL["plants"][kind], THERMAL["metal"]
     lo, hi = p["startup"]["hot"]
     fast, slow = p["startup"]["ramp"][::-1]
     off = m["off"][start] if isinstance(start, str) else float(start)
-    fixed = max(0.0, 60.0 * (lo + at * (hi - lo)) - metal_warmup(kind, m["off"]["hot"]))
-    t, x, ramp = 60.0 * round((fixed + metal_warmup(kind, off)) / 60.0), p["min_load"], (fast + at * (slow - fast)) / 100.0
+    warm = {o: metal_warmup(kind, o, tau=tau, rate=rate) for o in (m["off"]["hot"], off)}
+    fixed = max(0.0, 60.0 * (lo + at * (hi - lo)) - warm[m["off"]["hot"]])
+    t, x, ramp = 60.0 * round((fixed + warm[off]) / 60.0), p["min_load"], (fast + at * (slow - fast)) / 100.0
     plan = [(0.0, 0.0)]
     while x < 1.0:
         plan.append((t, x))
@@ -3626,35 +3636,53 @@ def _metal_checks(seed: int) -> tuple[list[dict], dict]:
     """🧱 止まっていた時間で金属が冷えた分 ÷ 温め直してよい速さ = hot と cold の起動時間の差。"""
     m = THERMAL["metal"]
     t0, t1, lo_h, hi_h = m["turning"]
-    hours = m["tau"] * math.log((t0 - THERMAL["t_cold"]) / (t1 - THERMAL["t_cold"]))
+    hours = m["tau"][1] * math.log((t0 - THERMAL["t_cold"]) / (t1 - THERMAL["t_cold"]))
     checks = [check("metal:turning", "📚", lo_h <= hours <= hi_h, value=hours, expected=lo_h,
-                    note=f"τ = {m['tau']:g} h なら 1 段目の金属が 1,000 °F から 500 °F まで冷えるのに {hours:.0f} h。"
+                    note=f"τ = {m['tau'][1]:g} h なら 1 段目の金属が 1,000 °F から 500 °F まで冷えるのに {hours:.0f} h。"
                          f"ターニングを回し続ける時間 {lo_h:.0f}〜{hi_h:.0f} h（米国特許 6,898,935）の中")]
     summary = {"turning_h": hours}
     for i, (kind, p) in enumerate(THERMAL["plants"].items()):
         hot = p["startup"]["metal"] - THERMAL["t_cold"]
-        temp = {s: THERMAL["t_cold"] + hot * math.exp(-off / m["tau"]) for s, off in m["off"].items()}
+        temp = {s: THERMAL["t_cold"] + hot * math.exp(-off / m["tau"][1]) for s, off in m["off"].items()}
         warm = {s: metal_warmup(kind, off) / 60.0 for s, off in m["off"].items()}
         lo, hi = p["startup"]["cold"]
         for item in random_scales(seed + 40 + i, 2, n_min=1, n_max=1):  # 🎲 hot の手順の分を出典の範囲のどこかから
             cold = thermal_startup(kind, "cold", at=item["value"])[1][0] / 60.0
             checks.append(check(f"{kind}:metal:cold={item['label']}", "🧱", lo <= cold <= hi, value=cold, expected=lo,
                                 note=f"止まって 8 h で金属は {temp['hot']:.0f} °C、48 h で {temp['cold']:.0f} °C まで冷える。"
-                                     f"{m['rate']:g} K/min で温め直すと {warm['hot']:.0f} 分 / {warm['cold']:.0f} 分。hot の起動時間から"
+                                     f"{m['rate'][1]:g} K/min で温め直すと {warm['hot']:.0f} 分 / {warm['cold']:.0f} 分。hot の起動時間から"
                                      f"決めた手順の分を足した cold の起動時間 {cold:.0f} 分は Agora の {lo:.0f}〜{hi:.0f} 分の中"))
         off = m["off"]["cold"]
         dt = m["dt"]
         t_end = dt * round((3600.0 * off + metal_warmup(kind, off)) / dt)  # 温め直し終わるステップ
         net = metal_network(kind, (off,), t_end=t_end)
         res = net.run(t_end)
-        tau, r = 3600.0 * m["tau"], m["rate"] / 60.0
+        tau, r = 3600.0 * m["tau"][1], m["rate"][1] / 60.0
         t_w = t_end - 3600.0 * off
-        want = r * tau + (hot * math.exp(-off / m["tau"]) - r * tau) * math.exp(-t_w / tau)
+        want = r * tau + (hot * math.exp(-off / m["tau"][1]) - r * tau) * math.exp(-t_w / tau)
         checks += [close(f"{kind}:metal:engine", "🧱", from_q(res["volumes_q"][f"off-{off:g}h"]), want, 1e-9,
                          note=f"金属の槽（高さ = 外気より何 K 熱いか）: {off:g} h 冷えて {t_w / 60:.0f} 分温め直した温度 = "
                               "閉じた式 rτ + (θ_止 − rτ)·e^(−t/τ)"),
                    conserved(f"{kind}:metal:conserve", res)]
         summary[kind] = {"metal_c": temp, "warm_min": warm, "cold_minus_hot_min": warm["cold"] - warm["hot"]}
+    # 🎚️ τ を出典の幅で、温め直しの速さを出典の幅の中で振る: cold の起動時間がどの発電所でも（手順の分は範囲の両端 at = 0・1）
+    # Agora の範囲に入る速さの窓。速いほど起動は短い（単調）ので、窓の両端は二分法で
+    lo_r, rate, hi_r = m["rate"]
+
+    def colds(tau: float, r: float) -> list[tuple[float, tuple]]:
+        return [(thermal_startup(k, "cold", at=at, tau=tau, rate=r)[1][0] / 60.0, p["startup"]["cold"])
+                for k, p in THERMAL["plants"].items() for at in (0.0, 1.0)]
+
+    windows = {tau: (bisection(lambda r: any(c > hi for c, (_lo, hi) in colds(tau, r)), lo_r, hi_r, steps=48),
+                     bisection(lambda r: all(c >= lo for c, (lo, _hi) in colds(tau, r)), lo_r, hi_r, steps=48))
+               for tau in sweep_points(seed + 50, m["tau"])}
+    checks.append(check("metal:rate-window", "🎚️", all(a <= rate <= b for a, b in windows.values()), value=rate,
+                        expected=min(b for _a, b in windows.values()),
+                        note="cold の起動時間が Agora の範囲に入る温め直しの速さは τ " + "・".join(
+                            f"{t:.0f} h で {a:.2f}〜{b:.2f}" for t, (a, b) in windows.items())
+                             + f" K/min。出典の {lo_r:g}〜{hi_r:g} K/min のうちこの狭い窓だけで、使った {rate:g} K/min（Kosman の許容）"
+                               "はどの τ でも中。Kosman の最適化の 1 K/min、Gülen の蒸気の温度上げ 2.8 K/min 以上だと外れる"))
+    summary["rate_window"] = {f"{t:.1f}": w for t, w in windows.items()}
     return checks, summary
 
 
@@ -3716,8 +3744,8 @@ def _startup_checks(seed: int) -> tuple[list[dict], dict]:
 # 🌀 西名古屋 7-1 号の 1 段目の割合（排熱のうち蒸気へ・蒸気タービンの出力）に、H 級の 3 圧・再熱の蒸気（GE GER-3936A の表 2）を当てた
 #    排熱回収ボイラ: 高圧 165 bar(g)・565 °C、再熱 23.8 bar(g)・565 °C、低圧 2.2 bar(g)・277 °C、排気 0.04064 bar(a)。h・s は蒸気表、
 #    hp_s・ip_s は高圧・中圧の等エントロピー膨張の行き先（再熱・低圧の圧力。再熱器の圧損は入れない）。saturation は排気の圧力の飽和。
-#    drums は高圧・中圧（= 再熱の圧力）・低圧のドラムの飽和 (°C, h_f, h_g)、pinch は蒸発器の出口のガスと飽和の温度差 [K]
-#    （ふつう 5〜15 K）。中圧の出口 = 低圧の入口（GE は低圧の入口を中圧の排気に揃える）、中圧の過熱器を出た蒸気 = 高圧の排気
+#    drums は高圧・中圧（= 再熱の圧力）・低圧のドラムの飽和 (°C, h_f, h_g)、pinch は蒸発器の出口のガスと飽和の温度差
+#    (下限, 使う値, 上限) [K]（ふつう 5〜15 K）。中圧の出口 = 低圧の入口（GE は低圧の入口を中圧の排気に揃える）、中圧の過熱器を出た蒸気 = 高圧の排気
 #    （再熱器の前で混ぜても冷えない）と置く。plant は西名古屋 7 号系列（環境アセスの審査書、1 系列・大気 5 °C）: 煙突の出口 °C、
 #    排熱回収ボイラ 3 基の 高圧・中圧・低圧の蒸発量 [t/h/基]、GT・ST の出力 [MW]、復水器の冷却水 [m³/s]。
 # losses はデータに無い損（Thermoflow の 900 MW 級の熱勘定）: (蒸気タービンの軸の仕事 kW, 発電機 kWe, 給水ポンプを回すタービン kW,
@@ -3735,7 +3763,8 @@ STEAM_LOOP = {
     "losses": (1088803.0, 1077400.0, 42894.0, 8.377 * 2.326),
     "lng": {"h": {"hp": 3474.73, "hp_s": 2932.05, "reheat": 3608.14, "ip_s": 2979.81, "lp": 3022.14},
             "s": {"hp": 6.50996, "lp": 7.58779}, "saturation": (122.54, 2554.16, 0.42619, 8.46769),
-            "drums": ((350.35, 1673.79, 2561.23), (223.55, 960.05, 2801.85), (135.88, 571.51, 2728.04)), "pinch": 10.0,
+            "drums": ((350.35, 1673.79, 2561.23), (223.55, 960.05, 2801.85), (135.88, 571.51, 2728.04)),
+            "pinch": (5.0, 10.0, 15.0),
             "plant": {"stack": 88.0, "steam": (246.0, 59.0, 36.0), "gt_st": (769.5, 388.5), "cooling": 25.0},
             "taus": {"gt": 4.0, "exhaust": 16.0, "hrsg": 120.0, "st": 8.0, "condenser": 120.0}},
     "cooling": (7.0, 3.99, 1025.0), "nanko": {"cooling": (26.4, 600.0)},
@@ -3766,7 +3795,7 @@ def _coal_lp(stages: int, h_ex: float, m: float, r: float, pump: float) -> dict:
     return {"steam": steam, "water": water, "ext": ext, "passing": passing, "condenser": flow, "work": work}
 
 
-def _hrsg_plan(eta_g: float, ex_loss: float) -> dict:
+def _hrsg_plan(eta_g: float, ex_loss: float, pinch: float | None = None) -> dict:
     """🌀 3 圧・再熱: 復水器 → 高圧・中圧・低圧の節 → 高圧タービン → 再熱器（中圧の蒸気と合流）→ 中圧タービン → 低圧タービン
     （低圧の蒸気と合流）→ 復水器。📍 節ごとの蒸気の量は pinch で解く: ガスの温度は熱を渡すほど一直線に下がり（比熱一定、
     煙突の損と煙突の温度から）、高圧・中圧の蒸発器の出口でガスは飽和 + pinch。そこより熱い側で渡せる熱で、高圧（蒸発・過熱・
@@ -3783,7 +3812,8 @@ def _hrsg_plan(eta_g: float, ex_loss: float) -> dict:
     power = q_steam * stage["steam"]["power"]  # 蒸気タービンの発電端
     c_g = q_exhaust * stage["hrsg"]["stack"] / (q["plant"]["stack"] - THERMAL["t_cold"])  # ガスの熱容量流量 MW/K
     t_exh = q["plant"]["stack"] + q_steam / c_g  # ガスタービンの出口
-    hot = [c_g * (t_exh - t_s - q["pinch"]) * 1e3 for t_s in (t_h, t_i)]  # 高圧・中圧の pinch より熱い側で渡せる熱 kW
+    pinch = q["pinch"][1] if pinch is None else pinch  # 🎚️ 渡すとその値で
+    hot = [c_g * (t_exh - t_s - pinch) * 1e3 for t_s in (t_h, t_i)]  # 高圧・中圧の pinch より熱い側で渡せる熱 kW
     h_lps = h_f + (q["s"]["lp"] - s_f) / (s_g - s_f) * (h_g - h_f)  # 低圧の入口から等エントロピーで膨張した排気
 
     def det(m: list) -> float:
@@ -3819,7 +3849,7 @@ def _hrsg_plan(eta_g: float, ex_loss: float) -> dict:
             for n, h_in in (("hp-hrsg", h_f), ("ip-hrsg", h_f), ("reheater", h_crh), ("lp-hrsg", h_f))}
     steam = stage["hrsg"]["steam"]
     return {"fuel": ("gt", fuel), "cold": h_f, "power": plant["gross"], "eta": eta, "eta_g": eta_g, "h_ex": h_ex,
-            "x": (h_ex - ex_loss - h_f) / (h_g - h_f), "t_exh": t_exh, "lp_pinch": t_lp - t_l,
+            "x": (h_ex - ex_loss - h_f) / (h_g - h_f), "t_exh": t_exh, "lp_pinch": t_lp - t_l, "pinch": pinch,
             "heat": {"gt": {"tau": t["gt"], "outs": {"grid": stage["gt"]["power"], "exhaust": stage["gt"]["hrsg"]}},
                      "exhaust": {"tau": t["exhaust"], "outs": {**{n: steam * d / q_steam for n, d in duty.items()},
                                                                "stack": stage["hrsg"]["stack"]}}},
@@ -3827,13 +3857,23 @@ def _hrsg_plan(eta_g: float, ex_loss: float) -> dict:
             "work": {"gt": fuel * stage["gt"]["power"], "st": power}}
 
 
-def _refrigerant_plan() -> dict:
+def r32_h(*, low: bool = False, eta: float | None = None) -> dict:
+    """🫧 R32 の h [kJ/kg]: 外気 7 °C（low=True で 2 °C）。圧縮機の出口 = 入口 + 等エントロピーの上がり / 効率
+    （eta を渡すと 🎚️ その値で）。凝縮器の出口は凝縮温度で決まるので外気によらない。"""
+    q = HEAT_PUMP["r32"]
+    st = q["low"] if low else q["h"]
+    e = q["eta"][1] if eta is None else eta
+    return {"evaporator": st["evaporator"], "compressor": st["evaporator"] + (st["compressor_s"] - st["evaporator"]) / e,
+            "condenser": q["h"]["condenser"]}
+
+
+def _refrigerant_plan(eta: float | None = None) -> dict:
     """🫧 冷媒（R32）の輪: 室外の熱交換器（蒸発器）→ 圧縮機 → 室内の熱交換器（凝縮器）→ 膨張弁（h はそのまま）→ 蒸発器。
     🔌 電気は圧縮機で、🌬️ 外気の熱は蒸発器で冷媒に入り、凝縮器で 🏠 部屋へ出る。冷媒の量 = 出す熱 / (h_圧縮機 − h_凝縮器)、
-    τ の比は 1 段目のまま、合計は 封入量 / 冷媒の量（冷媒は g、熱は kJ、速さは kW）。"""
+    τ の比は 1 段目のまま、合計は 封入量 / 冷媒の量（冷媒は g、熱は kJ、速さは kW）。eta は圧縮機の効率（r32_h）。"""
     p = HEAT_PUMP
     q = p["r32"]
-    h = q["h"]
+    h = r32_h(eta=eta)
     m = p["heat"] * 1e3 / (h["compressor"] - h["condenser"])  # g/s
     stages = dict(p["stages"])
     tau = {k: v * q["charge"] * 1e3 / m / sum(stages.values()) for k, v in stages.items()}
@@ -3847,10 +3887,11 @@ def _refrigerant_plan() -> dict:
             "work": {"compressor": work}, "cop": (h["compressor"] - h["condenser"]) / (h["compressor"] - h["evaporator"])}
 
 
-def steam_loop_plan(kind: str = "coal", stages: int | None = None, *, losses: bool = True, scale: float = 1.0) -> dict:
+def steam_loop_plan(kind: str = "coal", stages: int | None = None, *, losses: bool = True, scale: float = 1.0,
+                    pinch: float | None = None) -> dict:
     """水の槽（通る水 flow・行き渡った後の h・τ・行き先の割合 outs・熱だけを抜く pull = (入ってくる水の h, {行き先: 割合})）と、
     熱だけの槽（τ・行き先の割合）を、データと蒸気表から閉じた式で決める。losses=True でデータに無い損（発電機・🪨 給水ポンプ・
-    排気損）を入れる。scale は 🪨 の主蒸気・再熱蒸気の量の倍率。x は排気の乾き度（排気損を引いた h で）。
+    排気損）を入れる。scale は 🪨 の主蒸気・再熱蒸気の量の倍率、pinch は 🌀 の pinch [K]。x は排気の乾き度（排気損を引いた h で）。
     kind="r32" は ❄️ ヒートポンプの 🫧 冷媒の輪（同じ組み立てで、熱の入口が 🔌 電気と 🌬️ 外気、出口が 🏠 部屋）。"""
     if kind == "r32":
         return _refrigerant_plan()
@@ -3858,7 +3899,7 @@ def steam_loop_plan(kind: str = "coal", stages: int | None = None, *, losses: bo
     st_kw, gen_kw, bfp_kw, ex_loss = p["losses"] if losses else (1.0, 1.0, 0.0, 0.0)
     eta_g = gen_kw / st_kw
     if kind == "lng":
-        return _hrsg_plan(eta_g, ex_loss)
+        return _hrsg_plan(eta_g, ex_loss, pinch)
     n = p["stages"] if stages is None else stages
     h, t = p["h"], p["taus"]
     m, r = scale * p["main"], scale * p["reheat"]
@@ -4044,11 +4085,11 @@ def _steam_loop_checks(seed: int) -> tuple[list[dict], dict]:
     checks += [
         check("lng:loop:pinch", "📍", max(abs(a - b) for a, b in zip(split, nn_split)) <= 0.03, value=split[0],
               expected=nn_split[0], tol=0.03,
-              note=f"高圧・中圧の蒸発器の出口でガス = 飽和 + {q['pinch']:.0f} K と置いて解いた 高圧 : 中圧 : 低圧 = "
+              note=f"高圧・中圧の蒸発器の出口でガス = 飽和 + {lng['pinch']:.0f} K と置いて解いた 高圧 : 中圧 : 低圧 = "
                    + " : ".join(f"{x:.1%}" for x in split) + "。西名古屋 7 号系列の蒸発量（246 : 59 : 36 t/h）は "
                    + " : ".join(f"{x:.1%}" for x in nn_split) + f"、どれも 3 点以内（ガスタービンの出口 {lng['t_exh']:.0f} °C）"),
-        check("lng:loop:lp-pinch", "📍", lng["lp_pinch"] >= q["pinch"], value=lng["lp_pinch"], expected=q["pinch"],
-              note=f"残りで作る低圧の蒸発器の出口でも、ガスは飽和より {lng['lp_pinch']:.1f} K 熱い（{q['pinch']:.0f} K 以上なので作れる）"),
+        check("lng:loop:lp-pinch", "📍", lng["lp_pinch"] >= lng["pinch"], value=lng["lp_pinch"], expected=lng["pinch"],
+              note=f"残りで作る低圧の蒸発器の出口でも、ガスは飽和より {lng['lp_pinch']:.1f} K 熱い（{lng['pinch']:.0f} K 以上なので作れる）"),
         check("lng:loop:isentropic", "📐", 0.85 <= lng["eta"] <= 0.95 and 0.85 <= eta_ip <= 0.95, value=lng["eta"],
               expected=0.9,
               note=f"蒸気タービンの出力に合わせて解いた 高圧・低圧の内部効率 {lng['eta']:.3f}、データから決まる中圧 {eta_ip:.3f}"
@@ -4068,6 +4109,26 @@ def _steam_loop_checks(seed: int) -> tuple[list[dict], dict]:
         c = item["value"]
         net = steam_loop_network("coal", slow=c, t_fuel=t_end)
         checks += _loop_run_checks(f"coal:loop:slow={item['label']}:", plan, net, net.run(t_end))
+    # 🎚️ pinch を出典の幅で振る: 西名古屋と 3 点以内に収まる範囲と、どの値でも低圧が作れるか
+    def nn_gap(pin: float) -> tuple[float, float]:
+        pl = steam_loop_plan("lng", pinch=pin)
+        fl = [pl["water"][n]["flow"] for n in ("hp-hrsg", "ip-hrsg", "lp-hrsg")]
+        return max(abs(x / sum(fl) - b) for x, b in zip(fl, nn_split)), pl["lp_pinch"] - pin
+
+    lo_p, use_p, hi_p = q["pinch"]
+    gaps = {x: nn_gap(x) for x in sweep_points(seed + 11, q["pinch"])}
+    edge = bisection(lambda x: nn_gap(x)[0] <= 0.03, lo_p, hi_p, steps=48)
+    checks.append(check("lng:loop:pinch:sweep", "🎚️", use_p < edge and all(g[1] >= 0.0 for g in gaps.values()), value=edge,
+                        expected=use_p, note=f"pinch を出典の {lo_p:g}〜{hi_p:g} K で振ると、西名古屋からのずれは "
+                        + "・".join(f"{x:.1f} K で {100 * g[0]:.1f} 点" for x, g in gaps.items())
+                        + f"。3 点以内に収まるのは pinch ≤ {edge:.1f} K（使った {use_p:g} K はその中）。低圧の蒸発器はどの値でも作れる"))
+    # 🎚️ 🪨 ボイラ 94 % は仮置き: 1 段目の 蒸気 → 電気 = 発電端の効率 / ボイラ なので、3 点以内に収まるボイラの効率の下限を出す
+    eff = thermal_plan("coal")["efficiency"]
+    b_edge = bisection(lambda b: abs(share - eff / b) > 0.03, 0.5, 1.0, steps=48)
+    b_use = thermal_plan("coal")["reach"]["steam"]
+    checks.append(check("coal:loop:coal:boiler", "🎚️", b_edge < b_use, value=b_edge, expected=b_use,
+                        note=f"1 段目の 蒸気 → 電気 は 発電端 {eff:.0%} / ボイラ。橘湾 2 号から出した {share:.3f} と 3 点以内なのは"
+                             f"ボイラ ≥ {b_edge:.1%}（仮置きの {b_use:.0%} はその上。出典の幅は見つからず、境目だけ）"))
     summary["coal"] = {"h_ex": plan["h_ex"], "x_by_stages": {str(n): x for n, x in xs.items()}, "x_lossless": x0,
                        "generator": plan["eta_g"], "feed_pump_mw": plan["pump"], "flow_for_wet": flow,
                        "steam_to_power": share, "q_in_mw": plan["q_in"], "sea_mw": plan["sea"],
@@ -4075,7 +4136,9 @@ def _steam_loop_checks(seed: int) -> tuple[list[dict], dict]:
                        "condenser_share_of_main": plan["water"]["condenser"]["flow"] / p["main"]}
     summary["lng"] = {"steam_t_h": sum(flows) * 3.6, "split": split, "t_exh": lng["t_exh"], "lp_pinch": lng["lp_pinch"],
                       "h_ex": lng["h_ex"], "eta": lng["eta"], "eta_ip": eta_ip, "wetness": wet, "wetness_no_reheat": wet_once,
-                      "t_h_per_mw": per_mw, "gt_st": gt_st, "sea_mw": lng["sea"], "cooling_rise": rise}
+                      "t_h_per_mw": per_mw, "gt_st": gt_st, "sea_mw": lng["sea"], "cooling_rise": rise,
+                      "pinch_edge_k": edge, "pinch_gap": {f"{x:.2f}": g[0] for x, g in gaps.items()}}
+    summary["coal"]["boiler_edge"] = b_edge
     return checks, summary
 
 
@@ -4085,8 +4148,9 @@ def _steam_loop_checks(seed: int) -> tuple[list[dict], dict]:
 # （外気 7 °C・室内 20 °C）で 3.6 kW を 705 W で出す。stages は熱が溜まる槽を順に (名前, τ [s])、τ は仮置き。
 # 電気は圧縮機へ、外気の熱は室外の熱交換器へ入り、どちらも冷媒に乗って室内の熱交換器から部屋へ出る。
 # r32 は 🫧 冷媒の輪（同じ機種: R32 を 1.06 kg 封入）。h [kJ/kg] は R32 の物性（Wolfram）で、蒸発温度・過熱度・過冷却度は
-# 建築研究所の式（蒸発 = 外気 − (0.100·凝縮 + 2.95)、過冷却 = 0.245·凝縮 − 1.72、過熱 = 4.49 − 0.036·凝縮）、圧縮機の効率 0.70
-# （Daikin の R32 の検討、モータの損込み。密閉形なので損も冷媒に入る）。凝縮温度 t_cnd はカタログの COP 3.6/0.705 に合う
+# 建築研究所の式（蒸発 = 外気 − (0.100·凝縮 + 2.95)、過冷却 = 0.245·凝縮 − 1.72、過熱 = 4.49 − 0.036·凝縮）。圧縮機は
+# 等エントロピーの出口 compressor_s と効率 eta = (下限, 使う値, 上限)（0.70 は Daikin の R32 の検討、モータの損込み。密閉形なので
+# 損も冷媒に入る。幅は ±0.1: R32 のロータリーを測った例は 160 Hz で約 0.68 の山、arXiv 2407.11080）。凝縮温度 t_cnd はカタログの COP 3.6/0.705 に合う
 # 39 °C（送風機の分は入れない）。outlet は 2.8 kW 級の暖房定格で測った吹き出しの空気 °C（JSRAE）。low は外気 2 °C（JIS の
 # 暖房低温）の h、defrost は 5 °C 未満・湿度 8 割以上で掛ける除霜の補正（建築研究所）、jsrae は同じ 2.8 kW 級（M社）の
 # カタログの暖房 (kW, W): 標準（外気 7 °C）・低温（2 °C）。
@@ -4099,8 +4163,9 @@ def _steam_loop_checks(seed: int) -> tuple[list[dict], dict]:
 # 行き渡った後の温度には効かない）、outs は並べる 2 部屋の外気 °C。
 HEAT_PUMP = {"heat": 3.6, "power": 0.705, "t_room": 20.0, "t_out": 7.0, "dt": 1.0, "scene": (256.0, 2),
              "stages": (("evaporator", 16.0), ("compressor", 8.0), ("condenser", 32.0)),
-             "r32": {"h": {"evaporator": 519.12, "compressor": 582.81, "condenser": 257.36}, "t_cnd": 39.0, "charge": 1.06,
-                     "outlet": 32.4, "low": {"t_out": 2.0, "evaporator": 517.94, "compressor": 592.30},
+             "r32": {"h": {"evaporator": 519.12, "compressor_s": 563.70, "condenser": 257.36}, "eta": (0.60, 0.70, 0.80),
+                     "t_cnd": 39.0, "charge": 1.06, "outlet": 32.4,
+                     "low": {"t_out": 2.0, "evaporator": 517.94, "compressor_s": 569.99},
                      "defrost": 0.77, "jsrae": ((3.6, 910.0), (3.5, 1320.0)), "scene": (512.0, 4)},
              "max": {"cooling": 2.8, "heat_max": 8.8, "frost": 5.0, "catalog": ((2.0, 6.4), (-7.0, 5.9), (-15.0, 5.2)),
                      "bri": ((0.000181, 0.002322, 0.003556), (-0.000184, 0.013904, 0.993431),
@@ -4137,10 +4202,10 @@ def house_balance(*, iso: bool = False) -> float:
     return bisection(lambda t: heat_pump_max(t) < house_load(t, iso=iso), -40.0, HEAT_PUMP["max"]["frost"])
 
 
-def house_network(t_outs=None, *, t_end: float | None = None, dt: float | None = None) -> Network:
+def house_network(t_outs=None, *, slow: float = 1.0, t_end: float | None = None, dt: float | None = None) -> Network:
     """🏠 部屋ごと（room+2 など、外気 °C）の熱: ヒートポンプは要る分（家の暖房負荷）を出し、最大出力が足りなければ最大のまま。
     人・家電・日射の分 UA·(室温 − t0) も入る。部屋の熱は壁と換気から外気へ UA·(室温 − 外気) で逃げる（τ の弁）。
-    槽の面積 = 熱容量 UA·τ [kJ/K] なので、高さ = 室温 − 外気 [K]。外気の温度の部屋から始める。"""
+    槽の面積 = 熱容量 UA·τ [kJ/K] なので、高さ = 室温 − 外気 [K]。外気の温度の部屋から始める。slow は τ の倍率。"""
     p = HEAT_PUMP
     h = p["house"]
     net = Network(dt=p["dt"] if dt is None else dt)
@@ -4149,9 +4214,9 @@ def house_network(t_outs=None, *, t_end: float | None = None, dt: float | None =
     net.tank("heat", 1.0).tank("outdoor", 1.0)
     for t in h["outs"] if t_outs is None else t_outs:
         name = f"room{t:+g}"
-        net.tank(name, ua * h["tau"])
+        net.tank(name, ua * slow * h["tau"])
         net.pump("heat", name, rate=min(house_load(t), heat_pump_max(t)) + ua * (p["t_room"] - h["t0"]))
-        net.valve(name, "outdoor", tau=h["tau"])
+        net.valve(name, "outdoor", tau=slow * h["tau"])
     steps = int(round(t_end / net.dt))
     net.nodes["heat"]["v"] = sum(ln["amount"] for ln in net.links if ln["src"] == "heat") * steps
     return net
@@ -4256,11 +4321,17 @@ def e32_heat_pump(seed: int = 32) -> dict:
     net = steam_loop_network("r32", t_fuel=t_loop)
     checks += _loop_run_checks("r32:loop:", loop, net, net.run(t_loop))
     cat, h3 = p["heat"] / p["power"], q["h"]["condenser"]
-    low = q["low"]
-    cop_low = (low["compressor"] - h3) / (low["compressor"] - low["evaporator"])
-    ratio = cop_low / loop["cop"] * q["defrost"]
+
+    def cop_ratio(eta: float | None = None) -> tuple[float, float]:  # 外気 2 °C の COP と、7 °C に対する比（除霜込み）
+        low = r32_h(low=True, eta=eta)
+        c = (low["compressor"] - h3) / (low["compressor"] - low["evaporator"])
+        return c, c / _refrigerant_plan(eta)["cop"] * q["defrost"]
+
+    cop_low, ratio = cop_ratio()
     (q7, w7), (q2, w2) = q["jsrae"]
     want = (q2 / w2) / (q7 / w7)
+    lo_e, use_e, hi_e = q["eta"]
+    swept = {e: cop_ratio(e)[1] for e in sweep_points(seed + 4, q["eta"])}
     m = loop["water"]["condenser"]["flow"]
     checks += [
         check("r32:loop:cop", "📐", abs(loop["cop"] / cat - 1.0) <= 0.01, value=loop["cop"], expected=cat, tol=0.01,
@@ -4272,6 +4343,12 @@ def e32_heat_pump(seed: int = 32) -> dict:
               note=f"外気 7 → 2 °C で冷媒の COP は {loop['cop']:.2f} → {cop_low:.2f}（{cop_low / loop['cop']:.3f} 倍、蒸発温度が下がる）。"
                    f"除霜の補正 {q['defrost']:g} を掛けて {ratio:.3f} 倍。2.8 kW 級（M社）のカタログ 3.6 kW / 910 W → "
                    f"3.5 kW / 1,320 W の {want:.3f} 倍と 3 % 以内"),
+        check("r32:cop:outdoor:eta", "🎚️", all(abs(r / want - 1.0) <= 0.03 for r in swept.values()),
+              value=max(abs(r / want - 1.0) for r in swept.values()), expected=0.0, tol=0.03,
+              note=f"圧縮機の効率を {lo_e:g}〜{hi_e:g} で振っても、7 → 2 °C の COP の比は "
+                   + "・".join(f"{e:.2f} で {r:.3f}" for e, r in swept.items())
+                   + f"（カタログ {want:.3f}）でどれも 3 % 以内。効率は COP そのものには効くが、比ではほぼ打ち消す"
+                     f"（凝縮温度は {use_e:g} で合わせた {q['t_cnd']:g} °C のまま）"),
     ]
     # 🏠 3 段目: 外気で落ちる最大出力 × 部屋から逃げる熱 → バランス点。逃げた熱は外気へ戻る（熱も外気から来て外気へ帰る）
     mx, h = p["max"], p["house"]
@@ -4306,6 +4383,14 @@ def e32_heat_pump(seed: int = 32) -> dict:
                             note=f"外気 {t:g} °C の部屋は {t + q_in / ua:.2f} °C で落ち着く（入る熱 {q_in:.2f} kW = 逃げる熱 UA·(室温 − 外気)）"
                                  + ("。バランス点より冷たいので最大出力でも 20 °C に届かない" if short else "。要る分だけ出して 20 °C")))
     checks.append(conserved("house:conserve", res))
+    for item in random_scales(seed + 3, 2, n_min=0, n_max=1):  # 🟢 部屋の τ を c 倍（0.1〜9.99）: 落ち着く温度は同じ
+        c = item["value"]
+        r = house_network(slow=c, t_end=c * t_room, dt=60.0).run(c * t_room)
+        worst = max(abs(t + from_q(r["volumes_q"][f"room{t:+g}"]) / (ua * c * h["tau"])
+                        - t - (min(house_load(t), heat_pump_max(t)) + ua * (p["t_room"] - h["t0"])) / ua) for t in h["outs"])
+        checks.append(check(f"house:slow={item['label']}", "🟢", worst <= 1e-9, value=worst, tol=1e-9,
+                            note=f"部屋の τ（仮置きの {h['tau']:g} s）を {c:.3g} 倍にしても、落ち着く室温は同じ（1e-9 K 以内）。"
+                                 "τ は温まる速さだけを決め、入る熱 = 逃げる熱 の温度は UA だけで決まる"))
     summary_house = {"ua_kw_k": ua, "balance_c": t_b, "balance_catalog_c": t_cat, "balance_iso_c": t_iso,
                      "room_c": {f"{t:g}": t + (min(house_load(t), heat_pump_max(t)) + ua * (p["t_room"] - h["t0"])) / ua
                                 for t in h["outs"]},
