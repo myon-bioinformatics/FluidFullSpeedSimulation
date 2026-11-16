@@ -895,6 +895,216 @@
         256.0
       ],
       "conserved": true
+    },
+    {
+      "id": "D28",
+      "scene": "csf",
+      "icon": "🧠",
+      "fluid": "water",
+      "fill": null,
+      "file": "D28_csf_water.gif",
+      "bytes": 6266,
+      "sha256": "8686ecd102247008d1279ae64d22731d634d811584a61664c31883d059088621",
+      "frames": 40,
+      "canvas": "168x160",
+      "kind": "section",
+      "columns": [
+        "ventricles-1",
+        "subarachnoid-1",
+        "ventricles-2",
+        "subarachnoid-2"
+      ],
+      "t": [
+        36.0,
+        1440.0
+      ],
+      "conserved": true
+    },
+    {
+      "id": "D29",
+      "scene": "steam-loop",
+      "icon": "💧",
+      "fluid": "water",
+      "fill": "🟧",
+      "file": "D29_steam-loop_water.gif",
+      "bytes": 31681,
+      "sha256": "55a9614fbc807b05824bb3fc7f3dbf5be1c186db53880c333c729e73b0883630",
+      "frames": 40,
+      "canvas": "688x160",
+      "kind": "section",
+      "columns": [
+        "boiler",
+        "hp",
+        "reheater",
+        "lp-1",
+        "lp-2",
+        "lp-3",
+        "lp-4",
+        "lp-5",
+        "lp-6",
+        "condenser",
+        "heater-1",
+        "heater-2",
+        "heater-3",
+        "heater-4",
+        "heater-5",
+        "heater-6",
+        "feed"
+      ],
+      "t": [
+        16.0,
+        2048.0
+      ],
+      "conserved": true
+    },
+    {
+      "id": "D30",
+      "scene": "hrsg-loop",
+      "icon": "♨️",
+      "fluid": "water",
+      "fill": "🟧",
+      "file": "D30_hrsg-loop_water.gif",
+      "bytes": 15765,
+      "sha256": "95f86806ae04b48bcd3a420994e93eeb7df745b594c67387a0de7711e9b5ae1c",
+      "frames": 40,
+      "canvas": "328x160",
+      "kind": "section",
+      "columns": [
+        "hp-hrsg",
+        "hp-st",
+        "ip-hrsg",
+        "reheater",
+        "ip-st",
+        "lp-hrsg",
+        "lp-st",
+        "condenser"
+      ],
+      "t": [
+        16.0,
+        2048.0
+      ],
+      "conserved": true
+    },
+    {
+      "id": "D31",
+      "scene": "part-load",
+      "icon": "📉",
+      "fluid": "water",
+      "fill": "🟧",
+      "file": "D31_part-load_water.gif",
+      "bytes": 35330,
+      "sha256": "2115ecd5e6a7a5164131a81e00b76963252b49367814947ea74c30365e1b460e",
+      "frames": 40,
+      "canvas": "288x160",
+      "kind": "section",
+      "columns": [
+        "fuel",
+        "boiler",
+        "steam",
+        "grid",
+        "aux",
+        "stack",
+        "sea"
+      ],
+      "t": [
+        32.0,
+        2048.0
+      ],
+      "conserved": true
+    },
+    {
+      "id": "D32",
+      "scene": "startup",
+      "icon": "🌅",
+      "fluid": "water",
+      "fill": "🟧",
+      "file": "D32_startup_water.gif",
+      "bytes": 26711,
+      "sha256": "472c396c6591910bba04a25b74a6438eb920538cb105a8e600b9472552507e7c",
+      "frames": 40,
+      "canvas": "288x160",
+      "kind": "section",
+      "columns": [
+        "fuel",
+        "boiler",
+        "steam",
+        "grid",
+        "aux",
+        "stack",
+        "sea"
+      ],
+      "t": [
+        64.0,
+        7628.0
+      ],
+      "conserved": true
+    },
+    {
+      "id": "D33",
+      "scene": "metal",
+      "icon": "🌡️",
+      "fluid": "water",
+      "fill": "🟥",
+      "file": "D33_metal_water.gif",
+      "bytes": 4410,
+      "sha256": "8978ee0858d72fa1d04c46156450e22f5b1b25eccc0689a911a39603d6aed686",
+      "frames": 40,
+      "canvas": "88x160",
+      "kind": "section",
+      "columns": [
+        "off-8h",
+        "off-48h"
+      ],
+      "t": [
+        0.4,
+        52.0
+      ],
+      "conserved": true
+    },
+    {
+      "id": "D34",
+      "scene": "r32-loop",
+      "icon": "🫧",
+      "fluid": "water",
+      "fill": "🟧",
+      "file": "D34_r32-loop_water.gif",
+      "bytes": 5530,
+      "sha256": "25033244cf1cddbe14515586e59da8f7ed011f378f4508b1b1433e3490d005cf",
+      "frames": 40,
+      "canvas": "128x160",
+      "kind": "section",
+      "columns": [
+        "evaporator",
+        "compressor",
+        "condenser"
+      ],
+      "t": [
+        4.0,
+        512.0
+      ],
+      "conserved": true
+    },
+    {
+      "id": "D35",
+      "scene": "house",
+      "icon": "🏠",
+      "fluid": "water",
+      "fill": "🟥",
+      "file": "D35_house_water.gif",
+      "bytes": 5054,
+      "sha256": "de930284b8190c88bf493cdb9fb173f5d93024e20f715564b129534620817a91",
+      "frames": 40,
+      "canvas": "88x160",
+      "kind": "section",
+      "columns": [
+        "room+2",
+        "room-15"
+      ],
+      "t": [
+        0.008333,
+        4.0
+      ],
+      "conserved": true
     }
   ]
 }

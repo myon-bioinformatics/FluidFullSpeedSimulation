@@ -415,6 +415,102 @@
               "alt": "D27 heat-pump"
             }
           ]
+        },
+        {
+          "type": "card",
+          "title": "D28 🧠 csf",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D28_csf_water.gif",
+              "alt": "D28 csf"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "D29 💧 steam-loop",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D29_steam-loop_water.gif",
+              "alt": "D29 steam-loop"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "D30 ♨️ hrsg-loop",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D30_hrsg-loop_water.gif",
+              "alt": "D30 hrsg-loop"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "D31 📉 part-load",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D31_part-load_water.gif",
+              "alt": "D31 part-load"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "D32 🌅 startup",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D32_startup_water.gif",
+              "alt": "D32 startup"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "D33 🌡️ metal",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D33_metal_water.gif",
+              "alt": "D33 metal"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "D34 🫧 r32-loop",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D34_r32-loop_water.gif",
+              "alt": "D34 r32-loop"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "D35 🏠 house",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D35_house_water.gif",
+              "alt": "D35 house"
+            }
+          ]
         }
       ]
     },
