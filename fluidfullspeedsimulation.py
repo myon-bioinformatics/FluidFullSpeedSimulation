@@ -21,6 +21,7 @@ import importlib.util
 import json
 import math
 import random
+import re
 import sys
 from pathlib import Path
 
@@ -3744,6 +3745,7 @@ def _startup_checks(seed: int) -> tuple[list[dict], dict]:
 # 🌀 西名古屋 7-1 号の 1 段目の割合（排熱のうち蒸気へ・蒸気タービンの出力）に、H 級の 3 圧・再熱の蒸気（GE GER-3936A の表 2）を当てた
 #    排熱回収ボイラ: 高圧 165 bar(g)・565 °C、再熱 23.8 bar(g)・565 °C、低圧 2.2 bar(g)・277 °C、排気 0.04064 bar(a)。h・s は蒸気表、
 #    hp_s・ip_s は高圧・中圧の等エントロピー膨張の行き先（再熱・低圧の圧力。再熱器の圧損は入れない）。saturation は排気の圧力の飽和。
+#    t_steam は高圧・再熱の出口 °C（📊 T–Q 線図の熱い端）。
 #    drums は高圧・中圧（= 再熱の圧力）・低圧のドラムの飽和 (°C, h_f, h_g)、pinch は蒸発器の出口のガスと飽和の温度差
 #    (下限, 使う値, 上限) [K]（ふつう 5〜15 K）。中圧の出口 = 低圧の入口（GE は低圧の入口を中圧の排気に揃える）、中圧の過熱器を出た蒸気 = 高圧の排気
 #    （再熱器の前で混ぜても冷えない）と置く。plant は西名古屋 7 号系列（環境アセスの審査書、1 系列・大気 5 °C）: 煙突の出口 °C、
@@ -3761,7 +3763,7 @@ STEAM_LOOP = {
              "furnace": 4.0},
     "stages": 6, "saturation": (137.73, 2560.76, 0.47614, 8.39389), "wet": 0.90,
     "losses": (1088803.0, 1077400.0, 42894.0, 8.377 * 2.326),
-    "lng": {"h": {"hp": 3474.73, "hp_s": 2932.05, "reheat": 3608.14, "ip_s": 2979.81, "lp": 3022.14},
+    "lng": {"h": {"hp": 3474.73, "hp_s": 2932.05, "reheat": 3608.14, "ip_s": 2979.81, "lp": 3022.14}, "t_steam": 565.0,
             "s": {"hp": 6.50996, "lp": 7.58779}, "saturation": (122.54, 2554.16, 0.42619, 8.46769),
             "drums": ((350.35, 1673.79, 2561.23), (223.55, 960.05, 2801.85), (135.88, 571.51, 2728.04)),
             "pinch": (5.0, 10.0, 15.0),
@@ -4960,6 +4962,268 @@ def demo_gif(scene: str, fluid: str = "water", fill: str | None = None, *, scale
         "conserved": res["conservation_error_q"] == 0}
 
 
+# --- 📊 図（plotly_min で SVG を書く。中身は plotly の図 JSON なので、write_html なら plotly.js でもそのまま動く） ----------
+
+def _go():
+    """📊 plotly_min（親リポジトリの tools/stdlib_min。vendor.lock.json で commit に固定）の graph_objects。"""
+    return vendored("plotly_min").graph_objects
+
+
+def _rgba(color: str, alpha: float) -> str:
+    h = color.lstrip("#")
+    return f"rgba({int(h[0:2], 16)},{int(h[2:4], 16)},{int(h[4:6], 16)},{alpha:g})"
+
+
+def _figure(title: str, data, **layout):
+    """README の図の共通: 720×448 px（8 の倍数）、余白も 8 の倍数、文字は plotly_min の既定（メイリオ）。"""
+    margin = layout.pop("margin", {"l": 72, "r": 32, "t": 64, "b": 64})
+    return _go().Figure(data).update_layout(title=title, width=720, height=448, margin=margin, **layout)
+
+
+def _sankey(title: str, nodes, links, unit: str = ""):
+    """ノード (名前, 色) と リンク (元, 先, 量)。ラベルは 名前 + 量（入りと出の大きい方）、帯は行き先の色を薄く。"""
+    size = [max(sum(v for a, _b, v in links if a == i), sum(v for _a, b, v in links if b == i)) for i in range(len(nodes))]
+    trace = _go().Sankey(node={"label": [f"{n} {v:.1f}{unit}" for (n, _c), v in zip(nodes, size)],
+                               "color": [c for _n, c in nodes], "pad": 16, "thickness": 16},
+                         link={"source": [a for a, _b, _v in links], "target": [b for _a, b, _v in links],
+                               "value": [round(v, 6) for _a, _b, v in links],
+                               "color": [_rgba(nodes[b][1], 0.35) for _a, b, _v in links]})
+    return _figure(title, trace, margin={"l": 16, "r": 16, "t": 64, "b": 24})
+
+
+_HEAT, _POWER, _LOSS, _WATER = "#FFA15A", "#00cc96", "#9aa0a6", "#19d3f3"
+
+
+def energy_links(kind: str = "coal") -> tuple[tuple, tuple]:
+    """🔀 燃料 100 の行き先（1 段目の割合のまま。エンジンは thermal_network でこれを ±0 で運ぶ）: (ノード, リンク)。"""
+    p = thermal_plan(kind)
+    st = {name: outs for name, _t, outs in p["stages"]}
+    gross = 100.0 * p["efficiency"]
+    aux = gross * p["aux"]
+    if kind == "coal":
+        steam = 100.0 * st["boiler"]["steam"]
+        nodes = (("燃料", _HEAT), ("ボイラ", _HEAT), ("煙突", _LOSS), ("蒸気", _WATER), ("発電端", _POWER),
+                 ("海（復水器）", _LOSS), ("送電端", _POWER), ("所内", _LOSS))
+        return nodes, ((0, 1, 100.0), (1, 2, 100.0 - steam), (1, 3, steam), (3, 4, gross), (3, 5, steam - gross),
+                       (4, 6, gross - aux), (4, 7, aux))
+    exhaust = 100.0 * st["gt"]["hrsg"]
+    steam = exhaust * st["hrsg"]["steam"]
+    st_power = steam * st["steam"]["power"]
+    nodes = (("燃料", _HEAT), ("ガスタービン", _HEAT), ("排熱回収ボイラ", _HEAT), ("煙突", _LOSS), ("蒸気", _WATER),
+             ("海（復水器）", _LOSS), ("発電端", _POWER), ("送電端", _POWER), ("所内", _LOSS))
+    return nodes, ((0, 1, 100.0), (1, 6, 100.0 - exhaust), (1, 2, exhaust), (2, 3, exhaust - steam), (2, 4, steam),
+                   (4, 6, st_power), (4, 5, steam - st_power), (6, 7, gross - aux), (6, 8, aux))
+
+
+def figure_energy(kind: str = "coal"):
+    """🔀 E31 の燃料 100 の行き先（サンキー図）。"""
+    name = {"coal": "🪨 石炭火力（USC）", "lng": "🌀 LNG 複合（GTCC）"}[kind]
+    return _sankey(f"🔀 {name}: 燃料 100 の行き先（1 段目の割合）", *energy_links(kind))
+
+
+def figure_losses():
+    """🪜 E31 の 🪨 と 🌀: 燃料 100 から損を順に引いて送電端へ（滝グラフを 2 本並べる）。"""
+    traces = []
+    for kind, label in (("coal", "🪨"), ("lng", "🌀")):
+        nodes, links = energy_links(kind)
+        loss = {nodes[b][0]: v for _a, b, v in links if nodes[b][1] == _LOSS}
+        grid = next(v for _a, b, v in links if nodes[b][0] == "送電端")
+        names = [f"{label} {n}" for n in ("燃料", *loss, "送電端")]
+        steps = [100.0, *(-v for v in loss.values()), grid]
+        traces.append(_go().Waterfall(x=names, y=steps, measure=["absolute", *["relative"] * len(loss), "total"],
+                                      text=[f"{abs(v):.1f}" for v in steps], name=label))
+    return _figure("🪜 燃料 100 から送電端まで（損を順に引く）", traces, yaxis_title="燃料 100 に対する割合",
+                   showlegend=False, yaxis_range=[0, 112], xaxis_tickangle=-30,
+                   margin={"l": 72, "r": 32, "t": 64, "b": 104})
+
+
+def tq_lines(pinch: float | None = None) -> dict:
+    """🌡️ 🌀 排熱回収ボイラの T–Q（煙突の側から渡した熱 [MW] と温度 [°C]）。ガスは一直線（比熱一定）、水・蒸気は 3 圧の
+    合成: 蒸発は平らで量は h_g − h_f から正確、節炭・過熱はつなぐ直線（比熱一定の近似）。復水の温度は h_f ÷ 4.18。"""
+    q = STEAM_LOOP["lng"]
+    pl = steam_loop_plan("lng", pinch=pinch)
+    w = pl["water"]
+    m_hp, m_ip, m_lp = (w[n]["flow"] for n in ("hp-hrsg", "ip-hrsg", "lp-hrsg"))
+    (t_h, f_h, g_h), (t_i, f_i, g_i), (t_l, f_l, g_l) = q["drums"]
+    h_c, stack, q_all = q["saturation"][0], q["plant"]["stack"], pl["q_in"]
+    c_g = q_all / (pl["t_exh"] - stack)
+    q_lp = (m_hp + m_ip + m_lp) * (f_l - h_c) / 1e3
+    q_ip, q_hp = c_g * (t_i + pl["pinch"] - stack), c_g * (t_h + pl["pinch"] - stack)
+    water = [(0.0, h_c / 4.18), (q_lp, t_l), (q_lp + m_lp * (g_l - f_l) / 1e3, t_l), (q_ip, t_i),
+             (q_ip + m_ip * (g_i - f_i) / 1e3, t_i), (q_hp, t_h), (q_hp + m_hp * (g_h - f_h) / 1e3, t_h),
+             (q_all, q["t_steam"])]
+    pinches = [(x, t, stack + x / c_g) for x, t in ((q_lp, t_l), (q_ip, t_i), (q_hp, t_h))]
+    return {"gas": [(0.0, stack), (q_all, pl["t_exh"])], "water": water, "pinches": pinches,
+            "lp_join": q_lp + m_lp * (g_l - f_l) / 1e3 + (m_hp + m_ip) * (f_i - f_l) / 1e3}
+
+
+def figure_pinch():
+    """🌡️ ♨️ 🌀 T–Q 線図: ガスと水・蒸気の温度は交わらず、高圧・中圧の蒸発器の入口で pinch だけ近づく。"""
+    go = _go()
+    tq = tq_lines()
+    fig = _figure("🌡️ 🌀 排熱回収ボイラの T–Q 線図（3 圧・再熱）", [
+        go.Scatter(x=[x for x, _t in tq["gas"]], y=[t for _x, t in tq["gas"]], mode="lines", name="ガス（GT の排気）",
+                   line={"color": "#EF553B", "width": 3}),
+        go.Scatter(x=[x for x, _t in tq["water"]], y=[t for _x, t in tq["water"]], mode="lines",
+                   name="水・蒸気（3 圧の合成）", line={"color": "#636efa", "width": 3})],
+        xaxis_title="煙突の側から渡した熱 [MW]", yaxis_title="温度 [°C]", yaxis_range=[0, 650])
+    for (x, t_w, t_g), name in zip(tq["pinches"], ("低圧", "中圧", "高圧")):
+        fig.add_shape(type="line", x0=x, x1=x, y0=t_w, y1=t_g, line={"color": "#444", "width": 1, "dash": "dot"})
+        fig.add_annotation(x=x, y=t_g + 28, text=f"{name} ΔT {t_g - t_w:.1f} K", showarrow=False)
+    return fig
+
+
+def figure_balance():
+    """✖️ 🏠 最大暖房出力（建築研究所の式 × 除霜）と家の暖房負荷（JIS・ISO）: 交わる外気がバランス点。"""
+    go = _go()
+    ts = [-20.0 + 0.5 * k for k in range(75)]
+    cat = HEAT_PUMP["max"]["catalog"]
+    bal = house_balance()
+    fig = _figure("✖️ 🏠 最大暖房出力と家の暖房負荷（交点 = バランス点）", [
+        go.Scatter(x=ts, y=[heat_pump_max(t) for t in ts], mode="lines", name="最大暖房出力（× 除霜）",
+                   line={"color": "#EF553B", "width": 3}),
+        go.Scatter(x=ts, y=[house_load(t) for t in ts], mode="lines", name="家の負荷（JIS）", line={"color": "#636efa"}),
+        go.Scatter(x=ts, y=[house_load(t, iso=True) for t in ts], mode="lines", name="家の負荷（ISO 16358-2）",
+                   line={"color": "#636efa", "dash": "dash"}),
+        go.Scatter(x=[t for t, _q in cat], y=[q for _t, q in cat], mode="markers", name="カタログの低温の最大能力",
+                   marker={"color": "#444", "size": 10, "symbol": "diamond"})],
+        xaxis_title="外気 [°C]", yaxis_title="暖房 [kW]", yaxis_range=[0, 10])
+    fig.add_vline(bal, line={"color": "#444", "width": 1, "dash": "dot"})
+    return fig.add_annotation(x=bal, y=9.3, text=f"バランス点 {bal:.1f} °C".replace("-", "−"), showarrow=False,
+                              xanchor="left")
+
+
+def figure_startup(at: float = 0.5):
+    """📅 🌅 起動の手順（hot = 止まって 8 h、cold = 48 h）: 金属によらない手順 → 🧱 暖機 → 最低負荷から全負荷へ [分]。"""
+    go = _go()
+    rows, parts = [], {"手順": [], "🧱 暖機": [], "負荷上げ": []}
+    agora = []
+    for kind in ("lng", "coal"):
+        p, m = THERMAL["plants"][kind], THERMAL["metal"]
+        for start in ("cold", "hot"):
+            plan = thermal_startup(kind, start, at=at)
+            warm = metal_warmup(kind, m["off"][start]) / 60.0
+            sync, full = plan[1][0] / 60.0, plan[-1][0] / 60.0
+            rows.append(f"{p['icon']} {start}")
+            parts["手順"].append((0.0, sync - warm))
+            parts["🧱 暖機"].append((sync - warm, warm))
+            parts["負荷上げ"].append((sync, full - sync))
+            agora.append(p["startup"][start])
+    colors = {"手順": _LOSS, "🧱 暖機": "#EF553B", "負荷上げ": _POWER}
+    traces = [go.Bar(y=rows, x=[w for _b, w in v], base=[b for b, _w in v], orientation="h", name=k,
+                     marker={"color": colors[k]}) for k, v in parts.items()]
+    for i, (lo, hi) in enumerate(agora):
+        traces.append(go.Scatter(x=[lo, hi], y=[rows[i]] * 2, mode="markers", name="Agora の起動時間（並列まで）",
+                                 showlegend=i == 0, marker={"color": "#444", "size": 10, "symbol": "diamond"}))
+    return _figure(f"📅 🌅 起動の手順と時間（出典の範囲の at = {at:g}）", traces, barmode="overlay",
+                   xaxis_title="止めてからの時間 [分]")
+
+
+def sensitivity_spans(samples: int = 33) -> list[tuple[str, list[float], float]]:
+    """🎚️ 振った仮定ごとに、🔮 のずれ ÷ 許容（1 以下なら 🔮 のまま）を幅の中の samples 点で: (名前, 値の列, 使う値での値)。"""
+    q, hp, m = STEAM_LOOP["lng"], HEAT_PUMP, THERMAL["metal"]
+    nn = [f / sum(q["plant"]["steam"]) for f in q["plant"]["steam"]]
+
+    def pinch(x: float) -> float:
+        fl = [steam_loop_plan("lng", pinch=x)["water"][n]["flow"] for n in ("hp-hrsg", "ip-hrsg", "lp-hrsg")]
+        return max(abs(f / sum(fl) - b) for f, b in zip(fl, nn)) / 0.03
+
+    def metal(tau: float, rate: float) -> float:
+        out = 0.0
+        for kind, p in THERMAL["plants"].items():
+            lo, hi = p["startup"]["cold"]
+            for at in (0.0, 1.0):
+                c = thermal_startup(kind, "cold", at=at, tau=tau, rate=rate)[1][0] / 60.0
+                out = max(out, abs(c - (lo + hi) / 2) / ((hi - lo) / 2))
+        return out
+
+    (q7, w7), (q2, w2) = hp["r32"]["jsrae"]
+    want, h3 = (q2 / w2) / (q7 / w7), hp["r32"]["h"]["condenser"]
+
+    def eta(e: float) -> float:
+        low = r32_h(low=True, eta=e)
+        c = (low["compressor"] - h3) / (low["compressor"] - low["evaporator"])
+        return abs(c / _refrigerant_plan(e)["cop"] * hp["r32"]["defrost"] / want - 1.0) / 0.03
+
+    share = STEAM_LOOP["power"] / steam_loop_plan("coal")["q_in"]
+    eff = thermal_plan("coal")["efficiency"]
+    rows = [("📍 pinch 5〜15 K", pinch, q["pinch"]), ("🧱 温め直し 1〜5.6 K/min", lambda r: metal(m["tau"][1], r), m["rate"]),
+            ("🧱 τ 60〜80 h", lambda t: metal(t, m["rate"][1]), m["tau"]),
+            ("🫧 圧縮機の効率 0.6〜0.8", eta, hp["r32"]["eta"]),
+            ("🪨 ボイラ 90〜96 %（幅は仮）", lambda b: abs(share - eff / b) / 0.03, (0.90, 0.94, 0.96))]
+    return [(name, [f(lo + (hi - lo) * k / (samples - 1)) for k in range(samples)], f(use))
+            for name, f, (lo, use, hi) in rows]
+
+
+def figure_tornado():
+    """🌪️ 🎚️ 仮定を出典の幅で振ったときの 🔮 のずれ ÷ 許容（棒 = 幅の中の最小〜最大、◆ = 使った値）。"""
+    go = _go()
+    rows = sorted(sensitivity_spans(), key=lambda r: max(r[1]) - min(r[1]))
+    names = [n for n, _v, _u in rows]
+    fig = _figure("🌪️ 🎚️ 仮定を振ったときの 🔮 のずれ（1 を超えると外れる）", [
+        go.Bar(y=names, x=[max(v) - min(v) for _n, v, _u in rows], base=[min(v) for _n, v, _u in rows],
+               orientation="h", marker={"color": [_POWER if max(v) <= 1.0 else _HEAT for _n, v, _u in rows]},
+               name="幅の中"),
+        go.Scatter(x=[u for _n, _v, u in rows], y=names, mode="markers", name="使った値",
+                   marker={"color": "#444", "size": 10, "symbol": "diamond"})],
+        xaxis_title="ずれ ÷ 許容", margin={"l": 216, "r": 32, "t": 64, "b": 64}, showlegend=False)
+    return fig.add_vline(1.0, line={"color": "#EF553B", "width": 2, "dash": "dash"})
+
+
+def figure_window():
+    """🧱 τ × 温め直しの速さ: cold の起動時間が Agora の範囲に入るか（ずれ ÷ 半幅、1 以下が中）。"""
+    go = _go()
+    m = THERMAL["metal"]
+    rates = [1.0 + 0.1 * k for k in range(47)]
+    taus = [60.0 + 2.0 * k for k in range(11)]
+    lo_hi = {k: p["startup"]["cold"] for k, p in THERMAL["plants"].items()}
+
+    def worst(tau: float, rate: float) -> float:
+        return max(abs(thermal_startup(k, "cold", at=at, tau=tau, rate=rate)[1][0] / 60.0 - (lo + hi) / 2) / ((hi - lo) / 2)
+                   for k, (lo, hi) in lo_hi.items() for at in (0.0, 1.0))
+
+    z = [[min(worst(t, r), 3.0) for r in rates] for t in taus]
+    return _figure("🧱 cold の起動が Agora の範囲に入る窓（1 以下 = 中）", [
+        go.Heatmap(x=rates, y=taus, z=z, zmin=0.0, zmax=3.0, colorbar={"title": "ずれ ÷ 半幅"},
+                   colorscale=[[0.0, "#2166ac"], [1 / 3, "#f7f7f7"], [1.0, "#b2182b"]]),
+        go.Scatter(x=[m["rate"][1]], y=[m["tau"][1]], mode="markers", name="使った値",
+                   marker={"color": "#444", "size": 12, "symbol": "diamond"})],
+        xaxis_title="温め直しの速さ [K/min]", yaxis_title="τ [h]", margin={"l": 72, "r": 96, "t": 64, "b": 64},
+        showlegend=False)
+
+
+def figure_blood():
+    """🔀 🫀 心拍出量 5 L/min の行き先（教科書の器官の割合）→ 静脈 → 肺。"""
+    p = CIRCULATION
+    names = {"brain": "脳", "coronary": "冠動脈", "kidney": "腎臓", "gut-liver": "消化管・肝臓", "muscle": "筋肉",
+             "skin": "皮膚", "other": "その他"}
+    out = p["output"] * 60.0
+    organs = list(p["flows"])
+    nodes = (("心臓（左）", "#EF553B"), *((names[o], "#FF6692") for o in organs), ("静脈", "#636efa"), ("肺", "#ab63fa"))
+    vein = len(organs) + 1
+    links = (*((0, i + 1, out * p["flows"][o]) for i, o in enumerate(organs)),
+             *((i + 1, vein, out * p["flows"][o]) for i, o in enumerate(organs)), (vein, vein + 1, out))
+    return _sankey("🔀 🫀 心拍出量の行き先（L/min）", nodes, links)
+
+
+# (識別子, アイコン, 図を作る関数, 引数)。F<NN> の番号は並び順（README・demos.json と同じ）
+FIGURES = (("energy-coal", "🔀🪨", figure_energy, ("coal",)), ("energy-gtcc", "🔀🌀", figure_energy, ("lng",)),
+           ("losses", "🪜", figure_losses, ()), ("pinch-tq", "🌡️🌀", figure_pinch, ()),
+           ("balance-point", "✖️🏠", figure_balance, ()), ("startup", "📅🌅", figure_startup, ()),
+           ("sensitivity", "🌪️🎚️", figure_tornado, ()), ("rate-window", "🧱", figure_window, ()),
+           ("blood-flow", "🔀🫀", figure_blood, ()))
+
+
+def figure_ids() -> list[str]:
+    return [f"F{n:02d}" for n in range(1, len(FIGURES) + 1)]
+
+
+def figure_svg(name: str) -> bytes:
+    """FIGURES の 1 枚を SVG のバイト列に（Node からも ``--call figure_svg`` で）。"""
+    _name, _icon, build, args = next(f for f in FIGURES if f[0] == name)
+    return build(*args).to_image("svg")
+
+
 def demo_ids() -> list[str]:
     return [f"D{n:02d}" for n in range(1, len(DEMOS) + 1)]
 
@@ -4971,12 +5235,16 @@ def demo_arg(text: str) -> str:
     for did, (name, *_rest) in zip(demo_ids(), DEMOS):
         if scene == name or k.upper() == did or (k[:1] in "dD" and k[1:].isdigit() and int(k[1:]) == int(did[1:])):
             return did
+    for fid, (name, *_rest) in zip(figure_ids(), FIGURES):  # 📊 F<NN>・図の識別子
+        if k == name or k.upper() == fid or (k[:1] in "fF" and k[1:].isdigit() and int(k[1:]) == int(fid[1:])):
+            return fid
     return text
 
 
 def write_demos(out_dir: str = "docs/demos", *, check: bool = False, scale: int = 8, file_prefix: str = "",
                 file_suffix: str = "", only=None) -> dict:
-    """DEMOS を D01〜 の GIF に書く（名前は <prefix>D<NN>_<場面>_<流体><suffix>.gif、README から貼る）。
+    """DEMOS を D01〜 の GIF に、FIGURES を F01〜 の SVG に書く（名前は <prefix>D<NN>_<場面>_<流体><suffix>.gif・
+    <prefix>F<NN>_<識別子><suffix>.svg、README から貼る）。
 
     隣の demos.json に何をどう描いたかと bytes・sha256（only で一部だけ書いたときは、その分だけ差し替える）。
     check=True なら書かずに、今の GIF とバイト単位で同じかだけ確かめる（README のデモがコードとずれていないか）。
@@ -5002,6 +5270,22 @@ def write_demos(out_dir: str = "docs/demos", *, check: bool = False, scale: int 
                       "fluid": fluid, "fill": fill,
                       "file": name, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(),
                       "status": status, **info})
+    for fid, (fig, icon, _build, _args) in zip(figure_ids(), FIGURES):
+        if wanted is not None and fid not in wanted:
+            continue
+        data = figure_svg(fig)
+        name = f"{file_prefix}{fid}_{fig}{file_suffix}.svg"
+        path = out / name
+        status = "written"
+        if check:
+            status = "missing" if not path.exists() else "same" if path.read_bytes() == data else "differs"
+        else:
+            out.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        size = re.search(rb'width="(\d+)" height="(\d+)"', data)
+        items.append({"id": fid, "scene": fig, "icon": icon, "fluid": None, "fill": None, "file": name,
+                      "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(), "status": status, "frames": 1,
+                      "canvas": f"{int(size[1])}x{int(size[2])}", "kind": "figure", "conserved": True})
     if not check:
         mpath = out / f"{file_prefix}demos{file_suffix}.json"
         kept = {}
@@ -5022,7 +5306,8 @@ def _demos(args) -> int:
         return 0 if out["ok"] else 1
     marks = {"written": "🎞️", "same": "✅", "differs": "❌", "missing": "❓"}
     for it in out["demos"]:
-        print(f"{marks[it['status']]} {it['id']} {it['icon']} {it['scene']:<16} {pw.EMOJI.get(it['fluid'], '🟦')} "
+        print(f"{marks[it['status']]} {it['id']} {it['icon']} {it['scene']:<16} "
+              f"{'📊' if it['kind'] == 'figure' else pw.EMOJI.get(it['fluid'], '🟦')} "
               f"{it['file']}  📐 {it['canvas']}  🎬 {it['frames']}  📦 {it['bytes'] / 1024:.1f} KB")
     return 0 if out["ok"] else 1
 
@@ -5081,12 +5366,12 @@ def build_parser() -> argparse.ArgumentParser:
     drw.add_argument("--out-dir", default="build/pixel", help="書き出し先")
     drw.add_argument("--file-prefix", default="", help="ファイル名の頭に付ける文字列")
     drw.add_argument("--file-suffix", default="", help="ファイル名の末尾（拡張子の前）に付ける文字列")
-    dem = sub.add_parser("demos", help="🎞️ README のデモ GIF（場面ごとに 1 枚）を書く・--check で確かめる",
+    dem = sub.add_parser("demos", help="🎞️ README のデモ GIF（場面ごとに 1 枚）と 📊 図の SVG を書く・--check で確かめる",
                          allow_abbrev=False)
     dem.add_argument("--out-dir", default="docs/demos", help="書き出し先（既定 docs/demos）")
     dem.add_argument("--check", action="store_true", help="書かずに、今の GIF とバイト単位で同じか確かめる（違えば 1）")
-    dem.add_argument("--only", nargs="+", type=demo_arg, choices=demo_ids(), metavar="DEMO",
-                     help="一部だけ（D01・場面の名前・🏛️ などの絵文字）")
+    dem.add_argument("--only", nargs="+", type=demo_arg, choices=demo_ids() + figure_ids(), metavar="DEMO",
+                     help="一部だけ（D01・場面の名前・🏛️ などの絵文字、📊 は F01・図の識別子）")
     dem.add_argument("--scale", type=int, default=8, help="1 マスのピクセル数（既定 8）")
     dem.add_argument("--file-prefix", default="", help="ファイル名の頭に付ける文字列")
     dem.add_argument("--file-suffix", default="", help="ファイル名の末尾（拡張子の前）に付ける文字列")

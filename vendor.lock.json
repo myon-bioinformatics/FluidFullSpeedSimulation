@@ -45,6 +45,15 @@
       "destination": "vendor/fleet_check.py",
       "blob_sha": "dc36ab080078a14cb1e3031be89433a2b04e2849",
       "sha256": "d2fd365d79c71153d1b9f28a4986769af13a48661b34d3e39e4dbc6a7447ee31"
+    },
+    {
+      "repository": "myon-bioinformatics/myon-bioinformatics",
+      "ref": "77b91c98c90a6e7b2cbd5ce612b7629f32b5eb98",
+      "commit": "77b91c98c90a6e7b2cbd5ce612b7629f32b5eb98",
+      "source": "tools/stdlib_min/plotly_min.py",
+      "destination": "vendor/plotly_min.py",
+      "blob_sha": "97e7483bc2b1a348c3add7aa24936976ec8a70c0",
+      "sha256": "516302c5a645631c5ceae576d125666be9d8891bd8bec6ea9ec0f55c67479332"
     }
   ]
 }

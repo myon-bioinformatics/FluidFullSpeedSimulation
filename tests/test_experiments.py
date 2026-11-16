@@ -15,6 +15,7 @@ import contextlib
 import io
 import json
 import math
+import re
 import unittest
 
 import fluidfullspeedsimulation as ffs
@@ -1530,6 +1531,70 @@ class CerebrospinalFluid(unittest.TestCase):
         self.assertEqual(len(normal), 1)  # ふつうの頭は動かない（±0）
         self.assertEqual(blocked, sorted(blocked))
         self.assertEqual(blocked[-1], 16)
+
+
+class Figures(unittest.TestCase):
+    """📊 README の図（vendor の plotly_min で SVG）。図の中の数が実験の値と同じか、絵が安定しているか。"""
+
+    def test_energy_flows_close(self):
+        for kind in ("coal", "lng"):
+            nodes, links = ffs.energy_links(kind)
+            sinks = {b for _a, b, _v in links} - {a for a, _b, _v in links}
+            with self.subTest(kind=kind):
+                self.assertAlmostEqual(sum(v for _a, b, v in links if b in sinks), 100.0, places=9)  # 燃料 100 は全部どこかへ
+                for i in set(range(len(nodes))) - sinks - {0}:  # 途中のノードは 入り = 出
+                    self.assertAlmostEqual(sum(v for _a, b, v in links if b == i), sum(v for a, _b, v in links if a == i),
+                                           places=9)
+                gross = next(v for a, b, v in links if nodes[b][0] == "送電端") + \
+                    next(v for a, b, v in links if nodes[b][0] == "所内")
+                self.assertAlmostEqual(gross, 100.0 * ffs.thermal_plan(kind)["efficiency"], places=9)
+
+    def test_tq_water_stays_below_the_gas(self):
+        q = ffs.STEAM_LOOP["lng"]
+        for pin in ffs.sweep_points(323, q["pinch"]):  # 🎚️ pinch を振っても同じ形
+            tq = ffs.tq_lines(pin)
+            (x0, g0), (x1, g1) = tq["gas"]
+            gap = [g0 + (g1 - g0) * (x - x0) / (x1 - x0) - t for x, t in tq["water"]]
+            with self.subTest(pinch=pin):
+                self.assertAlmostEqual(min(gap[1:]), pin, places=9)  # いちばん近いのは中圧・高圧の蒸発器の入口
+                self.assertAlmostEqual(tq["lp_join"], tq["pinches"][1][0], places=6)  # 低圧の側から積んでも中圧の pinch に着く
+                self.assertAlmostEqual(tq["pinches"][0][2] - tq["pinches"][0][1],
+                                       ffs.steam_loop_plan("lng", pinch=pin)["lp_pinch"], places=9)
+                self.assertEqual([t for _x, t in tq["water"]], sorted(t for _x, t in tq["water"]))
+
+    def test_sensitivity_bars_match_the_checks(self):
+        spans = {name.split()[0] + name.split()[1]: (v, u) for name, v, u in ffs.sensitivity_spans()}
+        self.assertTrue(all(u <= 1.0 for _v, u in spans.values()))  # 使った値ではどれも 🔮 のまま
+        pinch, _u = spans["📍pinch"]
+        self.assertLess(pinch[0], 1.0)
+        self.assertGreater(pinch[-1], 1.0)  # 15 K では外れる（lng:loop:pinch:sweep の境目 12.4 K）
+        rate, _u = spans["🧱温め直し"]
+        self.assertTrue(rate[0] > 1.0 and rate[-1] > 1.0 and min(rate) <= 1.0)  # 1 K/min も 5.6 K/min も外れ、窓だけ中
+
+    def test_startup_bars_are_the_plan(self):
+        fig = ffs.figure_startup().to_dict()
+        bars = [t for t in fig["data"] if t["type"] == "bar"]
+        rows = bars[0]["y"]
+        for i, row in enumerate(rows):
+            icon, start = row.split()
+            kind = next(k for k, p in ffs.THERMAL["plants"].items() if p["icon"] == icon)
+            plan = ffs.thermal_startup(kind, start, at=0.5)
+            ends = [b["base"][i] + b["x"][i] for b in bars]
+            with self.subTest(row=row):
+                self.assertAlmostEqual(ends[1], plan[1][0] / 60.0, places=9)  # 暖機の終わり = 並列
+                self.assertAlmostEqual(ends[2], plan[-1][0] / 60.0, places=9)  # 負荷上げの終わり = 全負荷
+
+    def test_every_figure_is_a_stable_meiryo_svg(self):
+        pm = ffs.vendored("plotly_min")
+        for name, _icon, build, args in ffs.FIGURES:
+            data = ffs.figure_svg(name)
+            with self.subTest(figure=name):
+                self.assertEqual(data, ffs.figure_svg(name))
+                self.assertTrue(data.startswith(b'<svg xmlns="http://www.w3.org/2000/svg" width="720" height="448"'))
+                fonts = set(re.findall(rb'font-family="([^"]+)"', data))
+                self.assertEqual(fonts, {pm.FONT.encode()})
+                fig = build(*args)
+                self.assertEqual(pm.Figure(json.loads(fig.to_json())).to_image(), data)  # plotly の図 JSON から描き直せる
 
 
 if __name__ == "__main__":

@@ -69,6 +69,24 @@
 - 🔁 作り直す: `uv run python fluidfullspeedsimulation.py demos`（`docs/demos/` の GIF と `demos.json` に bytes・sha256）。`demos --check` は書かずにバイト単位で比べ、違えば終了コード 1（CI で確かめる）。`--only 🏛️ D03` で一部だけ
 - 🖼️ 1 場面だけ好きな引数で: `draw 🥢 --view files --frames 60 --rows 24 --fill 🟥`（GIF + PNG + 🧾 受領記録 JSON）
 
+## 📊 図（plotly の図 JSON → SVG）
+
+実験の値をそのまま図にしたもの。親リポジトリの [`plotly_min`](https://github.com/myon-bioinformatics/myon-bioinformatics/blob/main/docs/plotly-min.md)（標準モジュールだけ、`vendor/plotly_min.py` に固定）が plotly の図 JSON から SVG を描く（plotly の `write_image` は Kaleido + Chrome が要るので）。文字はメイリオ。`write_html` なら同じ図が plotly.js で動く。
+
+| 📊 | 見どころ |
+|---|---|
+| ![F01](docs/demos/F01_energy-coal.svg) | **F01 🔀🪨 `energy-coal`**<br>燃料 100 → ボイラ → 蒸気 → 発電端 45.0 → 送電端 42.0。損は煙突 6.0・海（復水器）49.0・所内 3.0（E31 の 1 段目の割合） |
+| ![F02](docs/demos/F02_energy-gtcc.svg) | **F02 🔀🌀 `energy-gtcc`**<br>燃料 100 → ガスタービン 42.6 ＋ 排熱 57.4 → 蒸気 51.3 → 蒸気タービン 20.5。発電端 63.1・送電端 61.4 |
+| ![F03](docs/demos/F03_losses.svg) | **F03 🪜 `losses`**<br>🪨 と 🌀 の滝グラフ。いちばん大きい損はどちらも海（復水器）で、🌀 は排熱をもう一度使う分だけ小さい |
+| ![F04](docs/demos/F04_pinch-tq.svg) | **F04 🌡️🌀 `pinch-tq`**<br>排熱回収ボイラの T–Q 線図。ガス（614 → 88 °C）と水・蒸気（29 → 565 °C）は交わらず、中圧・高圧の蒸発器の入口で pinch 10 K、低圧は 14.9 K まで近づく。蒸発は平らで量は正確、節炭・過熱はつなぐ直線（比熱一定の近似） |
+| ![F05](docs/demos/F05_balance-point.svg) | **F05 ✖️🏠 `balance-point`**<br>最大暖房出力（建築研究所の式 × 除霜、5 °C 未満で 0.77 倍の段）と家の負荷（JIS・ISO）の交点がバランス点 −13.5 °C。◆ はカタログの低温の最大能力 |
+| ![F06](docs/demos/F06_startup.svg) | **F06 📅🌅 `startup`**<br>起動の手順（金属によらない分）→ 🧱 暖機 → 負荷上げ。◆ は Agora の起動時間の範囲（並列まで）。cold と hot の差はほぼ暖機の差 |
+| ![F07](docs/demos/F07_sensitivity.svg) | **F07 🌪️🎚️ `sensitivity`**<br>🟡 の仮定を出典の幅で振ったときの 🔮 のずれ ÷ 許容（棒 = 幅の中、◆ = 使った値、赤い線 = 1）。温め直しの速さがいちばん効き、τ と圧縮機の効率は幅の中ずっと 🔮 のまま |
+| ![F08](docs/demos/F08_rate-window.svg) | **F08 🧱 `rate-window`**<br>τ × 温め直しの速さで、cold の起動が Agora の範囲に入る窓（青〜白 = 中）。◆ は使った 70 h・2 K/min |
+| ![F09](docs/demos/F09_blood-flow.svg) | **F09 🔀🫀 `blood-flow`**<br>心拍出量 5 L/min の行き先（教科書の器官の割合）→ 静脈 → 肺（E30） |
+
+- 🔁 作り直す・確かめる: `demos`（GIF と同じく `demos --check` でバイト単位、`--only F04` で一部）。1 枚だけなら `figure_svg("pinch-tq")`、図そのものは `figure_pinch()` などが plotly の `Figure` を返す
+
 ## 🚀 使い方
 
 ```bash
@@ -725,7 +743,7 @@ uv run python fluidfullspeedsimulation.py draw 🫗 🟩                     # �
 
 ### 🎚️ 🟡 振った仮定
 
-両端と、内側の 1 点（乱数）で振る。境目は二分法。
+両端と、内側の 1 点（乱数）で振る。境目は二分法。図は 📊 F07（どれがどれだけ効くか）・F08（🧱 の窓）。
 
 | 仮定 | 振った幅 | 🔮 が通る範囲 | 外れる所 |
 |---|---|---|---|
