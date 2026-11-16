@@ -507,16 +507,8 @@ class Demos(unittest.TestCase):
         """コミットした GIF と demos.json と README の 3 つが揃っているか（作り直しは CI の demos --check）。"""
         manifest = json.loads((DEMO_DIR / "demos.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["schema"], ffs.DEMOS_SCHEMA)
-        self.assertEqual([d["id"] for d in manifest["demos"]], ffs.demo_ids() + ffs.figure_ids())
+        self.assertEqual([d["id"] for d in manifest["demos"]], ffs.demo_ids())
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        figures = manifest["demos"][len(ffs.DEMOS):]
-        for d, (name, icon, _build, _args) in zip(figures, ffs.FIGURES):  # 📊 SVG の図
-            with self.subTest(figure=d["id"]):
-                data = (DEMO_DIR / d["file"]).read_bytes()
-                self.assertEqual((d["scene"], d["icon"], d["kind"]), (name, icon, "figure"))
-                self.assertEqual(hashlib.sha256(data).hexdigest(), d["sha256"])
-                self.assertIn(f"docs/demos/{d['file']}", readme)
-        self.assertEqual(sorted(p.name for p in DEMO_DIR.glob("*.svg")), sorted(d["file"] for d in figures))
         for d, (scene, fluid, fill, *how) in zip(manifest["demos"], ffs.DEMOS):
             with self.subTest(demo=d["id"]):
                 self.assertEqual((d["scene"], d["fluid"], d["fill"], d["kind"] == "kymo"), (scene, fluid, fill, bool(how)))
@@ -527,8 +519,7 @@ class Demos(unittest.TestCase):
                 self.assertEqual(f"{gif['width']}x{gif['height']}", d["canvas"])
                 self.assertLess(len(data), 128 * 1024)
                 self.assertIn(f"docs/demos/{d['file']}", readme)
-        self.assertEqual(sorted(p.name for p in DEMO_DIR.glob("*.gif")),
-                         sorted(d["file"] for d in manifest["demos"][:len(ffs.DEMOS)]))
+        self.assertEqual(sorted(p.name for p in DEMO_DIR.glob("*.gif")), sorted(d["file"] for d in manifest["demos"]))
 
 
 if __name__ == "__main__":

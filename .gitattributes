@@ -2,5 +2,3 @@
 vendor/* -text
 *.gif binary
 *.png binary
-# 📊 README の図は demos --check でバイト単位に比べるので、改行も変えない
-docs/demos/*.svg -text

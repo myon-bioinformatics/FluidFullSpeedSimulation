@@ -10,7 +10,6 @@ ACCEPTED = {
     "vendor/cli_args.py": "9ff06c4326fc7ba934112abecbc59451ab07be6a",
     "vendor/py_launch.cjs": PARENT_PIN,
     "vendor/fleet_check.py": "81f6aea6231d4490e581443fdeb43a09e6018ff0",
-    "vendor/plotly_min.py": "77b91c98c90a6e7b2cbd5ce612b7629f32b5eb98",  # 📊 親の PR の commit（マージ後に付け替える）
 }
 
 

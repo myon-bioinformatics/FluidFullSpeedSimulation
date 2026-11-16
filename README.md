@@ -66,26 +66,9 @@
 - 🟦 1 段 = 縦いっぱい / 16。縦いっぱいは走らせた中の最大（樋は全区間で共通、水槽はそれぞれ）。いちばん上の段は明るい色（水面）。💴 は中央銀行を除く槽、🪙 ⛏️ は全槽で縦いっぱいを揃えてあるので、その範囲内で列をまたいで量を比べられる。💴 の中央銀行は別スケールで、他の槽と高さを比較できない。🫀 は槽ごと（脳 52.5 mL も静脈 3.2 L も、満ちれば縦いっぱい）。🪨 🌀 は出口 4 つ（送電・所内・煙突・海）を揃え、燃料と段は槽ごと。❄️ は 電気・外気・部屋 を揃える。🧠 はくも膜下腔 2 つを揃え、脳室は槽ごと。💧 ♨️ は比エンタルピーをいちばん熱い槽の値で揃える。📉 🌅 は 🪨 と同じ。🌡️ は 2 つとも動いているときの温度（外気 + 575 K）を縦いっぱいにする。🫧 は 💧 と同じ。🏠 は 2 部屋とも 20 °C を縦いっぱいにする
 - 🟨 は運ばれる物（🍜）、灰色の帯は遅れのある管、下の帯は時刻（最初 → 最後）。色は Ironmate の色 ID と派生規則
 - 🕰️ 時空図: 1 行 = 1 時刻（下へ進む）、濃さ = 水深の段（空 → 流体の shadow を 16 段）。同じ組の列は継ぎ目なしの面。斜めの境目・線が遅れと速さ、縦にまっすぐな線は溜まって待っている所。`draw 🎋 --view kymo` で 1 場面だけ（GIF + PNG + 🧾）
+- 🖼️ 描き分け: 🌊 ここは流量・流体が時間で動く GIF まで。サンキー図・T–Q 線図・トルネード図のような静止の図は [DRAgoWing](https://github.com/myon-bioinformatics/DRAgoWing) が `--jsonl` の 📒 記録から描く（SVG は親の [`plotly_min`](https://github.com/myon-bioinformatics/myon-bioinformatics/blob/main/docs/plotly-min.md)）
 - 🔁 作り直す: `uv run python fluidfullspeedsimulation.py demos`（`docs/demos/` の GIF と `demos.json` に bytes・sha256）。`demos --check` は書かずにバイト単位で比べ、違えば終了コード 1（CI で確かめる）。`--only 🏛️ D03` で一部だけ
 - 🖼️ 1 場面だけ好きな引数で: `draw 🥢 --view files --frames 60 --rows 24 --fill 🟥`（GIF + PNG + 🧾 受領記録 JSON）
-
-## 📊 図（plotly の図 JSON → SVG）
-
-実験の値をそのまま図にしたもの。親リポジトリの [`plotly_min`](https://github.com/myon-bioinformatics/myon-bioinformatics/blob/main/docs/plotly-min.md)（標準モジュールだけ、`vendor/plotly_min.py` に固定）が plotly の図 JSON から SVG を描く（plotly の `write_image` は Kaleido + Chrome が要るので）。文字はメイリオ。`write_html` なら同じ図が plotly.js で動く。
-
-| 📊 | 見どころ |
-|---|---|
-| ![F01](docs/demos/F01_energy-coal.svg) | **F01 🔀🪨 `energy-coal`**<br>燃料 100 → ボイラ → 蒸気 → 発電端 45.0 → 送電端 42.0。損は煙突 6.0・海（復水器）49.0・所内 3.0（E31 の 1 段目の割合） |
-| ![F02](docs/demos/F02_energy-gtcc.svg) | **F02 🔀🌀 `energy-gtcc`**<br>燃料 100 → ガスタービン 42.6 ＋ 排熱 57.4 → 蒸気 51.3 → 蒸気タービン 20.5。発電端 63.1・送電端 61.4 |
-| ![F03](docs/demos/F03_losses.svg) | **F03 🪜 `losses`**<br>🪨 と 🌀 の滝グラフ。いちばん大きい損はどちらも海（復水器）で、🌀 は排熱をもう一度使う分だけ小さい |
-| ![F04](docs/demos/F04_pinch-tq.svg) | **F04 🌡️🌀 `pinch-tq`**<br>排熱回収ボイラの T–Q 線図。ガス（614 → 88 °C）と水・蒸気（29 → 565 °C）は交わらず、中圧・高圧の蒸発器の入口で pinch 10 K、低圧は 14.9 K まで近づく。蒸発は平らで量は正確、節炭・過熱はつなぐ直線（比熱一定の近似） |
-| ![F05](docs/demos/F05_balance-point.svg) | **F05 ✖️🏠 `balance-point`**<br>最大暖房出力（建築研究所の式 × 除霜、5 °C 未満で 0.77 倍の段）と家の負荷（JIS・ISO）の交点がバランス点 −13.5 °C。◆ はカタログの低温の最大能力 |
-| ![F06](docs/demos/F06_startup.svg) | **F06 📅🌅 `startup`**<br>起動の手順（金属によらない分）→ 🧱 暖機 → 負荷上げ。◆ は Agora の起動時間の範囲（並列まで）。cold と hot の差はほぼ暖機の差 |
-| ![F07](docs/demos/F07_sensitivity.svg) | **F07 🌪️🎚️ `sensitivity`**<br>🟡 の仮定を出典の幅で振ったときの 🔮 のずれ ÷ 許容（棒 = 幅の中、◆ = 使った値、赤い線 = 1）。温め直しの速さがいちばん効き、τ と圧縮機の効率は幅の中ずっと 🔮 のまま |
-| ![F08](docs/demos/F08_rate-window.svg) | **F08 🧱 `rate-window`**<br>τ × 温め直しの速さで、cold の起動が Agora の範囲に入る窓（青〜白 = 中）。◆ は使った 70 h・2 K/min |
-| ![F09](docs/demos/F09_blood-flow.svg) | **F09 🔀🫀 `blood-flow`**<br>心拍出量 5 L/min の行き先（教科書の器官の割合）→ 静脈 → 肺（E30） |
-
-- 🔁 作り直す・確かめる: `demos`（GIF と同じく `demos --check` でバイト単位、`--only F04` で一部）。1 枚だけなら `figure_svg("pinch-tq")`、図そのものは `figure_pinch()` などが plotly の `Figure` を返す
 
 ## 🚀 使い方
 
@@ -95,6 +78,7 @@ uv run python fluidfullspeedsimulation.py verify        # ✅ 全実験 → 終�
 uv run python fluidfullspeedsimulation.py list          # 🗂️ 実験の一覧
 uv run python fluidfullspeedsimulation.py fluids        # 🧪 流体の物性
 uv run python fluidfullspeedsimulation.py run flume -v --jsonl plot.jsonl   # 🎋 1 本だけ + 記録
+uv run python fluidfullspeedsimulation.py run E31 --jsonl e31.jsonl       # 📒 静止の図の元（energy:coal・tq・startup・sensitivity・rate-window）→ DRAgoWing が描く
 uv run python fluidfullspeedsimulation.py run 🥢                             # 実験はアイコンでも選べる
 uv run python fluidfullspeedsimulation.py draw 🏛️ 🟩                         # 場面と流体（ブロック）を絵文字のまま
 uv run python fluidfullspeedsimulation.py draw 🥢 🟥                          # 流体でない絵文字は、その色で塗るだけ
@@ -117,7 +101,7 @@ uv run python -m pytest -q                              # 🧪 テスト（pytho
 | 🧮 | `tests/test_fixedq.py` | Q 整数・遅れ・カム |
 | 🧪 | `tests/test_fluids.py` | 物性・閉じた式・🧊 水温・🍯 粘度・🍷 混合物 |
 | 🌊 | `tests/test_network.py` | 回路・🎋 竹の傷み・🍜 麺・🚰 単弁・🧮 丸め方 |
-| 🔬 | `tests/test_experiments.py` | E01〜E29 |
+| 🔬 | `tests/test_experiments.py` | E01〜E33・📒 記録 |
 | 🟦 | `tests/test_pixelwater.py` | ドット絵・断面図・PNG / GIF・🎞️ デモ |
 | ⌨️ | `tests/test_cli.py` | コマンド・絵文字の引数 |
 | 🔒 | `tests/test_fleet.py` | vendor の lock・親 workflow の固定 commit（親の `fleet_check.py`） |
@@ -743,7 +727,7 @@ uv run python fluidfullspeedsimulation.py draw 🫗 🟩                     # �
 
 ### 🎚️ 🟡 振った仮定
 
-両端と、内側の 1 点（乱数）で振る。境目は二分法。図は 📊 F07（どれがどれだけ効くか）・F08（🧱 の窓）。
+両端と、内側の 1 点（乱数）で振る。境目は二分法。図（トルネード図・窓のヒートマップ）は記録 `sensitivity`・`rate-window` から DRAgoWing が描く。
 
 | 仮定 | 振った幅 | 🔮 が通る範囲 | 外れる所 |
 |---|---|---|---|
