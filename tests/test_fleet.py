@@ -9,7 +9,7 @@ PARENT_PIN = "2e450118fde453272de9997608e25c31a984463c"
 ACCEPTED = {
     "vendor/cli_args.py": "9ff06c4326fc7ba934112abecbc59451ab07be6a",
     "vendor/py_launch.cjs": PARENT_PIN,
-    "vendor/fleet_check.py": "6c29503cf17eda856766ddfdf4d66a5b0965a8b1",
+    "vendor/fleet_check.py": "81f6aea6231d4490e581443fdeb43a09e6018ff0",
 }
 
 
