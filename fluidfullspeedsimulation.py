@@ -3389,7 +3389,7 @@ def _thermal_checks(tag: str, kind: str, res: dict, st: dict, t_end: float) -> l
 
 def e31_thermal_power(seed: int = 31) -> dict:
     """🔥 火力発電のエネルギーの行き先。🪨 石炭（USC）と 🌀 LNG のコンバインドサイクルを、燃料 → 熱が溜まる段 → 電気・煙突・海
-    と流す。効率は段ごとの割合の積、遅れは τ の和。Carnot・Curzon–Ahlborn の式とも比べる（水・蒸気の循環は次の段階）。"""
+    と流す。効率は段ごとの割合の積、遅れは τ の和。Carnot・Curzon–Ahlborn の式とも比べる。💧 2 段目は水・蒸気の循環（水は回り、熱は水に乗る）。"""
     t, checks, summary = THERMAL, [], {}
     t_end = 32.0 * max(tau for p in t["plants"].values() for _n, tau, _o in p["stages"])
     for i, (kind, p) in enumerate(t["plants"].items()):
@@ -3434,9 +3434,149 @@ def e31_thermal_power(seed: int = 31) -> dict:
         checks.append(check(f"ca:{name}", "📚", seen < cn and abs(seen - ca) < abs(seen - cn), value=seen, expected=ca,
                             note=f"Carnot {cn:.2f}・CA {ca:.3f}。実測は Carnot より低く、CA に近い"))
         summary.setdefault("curzon_ahlborn_table", {})[name] = {"carnot": cn, "curzon_ahlborn": ca, "observed": seen}
-    return {"params": {"thermal": t, "seed": seed}, "summary": summary, "checks": checks,
+    loop_checks, summary["steam_loop"] = _steam_loop_checks(seed)
+    checks += loop_checks
+    return {"params": {"thermal": t, "steam_loop": STEAM_LOOP, "seed": seed}, "summary": summary, "checks": checks,
             "runs": {kind: thermal_network(kind).run(t["scene"][0], sample_every=t["scene"][1])["series"]
                      for kind in t["plants"]}}
+
+
+# --- E31 の 2 段目: 水・蒸気の循環（💧 水は回り、熱は水に乗って運ばれる） ----------------------------
+
+# 電源開発 橘湾 2 号（1,050 MW、USC）: 主蒸気 3,000 t/h・再熱蒸気 2,490 t/h、主蒸気 25.0 MPa(g)/600 °C、再熱 4.28 MPa(g)/610 °C、
+# 再熱器入口 4.59 MPa(g)/345 °C、節炭器入口の給水 288 °C（日立評論 2001）。比エンタルピー h [kJ/kg] は IAPWS（Wolfram の
+# ThermodynamicData）で、給水は主蒸気の圧力、復水は 5 kPa・32 °C（仮置き）。給水加熱器への抽気は、高圧の分 = 主蒸気 − 再熱蒸気、
+# 低圧の分は給水の熱の釣り合いから解く。lp（低圧側）の h は、出力 1,050 MW に合うように解く平均の値。ボイラ 94 % と τ [s] は仮置き。
+# cooling は (取放水の温度差 K, 海水の比熱 kJ/(kg·K), 密度 kg/m³)、nanko は関西電力 南港の既設（汽力 60 万 kW）の冷却水 (m³/s, MW)。
+STEAM_LOOP = {
+    "power": 1050.0, "main": 3000.0 / 3.6, "reheat": 2490.0 / 3.6, "boiler_efficiency": 0.94, "t_hot": 600.0,
+    "h": {"feed": 1270.11, "boiler": 3492.58, "hp": 3063.79, "reheater": 3694.89, "condenser": 134.09},
+    "taus": {"feed": 120.0, "boiler": 60.0, "hp": 4.0, "reheater": 16.0, "lp": 8.0, "condenser": 120.0, "furnace": 4.0},
+    "cooling": (7.0, 3.99, 1025.0), "nanko": (26.4, 600.0), "dt": 1.0, "scene": (2048.0, 16),
+}
+
+
+def steam_loop_plan() -> dict:
+    """流れ [kg/s] と熱 [MW] を、データと蒸気表から閉じた式で決める。flows は槽ごとの通る水、splits は分かれ方。"""
+    p = STEAM_LOOP
+    h = dict(p["h"])
+    m, r = p["main"], p["reheat"]
+    ext_hp = m - r  # 高圧タービンから給水加熱器へ
+    w_hp = m * (h["boiler"] - h["hp"]) / 1e3
+    h["lp"] = h["reheater"] - (p["power"] - w_hp) * 1e3 / r
+    ext_lp = (m * h["feed"] - ext_hp * h["hp"] - r * h["condenser"]) / (h["lp"] - h["condenser"])
+    cond = r - ext_lp
+    q_main, q_re = m * (h["boiler"] - h["feed"]) / 1e3, r * (h["reheater"] - h["hp"]) / 1e3
+    fuel = (q_main + q_re) / p["boiler_efficiency"]
+    return {"h": h, "flows": {"feed": m, "boiler": m, "hp": m, "reheater": r, "lp": r, "condenser": cond},
+            "splits": {"hp": {"reheater": r / m, "feed": ext_hp / m}, "lp": {"condenser": cond / r, "feed": ext_lp / r}},
+            "heat": {"boiler": q_main, "reheater": q_re, "stack": fuel - q_main - q_re}, "fuel": fuel,
+            "work": {"hp": w_hp, "lp": p["power"] - w_hp}, "sea": cond * (h["lp"] - h["condenser"]) / 1e3}
+
+
+def steam_loop_columns() -> list[str]:
+    """断面図の列（比エンタルピー）: 給水 ｜ ボイラ ｜ 高圧 ｜ 再熱器 ｜ 低圧 ｜ 復水器。"""
+    return ["feed", "boiler", "hp", "reheater", "lp", "condenser"]
+
+
+def _specific_enthalpy(parts: dict) -> float:
+    """断面図で読む高さ = 比エンタルピー [MJ/kg]（水が無い槽は 0）。"""
+    return parts["heat"] / parts["water"] if parts.get("water", 0.0) > 0 else 0.0
+
+
+def steam_loop_network(*, slow: float = 1.0, t_fuel: float | None = None, dt: float | None = None) -> Network:
+    """💧 水（kg）と熱（MJ）を成分に持つ: 給水 → ボイラ → 高圧 → 再熱器 → 低圧 → 復水器 → 給水（抽気は 高圧・低圧 → 給水）。
+    🔥 燃料 → 火炉 → ボイラ・再熱器・煙突（熱だけ）。タービンは熱だけを ⚡ 発電端へ、復水器は熱だけを 🌊 海へ出す。
+    水は行き渡った量から始め、どの槽も復水の h（冷えた状態）。熱の抜き方は、1 ステップを厳密に解いたときに行き渡った後の h が
+    蒸気表の値になるように決める（出ていく水の割合 Φ、熱の割合 g = Φ·(h_入 / h_出 − 1)。dt → 0 で k = k_弁·(h_入 / h_出 − 1)）。
+    弁は 1 ステップに水の Φ·割合 を取るように τ を置く（熱だけを抜く槽では弁どうしを合わせて解かないため。1 本なら τ のまま）。"""
+    p, plan = STEAM_LOOP, steam_loop_plan()
+    h, taus = plan["h"], {k: slow * v for k, v in p["taus"].items()}
+    net = Network(dt=p["dt"] if dt is None else dt, species=("water", "heat"), volume_of=_specific_enthalpy)
+    phi = {k: -math.expm1(-net.dt / taus[k]) for k in plan["flows"]}
+    for name, m in plan["flows"].items():
+        water = m * net.dt / phi[name]  # 行き渡った水の量（1 ステップを厳密に解いた値）
+        net.tank(name, 1.0, parts={"water": water, "heat": water * h["condenser"] / 1e3})
+    for name in ("fuel", "furnace", "grid", "sea", "stack"):
+        net.tank(name, 1.0, parts={})
+    steps = int(round((p["scene"][0] if t_fuel is None else t_fuel) / net.dt))
+    feed = net.pump("fuel", "furnace", rate=plan["fuel"])
+    net.nodes["fuel"]["parts"]["heat"] = net.nodes["fuel"]["v"] = steps * feed["amount"]
+    for dst, q in plan["heat"].items():  # 火炉（熱だけ）→ ボイラ・再熱器・煙突
+        net.valve("furnace", dst, tau=taus["furnace"] * plan["fuel"] / q)
+    loop = {"feed": {"boiler": 1.0}, "boiler": {"hp": 1.0}, "hp": plan["splits"]["hp"], "reheater": {"lp": 1.0},
+            "lp": plan["splits"]["lp"], "condenser": {"feed": 1.0}}
+    for src, outs in loop.items():  # 熱だけを抜く槽では弁が別々に取るので、弁ごとの 1 ステップの割合を Φ·割合 にする
+        for dst, share in outs.items():
+            net.valve(src, dst, tau=-net.dt / math.log1p(-phi[src] * share))
+    for src, dst, h_in in (("hp", "grid", h["boiler"]), ("lp", "grid", h["reheater"]), ("condenser", "sea", h["lp"])):
+        g = phi[src] * (h_in / h[src] - 1.0)
+        net.evaporate(src, dst, rates={"heat": -math.log1p(-g) / net.dt})
+    return net
+
+
+def _steam_loop_checks(seed: int) -> tuple[list[dict], dict]:
+    p, plan = STEAM_LOOP, steam_loop_plan()
+    h, names = plan["h"], steam_loop_columns()
+    t_end = 64.0 * max(p["taus"].values())
+
+    def run_checks(tag: str, net: Network, res: dict, slow: float) -> list[dict]:
+        parts = {n: {sp: from_q(q) for sp, q in res["parts_q"][n].items()} for n in names}
+        last = [(ln, {sp: from_q(q) / res["dt"] for sp, q in moved.items()}) for ln, moved in zip(net.links, net.last_parts)]
+        phi = {n: -math.expm1(-res["dt"] / (slow * p["taus"][n])) for n in names}
+        mass = max(rel_err(parts[n]["water"], plan["flows"][n] * res["dt"] / phi[n]) for n in names)
+        worst_h = max(rel_err(1e3 * _specific_enthalpy(parts[n]), h[n]) for n in names)
+        net_in = {}  # 最後のステップの 入る − 出る（槽ごと・成分ごと、速さ）
+        for ln, moved in last:
+            for end, sign in ((ln["src"], -1.0), (ln["dst"], 1.0)):
+                for sp, q in moved.items():
+                    net_in.setdefault(end, {}).setdefault(sp, 0.0)
+                    net_in[end][sp] += sign * q
+        water_balance = max(abs(net_in[n]["water"]) / plan["flows"][n] for n in names)
+        q_in = sum(m["heat"] for ln, m in last if ln["src"] == "furnace" and ln["dst"] in ("boiler", "reheater"))
+        power, sea = net_in["grid"]["heat"], net_in["sea"]["heat"]
+        return [
+            check(f"{tag}water:±0", "💧", water_balance <= 1e-9, value=water_balance, tol=1e-9,
+                  note="どの槽も 入る水 = 出る水（水は回るだけ）"),
+            check(f"{tag}water:steady", "🎯", mass <= 1e-9, value=mass, tol=1e-9,
+                  note="槽の水 = 通る水 × 滞在時間（離散の定常から始めて、熱が入っても動かない）"),
+            check(f"{tag}enthalpy", "🌡️", worst_h <= 1e-9, value=worst_h, tol=1e-9,
+                  note="行き渡った後の比エンタルピー = 蒸気表の値（主蒸気 3,493・再熱 3,695・給水 1,270・復水 134 kJ/kg）。"
+                       "給水の 1,270 は抽気 2 本と復水が混ざった結果"),
+            close(f"{tag}power", "⚡", power, p["power"], 1e-9, note="発電端 1,050 MW = 高圧の仕事 + 低圧の仕事"),
+            close(f"{tag}first-law", "🧾", q_in, power + sea, 1e-9,
+                  note="ボイラ・再熱器で入る熱 = 電気 + 復水器から海へ（第 1 法則。水が運ぶ熱は回るだけ）"),
+            check(f"{tag}conserve", "⚖️", res["parts_error_q"]["water"] == 0 and res["parts_error_q"]["heat"] == 0,
+                  value=max(res["parts_error_q"].values()), expected=0, tol=0, note="水と熱を別々に 0 ulp"),
+        ]
+
+    net = steam_loop_network(t_fuel=t_end)
+    checks = run_checks("loop:", net, net.run(t_end), 1.0)
+    share = p["power"] / (plan["heat"]["boiler"] + plan["heat"]["reheater"])
+    coal = thermal_plan("coal")["stages"][1][2]["power"]
+    cn, ca = carnot(THERMAL["t_cold"], p["t_hot"]), curzon_ahlborn(THERMAL["t_cold"], p["t_hot"])
+    d_t, c_p, rho = p["cooling"]
+    cooling = plan["sea"] / (c_p * d_t) * 1e3 / rho  # m³/s
+    per_100 = 100.0 * cooling / p["power"]
+    nanko = 100.0 * p["nanko"][0] / p["nanko"][1]
+    checks += [
+        check("loop:carnot", "📐", ca < share < cn, value=share, expected=cn,
+              note=f"蒸気 → 電気 {share:.3f} は Carnot {cn:.3f} より低く、CA {ca:.3f} より高い"),
+        check("loop:coal", "📚", abs(share - coal) <= 0.03, value=share, expected=coal, tol=0.03,
+              note="橘湾 2 号の流量と蒸気表から出した 蒸気 → 電気 の割合は、🪨（磯子級、再熱 620 °C）で解いた割合と 3 点以内"),
+        check("loop:cooling", "🌊", abs(per_100 / nanko - 1.0) <= 0.10, value=per_100, expected=nanko, tol=0.10,
+              note=f"海へ出す {plan['sea']:.0f} MW を 7 °C 上げる海水 = {cooling:.1f} m³/s（100 MW あたり {per_100:.2f}）。"
+                   "南港の既設 26.4 m³/s / 600 MW（補機の冷却水込み・古い汽力）と 1 割以内"),
+    ]
+    for item in random_scales(seed + 10, 2, n_min=1, n_max=1):  # 🎲 どの τ も c 倍（0.1〜0.999）: 状態点は変わらない
+        c = item["value"]
+        net = steam_loop_network(slow=c, t_fuel=t_end)
+        checks += run_checks(f"loop:slow={item['label']}:", net, net.run(t_end), c)
+    summary = {"h_kj_kg": h, "flows_kg_s": plan["flows"], "heat_mw": plan["heat"], "fuel_mw": plan["fuel"],
+               "work_mw": plan["work"], "sea_mw": plan["sea"], "steam_to_power": share,
+               "plant_lhv": p["power"] / plan["fuel"], "cooling_m3_s": cooling, "cooling_per_100mw": per_100,
+               "condenser_share_of_main": plan["flows"]["condenser"] / p["main"]}
+    return checks, summary
 
 
 # --- E32 ヒートポンプ（❄️ 🔥 の裏返し: 電気 + 外気の熱 → 部屋） --------------------------------
@@ -3680,7 +3820,7 @@ EXPERIMENTS = {
             e29_outlet_count),
     "E30": ("circulation", "🫀", "血液の循環（心臓 → 器官 → 心臓: 器官は入る = 出る、V = F·T、一周 60 s、心臓は戻ってきた分しか送れない）",
             e30_circulation),
-    "E31": ("thermal-power", "🔥", "火力発電（燃料 → 熱が溜まる段 → 電気・煙突・海: 効率は割合の積、遅れは τ の和、Carnot・Curzon–Ahlborn と比べる）",
+    "E31": ("thermal-power", "🔥", "火力発電（燃料 → 熱が溜まる段 → 電気・煙突・海: 効率は割合の積、遅れは τ の和、Carnot・Curzon–Ahlborn と比べる。💧 水・蒸気の循環）",
             e31_thermal_power),
     "E32": ("heat-pump", "❄️", "ヒートポンプ（🔥 の裏返し: 電気 + 外気の熱 → 部屋、COP = 1/η_Carnot が上限、発電所の電気で回すと燃料 1 から部屋に η·COP）",
             e32_heat_pump),
@@ -3744,7 +3884,7 @@ SCENE_ICONS = {"🏛": "moniac-rig", "🥢": "somen-flume", "🎋": "flume", "�
                "🍷": "pythagorean-cup", "🫗": "mariotte", "🏺": "water-clock", "🚧": "inertia-limits",
                "⚗": "distillation", "👼": "angels-share", "💴": "money-flow", "🪙": "gold-flow", "⛏": "rare-metal",
                "🚿": "outlet-count", "🫀": "circulation",
-               "🪨": "coal-power", "🌀": "combined-cycle", "❄": "heat-pump", "🧠": "csf"}
+               "🪨": "coal-power", "🌀": "combined-cycle", "❄": "heat-pump", "🧠": "csf", "💧": "steam-loop"}
 
 
 def fluid_arg(text: str) -> str:
@@ -3753,7 +3893,7 @@ def fluid_arg(text: str) -> str:
 
 
 def scene_arg(text: str) -> str:
-    """draw の場面: 名前でも 🏛️ 🥢 🎋 🫙 🌊 🕳️ 🧊 🪵 🍜 🧱 🍽️ 🌧️ 🎍 🍷 🫗 🏺 🚧 ⚗️ 👼 💴 🪙 ⛏️ 🚿 🫀 🪨 🌀 ❄️ 🧠 でもよい。"""
+    """draw の場面: 名前でも 🏛️ 🥢 🎋 🫙 🌊 🕳️ 🧊 🪵 🍜 🧱 🍽️ 🌧️ 🎍 🍷 🫗 🏺 🚧 ⚗️ 👼 💴 🪙 ⛏️ 🚿 🫀 🪨 🌀 ❄️ 🧠 💧 でもよい。"""
     return SCENE_ICONS.get(_plain(text), text)
 
 
@@ -3947,6 +4087,11 @@ def rig_section(scene: str, fluid: str = "water", temp_c: float | None = None, m
         cols = ["ventricles-1", "subarachnoid-1", "ventricles-2", "subarachnoid-2"]
         res["caps"] = dict.fromkeys(cols[1::2], max(from_q(res["volumes_q"][c]) for c in cols[1::2]))
         return res, cols
+    if scene == "steam-loop":  # 💧 冷えた水から火を入れる。高さは比エンタルピー（どこが熱いか）、縦いっぱいは再熱蒸気の h で揃える
+        t_end, every = STEAM_LOOP["scene"]
+        res = steam_loop_network().run(t_end, sample_every=every)
+        res["caps"] = dict.fromkeys(steam_loop_columns(), STEAM_LOOP["h"]["reheater"] / 1e3)
+        return res, steam_loop_columns()
     raise KeyError(f"unknown rig scene {scene!r}")
 
 
@@ -3959,7 +4104,7 @@ HUB_SCENES = {"money-flow": ("money", 64.0, 4), "gold-flow": ("gold", 64.0, 4), 
 THERMAL_SCENES = {"coal-power": "coal", "combined-cycle": "lng"}
 RIG_SCENES = ("moniac-rig", "somen-flume", "noodle-length", "noodle-clog", "chopsticks", "cold-water",
               "bamboo-wear", "rain-runoff", "shishi-odoshi", "pythagorean-cup", "mariotte", "water-clock",
-              "inertia-limits", "distillation", "angels-share", *HUB_SCENES, "outlet-count", "circulation", *THERMAL_SCENES, "heat-pump", "csf")
+              "inertia-limits", "distillation", "angels-share", *HUB_SCENES, "outlet-count", "circulation", *THERMAL_SCENES, "heat-pump", "csf", "steam-loop")
 
 
 def _visc(args) -> dict:
@@ -4030,7 +4175,8 @@ DEMOS = (("moniac-rig", "water", None), ("moniac-drain", "water", None), ("flume
          ("angels-share", "water", "🟧"), ("money-flow", "water", "🟩"), ("gold-flow", "water", "🟨"),
          ("rare-metal", "water", "🟫"), ("outlet-count", "water", None), ("circulation", "water", "🟥"),
          ("coal-power", "water", "🟧"), ("combined-cycle", "water", "🟧"),
-         ("heat-pump", "water", "🟧"), ("csf", "water", None))
+         ("heat-pump", "water", "🟧"), ("csf", "water", None),
+         ("steam-loop", "water", "🟧"))
 DEMOS_SCHEMA = "fluidfullspeedsimulation-demos/1"
 _NEEDS_VS16 = set("🏛🕳🍽🌧⚗⛏❄")  # 絵文字で出すには U+FE0F が要るもの
 

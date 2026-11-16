@@ -8,7 +8,7 @@
 - limits: 🚧 E23 inertia-limits: U 字管の閉じた式、エンジンの単調な緩和、Ritter の解、ダム決壊の外れ方、Joukowsky。
 - distillation: ⚗️ E24 ワインの蒸留（still_network、カット、draw の ⚗️）。
 - angels_share: 👼 天使の取り分（E25）: 較正・閉じた式・RH*・40 % を切る年数・木の吸い込み・描画。
-- hub_flows: 💴 🪙 ⛏️ 同じ配管に流す物を置き換える（E26〜E28）・🚿 出口の数（E29）・🫀 血液の循環（E30）・🔥 火力発電（E31）・❄️ ヒートポンプ（E32）・🧠 脳脊髄液（E33）: 定常・総量・Bateman・決済・描画。
+- hub_flows: 💴 🪙 ⛏️ 同じ配管に流す物を置き換える（E26〜E28）・🚿 出口の数（E29）・🫀 血液の循環（E30）・🔥 火力発電（E31、💧 水・蒸気の循環を含む）・❄️ ヒートポンプ（E32）・🧠 脳脊髄液（E33）: 定常・総量・Bateman・決済・描画。
 """
 
 import contextlib
@@ -1094,6 +1094,42 @@ class ThermalPower(unittest.TestCase):
                 self.assertEqual(got, sorted(got))
             self.assertEqual(res["volumes_q"]["fuel"], 0)  # ちょうど燃やし切る
             self.assertEqual(res["conservation_error_q"], 0)
+
+
+class SteamLoop(unittest.TestCase):
+    """💧 E31 の 2 段目: 水は回り、熱は水に乗って運ばれる（橘湾 2 号の流量 + 蒸気表）。"""
+
+    def test_plan_balances_water_and_heat(self):
+        p, plan = ffs.STEAM_LOOP, ffs.steam_loop_plan()
+        sp_hp, sp_lp = plan["splits"]["hp"], plan["splits"]["lp"]
+        self.assertAlmostEqual(sum(sp_hp.values()), 1.0, places=12)
+        self.assertAlmostEqual(sum(sp_lp.values()), 1.0, places=12)
+        back = p["main"] * sp_hp["feed"] + p["reheat"] * sp_lp["feed"] + plan["flows"]["condenser"]
+        self.assertAlmostEqual(back, p["main"], places=9)  # 給水に戻る水 = 主蒸気
+        q_in = plan["heat"]["boiler"] + plan["heat"]["reheater"]
+        self.assertAlmostEqual(q_in, p["power"] + plan["sea"], places=9)  # 第 1 法則
+        h = plan["h"]
+        mixed = (p["main"] * sp_hp["feed"] * h["hp"] + p["reheat"] * sp_lp["feed"] * h["lp"]
+                 + plan["flows"]["condenser"] * h["condenser"]) / p["main"]
+        self.assertAlmostEqual(mixed, h["feed"], places=9)  # 抽気 2 本 + 復水が混ざって給水の h
+        self.assertTrue(h["condenser"] < h["feed"] < h["lp"] < h["hp"] < h["boiler"] < h["reheater"])
+
+    def test_water_does_not_move_while_the_plant_heats_up(self):
+        for item in random_scales(312, 3, n_min=1, n_max=1):  # dt 0.1〜0.999 s
+            net = ffs.steam_loop_network(dt=item["value"], t_fuel=64.0)
+            start = {n: net.nodes[n]["parts"]["water"] for n in ffs.steam_loop_columns()}
+            res = net.run(64.0)
+            with self.subTest(dt=item["label"]):
+                for n, w in start.items():
+                    self.assertAlmostEqual(res["parts_q"][n]["water"] / w, 1.0, places=9)
+                self.assertEqual(res["parts_error_q"], {"water": 0, "heat": 0})
+
+    def test_scene(self):
+        self.assertEqual(ffs.scene_arg("💧"), "steam-loop")
+        res, cols = ffs.rig_section("steam-loop")
+        last = pw.network_frames(res, cols, frames=None, rows=16)["frames"][-1]["counts"]
+        got = dict(zip(cols, last))
+        self.assertTrue(got["reheater"] >= got["boiler"] > got["hp"] > got["lp"] > got["feed"] > got["condenser"])
 
 
 class HeatPump(unittest.TestCase):

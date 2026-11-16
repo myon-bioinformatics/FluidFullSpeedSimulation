@@ -919,6 +919,32 @@
         1440.0
       ],
       "conserved": true
+    },
+    {
+      "id": "D29",
+      "scene": "steam-loop",
+      "icon": "💧",
+      "fluid": "water",
+      "fill": "🟧",
+      "file": "D29_steam-loop_water.gif",
+      "bytes": 11745,
+      "sha256": "dfad3757095cb3e7082d7de374dadd51a377b5e79bc7bc4c91d33c0146029aaa",
+      "frames": 40,
+      "canvas": "248x160",
+      "kind": "section",
+      "columns": [
+        "feed",
+        "boiler",
+        "hp",
+        "reheater",
+        "lp",
+        "condenser"
+      ],
+      "t": [
+        16.0,
+        2048.0
+      ],
+      "conserved": true
     }
   ]
 }

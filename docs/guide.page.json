@@ -427,6 +427,18 @@
               "alt": "D28 csf"
             }
           ]
+        },
+        {
+          "type": "card",
+          "title": "D29 💧 steam-loop",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D29_steam-loop_water.gif",
+              "alt": "D29 steam-loop"
+            }
+          ]
         }
       ]
     },
