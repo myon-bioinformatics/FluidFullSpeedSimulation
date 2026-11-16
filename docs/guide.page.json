@@ -475,6 +475,18 @@
               "alt": "D32 startup"
             }
           ]
+        },
+        {
+          "type": "card",
+          "title": "D33 🌡️ metal",
+          "text": "",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D33_metal_water.gif",
+              "alt": "D33 metal"
+            }
+          ]
         }
       ]
     },

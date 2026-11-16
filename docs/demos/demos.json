@@ -1038,6 +1038,28 @@
         7628.0
       ],
       "conserved": true
+    },
+    {
+      "id": "D33",
+      "scene": "metal",
+      "icon": "🌡️",
+      "fluid": "water",
+      "fill": "🟥",
+      "file": "D33_metal_water.gif",
+      "bytes": 4410,
+      "sha256": "8978ee0858d72fa1d04c46156450e22f5b1b25eccc0689a911a39603d6aed686",
+      "frames": 40,
+      "canvas": "88x160",
+      "kind": "section",
+      "columns": [
+        "off-8h",
+        "off-48h"
+      ],
+      "t": [
+        0.4,
+        52.0
+      ],
+      "conserved": true
     }
   ]
 }

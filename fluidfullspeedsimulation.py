@@ -3266,7 +3266,12 @@ def e30_circulation(seed: int = 30) -> dict:
 # part_load は部分負荷の出典: 🪨 630 MW 級 USC の設計の熱消費率 (負荷, kJ/kWh) と試験の (MW, 効率)、🌀 は 50 % 負荷で全負荷の
 # 何割か（UKERC の典型値）、aux は 🪨 660 MW 超臨界の所内率 (負荷, 発電端に対する割合)（🌀 はデータが無いので比例のまま）。
 # min_load は最低負荷の目安（Agora: 最新の石炭 25〜40 %、GTCC 30〜40 %）。startup は Agora の最新の発電所の
-# 起動時間（止まってから 8 時間未満 hot・48 時間超 cold、最低負荷に届くまで、分）と負荷上げの速さ（%/分）の範囲。
+# 起動時間（止まってから 8 時間未満 hot・48 時間超 cold、最低負荷に届くまで、分）と負荷上げの速さ（%/分）の範囲、
+# metal は厚い金属（タービンのロータ・管寄せ・ドラム）が動いているあいだの温度 °C（🪨 主蒸気、🌀 高圧の蒸気）。
+# THERMAL["metal"] は 🧱 起動を決める厚い金属: tau は止まった後に外気へ冷える時定数 [h]（Gülen: 自然に冷える HP ドラム
+# 60〜80 h の真ん中）、rate は温め直してよい速さ [K/分]（Kosman: 超臨界の蒸気タービンで許される 2 K/min）、off は止まって
+# いた時間 [h]（Agora の hot < 8 h・cold > 48 h の境目）、turning は 1 段目の金属が 1,000 °F（537.8 °C）から 500 °F（260 °C）
+# まで冷えるのにかかる時間 [h] の範囲（米国特許 6,898,935: ターニングで 40〜80 h）。
 # curzon_ahlborn は 1975 年の表（名前, 低温 °C, 高温 °C, 実測の効率）。
 THERMAL = {
     "t_cold": 25.0, "dt": 4.0, "scene": (2048.0, 8),
@@ -3275,18 +3280,20 @@ THERMAL = {
                  "t_hot": 600.0, "table": (0.43, 0.45), "min_load": 0.25,
                  "part_load": {"design": ((1.0, 7485.0), (0.75, 7604.0), (0.5, 7920.0)),
                                "test": ((630.0, 0.4592), (300.0, 0.4281)), "aux": ((1.0, 0.0476), (0.65, 0.0595))},
-                 "startup": {"hot": (80.0, 150.0), "cold": (180.0, 360.0), "ramp": (3.0, 6.0)},
+                 "startup": {"hot": (80.0, 150.0), "cold": (180.0, 360.0), "ramp": (3.0, 6.0), "metal": 600.0},
                  "stages": (("boiler", 512.0, {"steam": 0.94, "stack": 0.06}),
                                             ("steam", 64.0, {"power": None, "sea": None}))},
         "lng": {"icon": "🌀", "gross": 1188.2, "lhv_hhv": 0.90, "efficiency": 0.6308, "aux": 1.0 - 56.0 / 57.5,
                 "t_hot": 1600.0, "table": (0.575, 0.64), "min_load": 0.30, "part_load": {"at_half": 0.90},
-                "startup": {"hot": (30.0, 40.0), "cold": (120.0, 180.0), "ramp": (4.0, 8.0)},
+                "startup": {"hot": (30.0, 40.0), "cold": (120.0, 180.0), "ramp": (4.0, 8.0), "metal": 565.0},
                 "stages": (("gt", 8.0, {"power": 0.426, "hrsg": 0.574}),
                                             ("hrsg", 256.0, {"stack": 0.107, "steam": 0.893}),
                                             ("steam", 64.0, {"power": None, "sea": None}))},
     },
     "curzon_ahlborn": (("West Thurrock", 25.0, 565.0, 0.36), ("CANDU", 25.0, 300.0, 0.30),
                        ("Larderello", 80.0, 250.0, 0.16)),
+    "metal": {"tau": 70.0, "rate": 2.0, "off": {"hot": 8.0, "cold": 48.0}, "turning": (537.8, 260.0, 40.0, 80.0),
+              "dt": 60.0, "scene": (52.0 * 3600.0, 24)},
 }
 
 
@@ -3515,7 +3522,8 @@ def e31_thermal_power(seed: int = 31) -> dict:
     part_checks, summary["part_load"] = _part_load_checks(seed, t_end)
     checks += part_checks
     start_checks, summary["startup"] = _startup_checks(seed)
-    checks += start_checks
+    metal_checks, summary["metal"] = _metal_checks(seed)
+    checks += start_checks + metal_checks
     loop_checks, summary["steam_loop"] = _steam_loop_checks(seed)
     checks += loop_checks
     return {"params": {"thermal": t, "steam_loop": STEAM_LOOP, "seed": seed}, "summary": summary, "checks": checks,
@@ -3565,19 +3573,89 @@ def _part_load_checks(seed: int, t_end: float) -> tuple[list[dict], dict]:
     return checks, summary
 
 
-def thermal_startup(kind: str, start: str = "hot", *, at: float = 0.0) -> tuple:
-    """🌅 起動の手順（thermal_network の load に渡す切り替え）: 暖機（無負荷の燃料を燃やし、電気は出さない）→ 起動時間で
-    最低負荷に並列 → 1 分ごとに負荷上げの速さだけ上げて全負荷へ。at は出典の範囲のどこか（0 = 速い側、1 = 遅い側）。
-    起動時間は分に丸める（切り替えが刻み dt に揃う）。"""
-    p = THERMAL["plants"][kind]
-    lo, hi = p["startup"][start]
+def metal_warmup(kind: str, off: float) -> float:
+    """🧱 暖機の時間 [s]: 止まっていた off 時間 [h] で、厚い金属は外気へ冷える（θ = θ₀·e^(−t/τ)、θ は外気より何 K 熱いか）。
+    許される速さ r で温め直すと、温めているあいだも冷え続けるので（dθ/dt = r − θ/τ）θ₀ に戻るまで τ·ln((rτ − θ_off)/(rτ − θ₀))。"""
+    m = THERMAL["metal"]
+    tau, r = 3600.0 * m["tau"], m["rate"] / 60.0
+    hot = THERMAL["plants"][kind]["startup"]["metal"] - THERMAL["t_cold"]
+    return tau * math.log((r * tau - hot * math.exp(-off / m["tau"])) / (r * tau - hot))
+
+
+def metal_network(kind: str = "coal", offs=(8.0, 48.0), *, t_end: float | None = None, dt: float | None = None) -> Network:
+    """🧱 厚い金属の温度（槽の高さ = 外気より何 K 熱いか、槽ごとに off-8h など）: 動いているあいだの温度で止まり、🌬️ 外気へ
+    τ で冷える。止まっていた時間 off [h] で 🔥 許される速さで温め直し（metal_warmup のあいだ）、戻ったらその温度を保つ。"""
+    m = THERMAL["metal"]
+    net = Network(dt=m["dt"] if dt is None else dt)
+    tau, r = 3600.0 * m["tau"], m["rate"] / 60.0
+    hot = THERMAL["plants"][kind]["startup"]["metal"] - THERMAL["t_cold"]
+    t_end = m["scene"][0] if t_end is None else t_end
+    net.tank("burner", 1.0).tank("air", 1.0)
+    for off in offs:
+        name, start = f"off-{off:g}h", 3600.0 * off
+        back = start + metal_warmup(kind, off)
+        net.tank(name, 1.0, volume=hot)
+        net.valve(name, "air", tau=tau)
+        net.pump("burner", name, rate=r, start=start, until=back)
+        net.pump("burner", name, rate=hot / tau, start=back)
+    steps = int(round(t_end / net.dt))
+    net.nodes["burner"]["v"] = sum(  # 温めるのに使う分だけ（ちょうど使い切る）
+        ln["amount"] * max(0, min(steps, ln["until_step"] or steps) - ln["start_step"]) for ln in net.links if ln["src"] == "burner")
+    return net
+
+
+def thermal_startup(kind: str, start="hot", *, at: float = 0.0) -> tuple:
+    """🌅 起動の手順（thermal_network の load に渡す切り替え）: 暖機（無負荷の燃料を燃やし、電気は出さない）→ 最低負荷に並列 →
+    1 分ごとに負荷上げの速さだけ上げて全負荷へ。起動時間 = 🧱 金属を温め直す時間（start は止まっていた時間: "hot" = 8 h・
+    "cold" = 48 h、または h の数）+ 金属によらない手順の分（Agora の hot の起動時間 − 8 h の暖機、負にはしない）。
+    at は出典の範囲のどこか（0 = 速い側、1 = 遅い側）。起動時間は分に丸める（切り替えが刻み dt に揃う）。"""
+    p, m = THERMAL["plants"][kind], THERMAL["metal"]
+    lo, hi = p["startup"]["hot"]
     fast, slow = p["startup"]["ramp"][::-1]
-    t, x, ramp = 60.0 * round(lo + at * (hi - lo)), p["min_load"], (fast + at * (slow - fast)) / 100.0  # 分の刻み
+    off = m["off"][start] if isinstance(start, str) else float(start)
+    fixed = max(0.0, 60.0 * (lo + at * (hi - lo)) - metal_warmup(kind, m["off"]["hot"]))
+    t, x, ramp = 60.0 * round((fixed + metal_warmup(kind, off)) / 60.0), p["min_load"], (fast + at * (slow - fast)) / 100.0
     plan = [(0.0, 0.0)]
     while x < 1.0:
         plan.append((t, x))
         t, x = t + 60.0, x + ramp
     return (*plan, (t, 1.0))
+
+
+def _metal_checks(seed: int) -> tuple[list[dict], dict]:
+    """🧱 止まっていた時間で金属が冷えた分 ÷ 温め直してよい速さ = hot と cold の起動時間の差。"""
+    m = THERMAL["metal"]
+    t0, t1, lo_h, hi_h = m["turning"]
+    hours = m["tau"] * math.log((t0 - THERMAL["t_cold"]) / (t1 - THERMAL["t_cold"]))
+    checks = [check("metal:turning", "📚", lo_h <= hours <= hi_h, value=hours, expected=lo_h,
+                    note=f"τ = {m['tau']:g} h なら 1 段目の金属が 1,000 °F から 500 °F まで冷えるのに {hours:.0f} h。"
+                         f"ターニングを回し続ける時間 {lo_h:.0f}〜{hi_h:.0f} h（米国特許 6,898,935）の中")]
+    summary = {"turning_h": hours}
+    for i, (kind, p) in enumerate(THERMAL["plants"].items()):
+        hot = p["startup"]["metal"] - THERMAL["t_cold"]
+        temp = {s: THERMAL["t_cold"] + hot * math.exp(-off / m["tau"]) for s, off in m["off"].items()}
+        warm = {s: metal_warmup(kind, off) / 60.0 for s, off in m["off"].items()}
+        lo, hi = p["startup"]["cold"]
+        for item in random_scales(seed + 40 + i, 2, n_min=1, n_max=1):  # 🎲 hot の手順の分を出典の範囲のどこかから
+            cold = thermal_startup(kind, "cold", at=item["value"])[1][0] / 60.0
+            checks.append(check(f"{kind}:metal:cold={item['label']}", "🧱", lo <= cold <= hi, value=cold, expected=lo,
+                                note=f"止まって 8 h で金属は {temp['hot']:.0f} °C、48 h で {temp['cold']:.0f} °C まで冷える。"
+                                     f"{m['rate']:g} K/min で温め直すと {warm['hot']:.0f} 分 / {warm['cold']:.0f} 分。hot の起動時間から"
+                                     f"決めた手順の分を足した cold の起動時間 {cold:.0f} 分は Agora の {lo:.0f}〜{hi:.0f} 分の中"))
+        off = m["off"]["cold"]
+        dt = m["dt"]
+        t_end = dt * round((3600.0 * off + metal_warmup(kind, off)) / dt)  # 温め直し終わるステップ
+        net = metal_network(kind, (off,), t_end=t_end)
+        res = net.run(t_end)
+        tau, r = 3600.0 * m["tau"], m["rate"] / 60.0
+        t_w = t_end - 3600.0 * off
+        want = r * tau + (hot * math.exp(-off / m["tau"]) - r * tau) * math.exp(-t_w / tau)
+        checks += [close(f"{kind}:metal:engine", "🧱", from_q(res["volumes_q"][f"off-{off:g}h"]), want, 1e-9,
+                         note=f"金属の槽（高さ = 外気より何 K 熱いか）: {off:g} h 冷えて {t_w / 60:.0f} 分温め直した温度 = "
+                              "閉じた式 rτ + (θ_止 − rτ)·e^(−t/τ)"),
+                   conserved(f"{kind}:metal:conserve", res)]
+        summary[kind] = {"metal_c": temp, "warm_min": warm, "cold_minus_hot_min": warm["cold"] - warm["hot"]}
+    return checks, summary
 
 
 def _startup_checks(seed: int) -> tuple[list[dict], dict]:
@@ -4273,7 +4351,7 @@ SCENE_ICONS = {"🏛": "moniac-rig", "🥢": "somen-flume", "🎋": "flume", "�
                "🍷": "pythagorean-cup", "🫗": "mariotte", "🏺": "water-clock", "🚧": "inertia-limits",
                "⚗": "distillation", "👼": "angels-share", "💴": "money-flow", "🪙": "gold-flow", "⛏": "rare-metal",
                "🚿": "outlet-count", "🫀": "circulation",
-               "🪨": "coal-power", "🌀": "combined-cycle", "❄": "heat-pump", "🧠": "csf", "💧": "steam-loop", "♨": "hrsg-loop", "📉": "part-load", "🌅": "startup"}
+               "🪨": "coal-power", "🌀": "combined-cycle", "❄": "heat-pump", "🧠": "csf", "💧": "steam-loop", "♨": "hrsg-loop", "📉": "part-load", "🌅": "startup", "🌡": "metal"}
 
 
 def fluid_arg(text: str) -> str:
@@ -4282,7 +4360,7 @@ def fluid_arg(text: str) -> str:
 
 
 def scene_arg(text: str) -> str:
-    """draw の場面: 名前でも 🏛️ 🥢 🎋 🫙 🌊 🕳️ 🧊 🪵 🍜 🧱 🍽️ 🌧️ 🎍 🍷 🫗 🏺 🚧 ⚗️ 👼 💴 🪙 ⛏️ 🚿 🫀 🪨 🌀 ❄️ 🧠 💧 ♨️ 📉 🌅 でもよい。"""
+    """draw の場面: 名前でも 🏛️ 🥢 🎋 🫙 🌊 🕳️ 🧊 🪵 🍜 🧱 🍽️ 🌧️ 🎍 🍷 🫗 🏺 🚧 ⚗️ 👼 💴 🪙 ⛏️ 🚿 🫀 🪨 🌀 ❄️ 🧠 💧 ♨️ 📉 🌅 🌡️ でもよい。"""
     return SCENE_ICONS.get(_plain(text), text)
 
 
@@ -4476,6 +4554,15 @@ def rig_section(scene: str, fluid: str = "water", temp_c: float | None = None, m
         cols = ["ventricles-1", "subarachnoid-1", "ventricles-2", "subarachnoid-2"]
         res["caps"] = dict.fromkeys(cols[1::2], max(from_q(res["volumes_q"][c]) for c in cols[1::2]))
         return res, cols
+    if scene == "metal":  # 🌡️ 🪨 止まって 8 h ｜ 48 h で温め直す厚い金属（高さ = 外気より何 K 熱いか、⏱️ は h）
+        t_end, every = THERMAL["metal"]["scene"]
+        offs = tuple(THERMAL["metal"]["off"].values())
+        res = metal_network("coal", offs, t_end=t_end).run(t_end, sample_every=every)
+        for row in res["series"]:
+            row["t"] = round(row["t"] / 3600.0, 6)
+        cols = [f"off-{off:g}h" for off in offs]
+        res["caps"] = dict.fromkeys(cols, THERMAL["plants"]["coal"]["startup"]["metal"] - THERMAL["t_cold"])
+        return res, cols
     if scene in ("part-load", "startup"):  # 📉 🪨 全負荷で燃やし、途中で 50 % へ（無負荷の燃料・所内電力の固定の分は減らない）
         t_end, every = THERMAL["scene"]  # 🌅 止まった状態から hot 起動: 暖機（無負荷の燃料は海へ）→ 25 % で並列 → 全負荷へ
         load = ((0.0, 1.0), (t_end / 2, 0.5))
@@ -4505,7 +4592,7 @@ HUB_SCENES = {"money-flow": ("money", 64.0, 4), "gold-flow": ("gold", 64.0, 4), 
 THERMAL_SCENES = {"coal-power": "coal", "combined-cycle": "lng"}
 RIG_SCENES = ("moniac-rig", "somen-flume", "noodle-length", "noodle-clog", "chopsticks", "cold-water",
               "bamboo-wear", "rain-runoff", "shishi-odoshi", "pythagorean-cup", "mariotte", "water-clock",
-              "inertia-limits", "distillation", "angels-share", *HUB_SCENES, "outlet-count", "circulation", *THERMAL_SCENES, "heat-pump", "csf", "steam-loop", "hrsg-loop", "part-load", "startup")
+              "inertia-limits", "distillation", "angels-share", *HUB_SCENES, "outlet-count", "circulation", *THERMAL_SCENES, "heat-pump", "csf", "steam-loop", "hrsg-loop", "part-load", "startup", "metal")
 
 
 def _visc(args) -> dict:
@@ -4578,9 +4665,10 @@ DEMOS = (("moniac-rig", "water", None), ("moniac-drain", "water", None), ("flume
          ("coal-power", "water", "🟧"), ("combined-cycle", "water", "🟧"),
          ("heat-pump", "water", "🟧"), ("csf", "water", None),
          ("steam-loop", "water", "🟧"), ("hrsg-loop", "water", "🟧"),
-         ("part-load", "water", "🟧"), ("startup", "water", "🟧"))
+         ("part-load", "water", "🟧"), ("startup", "water", "🟧"),
+         ("metal", "water", "🟥"))
 DEMOS_SCHEMA = "fluidfullspeedsimulation-demos/1"
-_NEEDS_VS16 = set("🏛🕳🍽🌧⚗⛏❄♨")  # 絵文字で出すには U+FE0F が要るもの
+_NEEDS_VS16 = set("🏛🕳🍽🌧⚗⛏❄♨🌡")  # 絵文字で出すには U+FE0F が要るもの
 
 
 def scene_icon(scene: str) -> str:

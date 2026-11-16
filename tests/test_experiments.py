@@ -1324,7 +1324,8 @@ class PartLoad(unittest.TestCase):
 
 
 class Startup(unittest.TestCase):
-    """🌅 起動: 暖機（無負荷の燃料、電気は出さない）→ 最低負荷で並列 → 1 分ごとに負荷上げ → 全負荷。"""
+    """🌅 起動: 暖機（無負荷の燃料、電気は出さない）→ 最低負荷で並列 → 1 分ごとに負荷上げ → 全負荷。
+    🧱 起動時間は、止まっていたあいだに冷えた厚い金属を、許される速さで温め直す時間から。"""
 
     def test_schedule(self):
         for kind, p in ffs.THERMAL["plants"].items():
@@ -1339,6 +1340,30 @@ class Startup(unittest.TestCase):
                         steps = [b - a for (_t, a), (_u, b) in zip(load[1:], load[2:])]
                         self.assertLessEqual(max(steps), p["startup"]["ramp"][1] / 100.0 + 1e-12)
                     self.assertGreater(cold[1][0], hot[1][0])  # 止まっていた時間が長いほど暖機が長い
+
+    def test_metal_sets_the_gap_between_hot_and_cold(self):
+        m = ffs.THERMAL["metal"]
+        for kind in ffs.THERMAL["plants"]:
+            offs = sorted(1.0 + 99.0 * item["value"] for item in random_scales(317, 4, n_min=1, n_max=1))  # 🎲 1〜100 h
+            warm = [ffs.metal_warmup(kind, off) for off in offs]
+            with self.subTest(kind=kind):
+                self.assertEqual(warm, sorted(warm))  # 長く止まるほど冷えて、温め直しが長い
+                self.assertAlmostEqual(ffs.metal_warmup(kind, 0.0), 0.0, places=9)
+                gap = ffs.thermal_startup(kind, "cold")[1][0] - ffs.thermal_startup(kind, "hot")[1][0]
+                want = ffs.metal_warmup(kind, m["off"]["cold"]) - ffs.metal_warmup(kind, m["off"]["hot"])
+                self.assertLessEqual(abs(gap - want), 60.0)  # 差 = 冷えた分を温め直す時間（分に丸める）
+                self.assertGreater(ffs.thermal_startup(kind, 100.0)[1][0], ffs.thermal_startup(kind, "cold")[1][0])
+
+    def test_metal_scene(self):
+        self.assertEqual(ffs.scene_arg("🌡️"), "metal")
+        res, cols = ffs.rig_section("metal")
+        self.assertEqual(cols, ["off-8h", "off-48h"])
+        self.assertEqual(res["volumes_q"]["burner"], 0)  # 温めるのに使う分だけ
+        self.assertEqual(res["conservation_error_q"], 0)
+        hot = ffs.THERMAL["plants"]["coal"]["startup"]["metal"] - ffs.THERMAL["t_cold"]
+        low = {c: min(row[f"h:{c}"] for row in res["series"]) for c in cols}
+        self.assertLess(low["off-48h"], low["off-8h"])  # 長く止まった方が深く冷える
+        self.assertAlmostEqual(res["series"][-1]["h:off-8h"] / hot, 1.0, delta=0.01)  # 温め直して戻る
 
     def test_scene(self):
         self.assertEqual(ffs.scene_arg("🌅"), "startup")
