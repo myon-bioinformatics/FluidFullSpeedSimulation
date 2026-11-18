@@ -1027,17 +1027,27 @@ class Circulation(unittest.TestCase):
         self.assertAlmostEqual(r["in"], r["out"], places=12)
         self.assertAlmostEqual(r["in"] * 60.0, 0.15 * 5.0, places=9)  # 脳 750 mL/min
 
-    def test_scene_heart_drains_and_others_fill(self):
+    def test_scene_heart_drains_and_others_fill_then_all_comes_back(self):
         self.assertEqual(ffs.scene_arg("🫀"), "circulation")
         res, cols = ffs.rig_section("circulation")
         self.assertEqual(cols, ffs.circulation_columns())
         view = pw.network_frames(res, cols, frames=None, rows=16)
-        heart = [fr["counts"][0] for fr in view["frames"]]
-        self.assertEqual(heart, sorted(heart, reverse=True))  # 心臓は減るだけ（行き渡るまで戻りが送る速さに届かない）
+        stop = ffs.CIRCULATION["stop"]
+        out = [fr["counts"] for fr in view["frames"] if fr["t"] <= stop]
+        back = [fr["counts"] for fr in view["frames"] if fr["t"] > stop]
+        # ➡️ 往路: 心臓は減るだけ（行き渡るまで戻りが送る速さに届かない）、ほかは増えるだけ
+        self.assertEqual([c[0] for c in out], sorted((c[0] for c in out), reverse=True))
         for col in range(1, len(cols)):
-            filled = [fr["counts"][col] for fr in view["frames"]]
-            self.assertEqual(filled, sorted(filled))
+            self.assertEqual([c[col] for c in out], sorted(c[col] for c in out))
+        # ⬅️ 復路（🛑 拍動を止めた後）: 心臓は増えるだけ、ほかは減るだけで、最後は最初の絵（全部心臓）に戻る
+        self.assertEqual([c[0] for c in back], sorted(c[0] for c in back))
+        for col in range(1, len(cols)):
+            self.assertEqual([c[col] for c in back], sorted((c[col] for c in back), reverse=True))
+        self.assertEqual(back[-1], [16] + [0] * (len(cols) - 1))
         self.assertEqual(res["conservation_error_q"], 0)
+        # 🎞️ GIF は復路のぶんコマを増やし、1 コマの秒は往路だけのときと同じ
+        t_end, _every = ffs.CIRCULATION["scene"]
+        self.assertAlmostEqual(t_end / res["gif_frames"], stop / pw.SECTION_GIF_FRAMES, delta=0.1)
 
 
 class ThermalPower(unittest.TestCase):
