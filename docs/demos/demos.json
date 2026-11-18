@@ -791,9 +791,9 @@
       "fluid": "water",
       "fill": "🟥",
       "file": "D24_circulation_water.gif",
-      "bytes": 43882,
-      "sha256": "b5f63b4b5cc1d2102a8ac551ab9a6cb77bd5196694638dd36c55f28ed334a1bf",
-      "frames": 40,
+      "bytes": 87735,
+      "sha256": "32bf9da7b15537f7740678b7e7a6b5d43f66c1e2a0771a1e49e127122b90c8c5",
+      "frames": 90,
       "canvas": "448x160",
       "kind": "section",
       "columns": [
@@ -811,7 +811,7 @@
       ],
       "t": [
         0.5,
-        128.0
+        288.0
       ],
       "conserved": true
     },

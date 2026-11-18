@@ -3115,8 +3115,10 @@ def e29_outlet_count(seed: int = 29) -> dict:
 # 安静時の大人 1 人。時間は秒、量は L。体積は 血液量 × 割合（Young 2010 の表 1.2 = Guyton の数字、残り 7 % が心臓）、
 # 器官へ行く割合は心拍出量の内訳（Columbia 大 Regional Circulations の表）。器官の割合は細動脈・毛細血管の 7 % を
 # 流れの比で分けたもの（どの器官も滞在時間は同じ）。scene は draw の (秒, 何ステップごとに描くか)。
+# stop は draw で拍動を止める秒（🛑 復路: 行き渡った後に止めると、弁で逆流しないので血が全部心臓に戻り、
+# 最初の絵 = 全部心臓 に戻って一巡する。始まりの「全部心臓」も模型の仮置きなので、終わりも同じ仮置きに戻す）。
 CIRCULATION = {
-    "blood": 5.0, "output": 5.0 / 60.0, "dt": 0.25, "scene": (128.0, 2),
+    "blood": 5.0, "output": 5.0 / 60.0, "dt": 0.25, "scene": (288.0, 2), "stop": 128.0,
     "flows": {"brain": 0.15, "coronary": 0.05, "kidney": 0.22, "gut-liver": 0.25, "muscle": 0.17, "skin": 0.08,
               "other": 0.08},
     "volumes": {"artery": 0.13, "organs": 0.07, "vein": 0.64, "lung": 0.09},
@@ -3138,15 +3140,17 @@ def circulation_columns() -> list[str]:
     return ["heart", "artery", *CIRCULATION["flows"], "vein", "lung"]
 
 
-def circulation_network(*, blood: float | None = None, output: float | None = None, dt: float | None = None) -> Network:
+def circulation_network(*, blood: float | None = None, output: float | None = None, dt: float | None = None,
+                        stop: float | None = None) -> Network:
     """🫀 心臓（ポンプ）→ 動脈 → 器官 7 つ（並列）→ 静脈 → 肺 → 心臓。最初は血液が全部心臓にある。
-    心臓は一定の速さ output [L/s] で送るが、空になればそのときあるだけ（戻ってきた分）しか送れない。"""
+    心臓は一定の速さ output [L/s] で送るが、空になればそのときあるだけ（戻ってきた分）しか送れない。
+    stop [s] を渡すとそこで拍動を止める（🛑 弁は開いたままで逆流しないので、送った血は心臓へ戻り切る）。"""
     p, tau = CIRCULATION, circulation_taus()
     net = Network(dt=p["dt"] if dt is None else dt)
     net.tank("heart", 1.0, volume=p["blood"] if blood is None else blood)
     for name in circulation_columns()[1:]:
         net.tank(name, 1.0)
-    net.pump("heart", "artery", rate=p["output"] if output is None else output)
+    net.pump("heart", "artery", rate=p["output"] if output is None else output, until=stop)
     for organ in p["flows"]:
         net.valve("artery", organ, tau=tau["artery"][organ])
         net.valve(organ, "vein", tau=tau["organ"])
@@ -4940,8 +4944,10 @@ def rig_section(scene: str, fluid: str = "water", temp_c: float | None = None, m
         res["caps"] = dict.fromkeys(cols, OUTLETS["volume"])
         return res, cols
     if scene == "circulation":  # 🫀 最初は全部心臓に。送り出して器官・静脈・肺を通って戻る（⏱️ は秒、縦いっぱいは槽ごと）
-        t_end, every = CIRCULATION["scene"]
-        return circulation_network().run(t_end, sample_every=every), circulation_columns()
+        t_end, every = CIRCULATION["scene"]  # 🛑 stop で拍動を止め、全部心臓に戻るまで（往路 ＋ 復路で一巡）
+        res = circulation_network(stop=CIRCULATION["stop"]).run(t_end, sample_every=every)
+        res["gif_frames"] = round(pw.SECTION_GIF_FRAMES * t_end / CIRCULATION["stop"])  # 1 コマの秒は往路だけのときと同じ
+        return res, circulation_columns()
     if scene in THERMAL_SCENES:  # 🪨 🌀 燃料を燃やし切るまで。出口（送電・所内・煙突・海）は縦いっぱいを揃える（⏱️ は秒）
         kind = THERMAL_SCENES[scene]
         t_end, every = THERMAL["scene"]
@@ -5031,7 +5037,7 @@ def _draw(args) -> int:
         res, cols = section_run(args.scene, args.fluid, args.temp_c, **_visc(args))
         if files:
             rows = args.rows or pw.SECTION_GIF_ROWS
-            frames = args.frames or pw.SECTION_GIF_FRAMES
+            frames = args.frames or res.get("gif_frames", pw.SECTION_GIF_FRAMES)
             replay = {k: v for k, v in {"temp_c": args.temp_c, **_visc(args)}.items() if v is not None}
             out = pw.draw_section(res, cols, args.scene, args.out_dir, frames=frames, rows=rows,
                                   cap_mode=args.cap_mode, fill=args.fill, scale=args.scale,
@@ -5097,15 +5103,15 @@ def scene_icon(scene: str) -> str:
 
 def demo_gif(scene: str, fluid: str = "water", fill: str | None = None, *, scale: int = 8,
              kymo: bool = False) -> tuple[bytes, dict]:
-    """デモの GIF 1 枚（既定の引数だけ）。断面図は 16 段・40 時刻、ドット絵は draw --view files と同じ。
-    kymo=True なら同じ 16 段・40 時刻の 🕰️ 時空図。"""
+    """デモの GIF 1 枚（既定の引数だけ）。断面図は 16 段・40 時刻（場面が gif_frames を持てばその数）、
+    ドット絵は draw --view files と同じ。kymo=True なら同じ段・時刻の 🕰️ 時空図。"""
     if scene in pw.SCENES:
         res = pw.run_pixels(scene, fluid)
         data = pw.gif_bytes(res, scale=scale)
         return data, {"frames": len(res["frames"]), "canvas": f"{res['width'] * scale}x{res['height'] * scale}",
                       "kind": "pixel", "conserved": res["count_error"] == 0}
     res, cols = section_run(scene, fluid)
-    view = pw.network_frames(res, cols, frames=pw.SECTION_GIF_FRAMES, rows=pw.SECTION_GIF_ROWS, fill=fill)
+    view = pw.network_frames(res, cols, frames=res.get("gif_frames", pw.SECTION_GIF_FRAMES), rows=pw.SECTION_GIF_ROWS, fill=fill)
     lay = (pw.kymo_layout if kymo else pw.section_layout)(view, scale)
     return (pw.kymo_gif_bytes if kymo else pw.section_gif_bytes)(view, scale=scale), {
         "frames": len(view["frames"]), "canvas": f"{lay['width']}x{lay['height']}", "kind": "kymo" if kymo else "section",
