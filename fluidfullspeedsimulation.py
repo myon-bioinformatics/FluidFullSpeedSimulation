@@ -4613,7 +4613,7 @@ SCENE_ICONS = {"🏛": "moniac-rig", "🥢": "somen-flume", "🎋": "flume", "�
                "🍷": "pythagorean-cup", "🫗": "mariotte", "🏺": "water-clock", "🚧": "inertia-limits",
                "⚗": "distillation", "👼": "angels-share", "💴": "money-flow", "🪙": "gold-flow", "⛏": "rare-metal",
                "🚿": "outlet-count", "🫀": "circulation",
-               "🪨": "coal-power", "🌀": "combined-cycle", "❄": "heat-pump", "🧠": "csf", "💧": "steam-loop", "♨": "hrsg-loop", "📉": "part-load", "🌅": "startup", "🌡": "metal", "🫧": "r32-loop", "🏠": "house"}
+               "🪨": "coal-power", "🌀": "combined-cycle", "❄": "heat-pump", "🧠": "csf", "💧": "steam-loop", "♨": "hrsg-loop", "📉": "part-load", "🌅": "startup", "🌡": "metal", "🫧": "r32-loop", "🏠": "house", "🧬": "rna-turnover"}
 
 
 def fluid_arg(text: str) -> str:
@@ -4853,6 +4853,27 @@ def balance_rows() -> list[dict]:
                                                                       "iso": True}]
 
 
+def rna_turnover_scene():
+    """同じ量の RNA から、合成速度と半減期を個別に変える。単位は任意量と時間。"""
+    net = Network(dt=1 / 32)
+    initial = 10.0
+    base_rate = initial * math.log(2) / 2
+    # 有限の材料槽から作り、分解した量は回収槽へ送る。
+    net.tank("supply", 1.0, volume=100).tank("degraded", 1.0)
+    columns = []
+    for name, synthesis, half_life in (("baseline", base_rate, 2),
+                                       ("double-synthesis", 2 * base_rate, 2),
+                                       ("double-half-life", base_rate, 4)):
+        columns.append(name)
+        net.tank(name, 1.0, volume=initial)
+        net.pump("supply", name, rate=synthesis, until=4)
+        net.valve(name, "degraded", tau=half_life / math.log(2))
+    result = net.run(8, sample_every=4)
+    result["series"].insert(0, {"t": 0.0, **{f"h:{name}": initial for name in columns}})
+    result["caps"] = dict.fromkeys(columns, 20.0)
+    return result, columns
+
+
 def rig_section(scene: str, fluid: str = "water", temp_c: float | None = None, mu: float | None = None,
                 mu_scale: float | None = None) -> tuple[dict, list[str]]:
     """断面図で見る試験台（run の結果, 列）。moniac-rig は頭・貯める・戻りの管・横の槽（下の槽は水源なので省く）、
@@ -4960,6 +4981,8 @@ def rig_section(scene: str, fluid: str = "water", temp_c: float | None = None, m
         res = heat_pump_network().run(t_end, sample_every=every)
         res["caps"] = dict.fromkeys(("power", "outdoor", "room"), from_q(res["volumes_q"]["room"]))
         return res, heat_pump_columns()
+    if scene == "rna-turnover":
+        return rna_turnover_scene()
     if scene == "csf":  # 🧠 吸収がふつうの頭 ｜ 止まった頭（どちらも回っている状態から 1 日。⏱️ は分）。くも膜下腔は縦いっぱいを揃える
         t_end, every = CSF["scene"]
         res = csf_network((1.0, 0.0), steady=True).run(t_end, sample_every=every)
@@ -5012,7 +5035,7 @@ HUB_SCENES = {"money-flow": ("money", 64.0, 4), "gold-flow": ("gold", 64.0, 4), 
 THERMAL_SCENES = {"coal-power": "coal", "combined-cycle": "lng"}
 RIG_SCENES = ("moniac-rig", "somen-flume", "noodle-length", "noodle-clog", "chopsticks", "cold-water",
               "bamboo-wear", "rain-runoff", "shishi-odoshi", "pythagorean-cup", "mariotte", "water-clock",
-              "inertia-limits", "distillation", "angels-share", *HUB_SCENES, "outlet-count", "circulation", *THERMAL_SCENES, "heat-pump", "csf", "steam-loop", "hrsg-loop", "part-load", "startup", "metal", "r32-loop", "house")
+              "inertia-limits", "distillation", "angels-share", *HUB_SCENES, "outlet-count", "circulation", *THERMAL_SCENES, "heat-pump", "csf", "steam-loop", "hrsg-loop", "part-load", "startup", "metal", "r32-loop", "house", "rna-turnover")
 
 
 def _visc(args) -> dict:
@@ -5091,7 +5114,8 @@ DEMOS = (("moniac-rig", "water", None), ("moniac-drain", "water", None), ("flume
          ("steam-loop", "water", "🟧"), ("hrsg-loop", "water", "🟧"),
          ("part-load", "water", "🟧"), ("startup", "water", "🟧"),
          ("metal", "water", "🟥"), ("r32-loop", "water", "🟧"), ("house", "water", "🟥"),
-         ("flume", "water", None, "kymo"), ("rain-runoff", "water", None, "kymo"))
+         ("flume", "water", None, "kymo"), ("rain-runoff", "water", None, "kymo"),
+         ("rna-turnover", "water", None))
 DEMOS_SCHEMA = "fluidfullspeedsimulation-demos/1"
 _NEEDS_VS16 = set("🏛🕳🍽🌧⚗⛏❄♨🌡")  # 絵文字で出すには U+FE0F が要るもの
 
