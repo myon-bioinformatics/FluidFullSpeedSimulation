@@ -567,21 +567,42 @@
         },
         {
           "type": "card",
-          "title": "D39 🧫 似たRNAを加えた後の分解",
-          "text": "左2列は既存RNA AだけがmiRNAの標的、右2列はAと追加RNA Bが同じmiRNAの標的です。各組は左がA、右がB。縦軸は全列とも0〜10（任意単位）。",
+          "title": "D39 🧫 血漿中で似たRNAを加えた後の残存率",
+          "text": "成人の全血5 L、血漿55%（2.75 L）を代表値として採用し、血漿内で均一に混ざると仮定します。比較対象は血漿中のRNA AとBです。",
           "blocks": [
             {
               "type": "image",
               "src": "./demos/D39_rna-competition_water.gif",
-              "alt": "Aは10から減少し、2時間でBを10投入する。標的部位を共有する右の組ではBが早く減り、Aは左の組より多く残る。"
+              "alt": "左2列はRNA Aだけが標的、右2列はA・Bが同じmiRNAの標的。各組の左がA、右がBで、縦軸は各RNAの開始・投入時濃度を100%とした残存率。"
             },
             {
               "type": "text",
-              "text": "液中での基礎分解の半減期を4時間とし、新たな合成は止めてあります。活性のあるmiRNA分解経路を仮定し、各標的の分解速度を 2 × そのRNA量 / (5 + 標的RNAの合計量) としました。時間・量・処理能力はいずれも説明用の設定です。"
+              "text": "Aの開始濃度は10 fmol/mL。2時間でBを加え、B/(A+B)を10%にします。左の組はAだけがmiRNAの標的、右の組はAとBが標的部位を共有します。GIFはAの開始時・Bの投入時を100%とした残存率です。"
             },
             {
               "type": "text",
-              "text": "2時間の投入直後は両組ともAが5.09、Bが10です。8時間時点で標的がAだけの組はAが0.29、Bが3.54。標的を共有する組はAが0.58、Bが1.14です。後者のBの減少分は基礎分解4.66とmiRNA経由4.20です。由来遺伝子の分類や全体の配列類似度は分解速度の入力に使っていません。"
+              "text": "投入6時間後、Bの残存率は部位共有なしで35.4%、共有ありで6.0%。同じ時点でBがA+Bに占める割合はそれぞれ40.9%、10.0%です。A・Bが同じ割合で減ると、構成比は変わらず両方の濃度が下がります。"
+            },
+            {
+              "type": "text",
+              "text": "基礎分解の半減期は4時間。活性のあるmiRNA経路も仮定し、各標的の分解速度は 2 fmol/mL/時 × その標的の濃度 / (5 fmol/mL + 標的濃度の合計) とします。RNA濃度、標的への作用、分解速度は比較用の仮定です。ヒト血漿ではAgo2と結合した循環miRNAが観測されています。ここでの処理能力は血漿での実測値ではありません。組織移行、血球への分配、新規合成はモデルに含めていません。"
+            },
+            {
+              "type": "text",
+              "text": "python -S fluidfullspeedsimulation.py rna-plasma で投入比率1・10・50%の時系列JSONを出力します。--added-percent 0 5 20、--blood-litres 5、--plasma-percent 55 で比較条件を指定できます。total_pmolは血漿中濃度（pM = fmol/mL）× 血漿量（L）です。"
+            },
+            {
+              "type": "links",
+              "items": [
+                {
+                  "label": "成人の全血量と血漿比の参考値（Merck）",
+                  "href": "https://www.merckmillipore.com/AZ/en/technical-documents/technical-article/clinical-testing-and-diagnostics-manufacturing/hematology/blood-basics"
+                },
+                {
+                  "label": "ヒト血漿中のAgo2・miRNA複合体（Arroyoら）",
+                  "href": "https://pubmed.ncbi.nlm.nih.gov/21383194/"
+                }
+              ]
             }
           ]
         }

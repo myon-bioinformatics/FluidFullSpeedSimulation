@@ -22,6 +22,7 @@ import json
 import math
 import random
 import sys
+from copy import deepcopy
 from pathlib import Path
 
 from fixedq import ONE, from_q, lag_gain, lag_step, qdiv, qmul, random_scales, shift_lag_step, to_q
@@ -4882,8 +4883,10 @@ def _law_mirna_turnover(net, link, step):
     return qmul(link["capacity_per_step_q"], share)
 
 
-def rna_competition_scene():
-    """基礎分解とmiRNA依存の分解を追跡し、2時間で加えたRNAが同じ標的部位を持つ場合と比較する。"""
+def rna_competition_scene(added_percent: float = 10.0):
+    """血漿中のAとBをpMで追跡する。投入直後の B/(A+B) を条件とする。"""
+    if not 0 <= added_percent < 100:
+        raise ValueError("added_percent must be in [0, 100)")
     net = Network(dt=1 / 64, inflows="end")
     initial = 10.0
     columns = []
@@ -4898,15 +4901,42 @@ def rna_competition_scene():
             if name in targets:
                 net.link("mirna-turnover", name, f"{name}-mirna", targets=targets,
                          half_saturation_q=to_q(5), capacity_per_step_q=to_q(2 * net.dt))
-        # 最後の1ステップで予備槽を空にし、2時間のサンプルにBの投入直後の量を記録する。
+    # 投入前の軌跡を同じ法則で求め、その時点のAを基準に投入量を逆算する。
+    before = deepcopy(net)
+    before.run(2)
+    pulse = before.head("unshared-A") * added_percent / (100 - added_percent)
+    for condition in ("unshared", "shared"):
         supply = f"{condition}-supply"
-        net.tank(supply, 1.0, volume=initial)
-        net.pump(supply, added, rate=initial / net.dt, start=2 - net.dt, until=2)
+        net.tank(supply, 1.0, volume=pulse)
+        net.pump(supply, f"{condition}-B", rate=pulse / net.dt, start=2 - net.dt, until=2)
     start = {"t": 0.0, **{f"h:{name}": net.head(name) for name in net.nodes}}
     result = net.run(8, sample_every=8)
     result["series"].insert(0, start)
-    result["caps"] = dict.fromkeys(columns, initial)
+    result["pulse_pm"] = pulse
+    # GIFの満水位はAが初期濃度、Bが投入濃度。4列とも各RNAの残存率を示す。
+    result["caps"] = {name: initial if name.endswith("-A") else (pulse or initial) for name in columns}
     return result, columns
+
+
+def plasma_rna_report(percentages, blood_l: float, plasma_percent: float):
+    """1 pM = 1 fmol/mL。仮定した血漿中濃度から血漿全体の量(pmol)を換算する。"""
+    plasma_l = blood_l * plasma_percent / 100
+    rows = []
+    for percent in percentages:
+        result, _ = rna_competition_scene(percent)
+        for row in result["series"]:
+            for condition in ("unshared", "shared"):
+                a, b = (row[f"h:{condition}-{rna}"] for rna in ("A", "B"))
+                for rna, concentration in (("A", a), ("B", b)):
+                    name = f"{condition}-{rna}"
+                    supplied = result["caps"][name] if rna == "A" else (result["pulse_pm"] if row["t"] >= 2 else 0)
+                    rows.append({"added_percent": percent, "hour": row["t"], "condition": condition, "rna": rna,
+                                 "fmol_per_ml": concentration, "total_pmol": concentration * plasma_l,
+                                 "percent_of_pair": 100 * concentration / (a + b) if a + b else None,
+                                 "percent_remaining": 100 * concentration / supplied if supplied else None,
+                                 "basal_loss_fmol_per_ml": row[f"h:{name}-basal"],
+                                 "mirna_loss_fmol_per_ml": row[f"h:{name}-mirna"]})
+    return {"blood_l": blood_l, "plasma_percent": plasma_percent, "plasma_l": plasma_l, "rows": rows}
 
 
 def rig_section(scene: str, fluid: str = "water", temp_c: float | None = None, mu: float | None = None,
@@ -5264,6 +5294,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = cli.make_parser(suggest_unknown=True, prog="fluidfullspeedsimulation", description="🌊 流れ・遅れ・検証")
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("list", help="🗂️ 実験の一覧", allow_abbrev=False)
+    plasma = sub.add_parser("rna-plasma", help="血漿中のRNA濃度・構成比・残存率の時系列をJSONで出力", allow_abbrev=False)
+    plasma.add_argument("--added-percent", type=float, nargs="+", default=[1, 10, 50], help="投入直後のB/(A+B) [%%]")
+    plasma.add_argument("--blood-litres", type=_positive, default=5.0, help="成人全血量 [L]")
+    plasma.add_argument("--plasma-percent", type=_positive, default=55.0, help="全血に占める血漿の割合 [%%]")
     sub.add_parser("fluids", help="🧪 流体の物性", allow_abbrev=False)
     run = sub.add_parser("run", help="▶️ 実験を回す", allow_abbrev=False)
     run.add_argument("experiment", type=experiment_arg, choices=sorted(EXPERIMENTS),
@@ -5345,6 +5379,11 @@ def main(argv=None) -> int:
     if args.command == "draw":
         _draw_choices(parser, args)
     _utf8_stdout()
+    if args.command == "rna-plasma":
+        if args.plasma_percent > 100 or any(not 0 <= p < 100 for p in args.added_percent):
+            parser.error("血漿割合は0より大きく100以下、投入割合は0以上100未満です")
+        print(json.dumps(plasma_rna_report(args.added_percent, args.blood_litres, args.plasma_percent), ensure_ascii=False))
+        return 0
     if args.command == "list":
         for e in list_experiments():
             print(f"{e['icon']} {e['id']} {e['slug']}  {e['title']}")
