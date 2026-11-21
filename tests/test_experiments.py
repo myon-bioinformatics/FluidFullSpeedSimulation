@@ -1556,6 +1556,54 @@ class RnaTurnover(unittest.TestCase):
                 self.assertAlmostEqual(samples[hour]["h:" + name], amount, places=9)
 
 
+    def test_rna_pulse_and_shared_mirna(self):
+        result, columns = ffs.section_run("rna-competition")
+        self.assertEqual(columns, ["unshared-A", "unshared-B", "shared-A", "shared-B"])
+        self.assertEqual(result["conservation_error_q"], 0)
+        pulse = result["pulse_copies_per_ul"]
+        self.assertGreater(pulse, 0)
+        self.assertEqual(result["caps"], dict(zip(columns, (10, pulse, 10, pulse))))
+        for row in result["series"]:
+            t = row["t"]
+            with self.subTest(t=t):
+                for name in columns:
+                    amount, basal, mirna = (row["h:" + name + suffix] for suffix in ("", "-basal", "-mirna"))
+                    self.assertGreaterEqual(min(amount, basal, mirna), 0)
+                    supplied = 10 if name.endswith("-A") else (pulse if t >= 2 else 0)
+                    self.assertAlmostEqual(amount + basal + mirna, supplied, places=10)
+                self.assertEqual(row["h:unshared-B-mirna"], 0)
+                if t <= 2:
+                    self.assertEqual(row["h:unshared-A"], row["h:shared-A"])
+                    self.assertAlmostEqual(row["h:unshared-B"], pulse if t == 2 else 0)
+                    self.assertEqual(row["h:shared-B"], row["h:unshared-B"])
+                else:
+                    self.assertAlmostEqual(row["h:unshared-B"], pulse * 2 ** (-(t - 2) / 4), places=9)
+                    self.assertLess(row["h:shared-B"], row["h:unshared-B"])
+                    self.assertGreater(row["h:shared-A"], row["h:unshared-A"])
+
+
+    def test_plasma_rna_fractions_and_amounts(self):
+        report = ffs.plasma_rna_report([0, 1, 10, 50], 5, 55)
+        self.assertEqual(report["plasma_l"], 2.75)
+        for row in report["rows"]:
+            self.assertAlmostEqual(row["total_pmol"], row["fmol_per_ml"] * 2.75, places=14)
+            self.assertAlmostEqual(row["fmol_per_ml"] * 602214.076, row["copies_per_ul"])
+            if row["rna"] == "A" and row["hour"] == 0:
+                self.assertEqual(row["copies_per_ul"], 10)
+            if row["rna"] == "B":
+                if row["hour"] == 2:
+                    self.assertAlmostEqual(row["percent_of_pair"], row["added_percent"])
+                    if row["added_percent"]:
+                        self.assertAlmostEqual(row["percent_remaining"], 100)
+                if not row["added_percent"] or row["hour"] < 2:
+                    self.assertIsNone(row["percent_remaining"])
+                if row["hour"] > 2 and row["condition"] == "shared":
+                    self.assertAlmostEqual(row["percent_of_pair"], row["added_percent"], places=8)
+        for bad in [-1, 100, float("nan")]:
+            with self.assertRaises(ValueError):
+                ffs.rna_competition_scene(bad)
+
+
 class Records(unittest.TestCase):
     """📒 静止の図の元になる行（DRAgoWing が `verify --jsonl` の記録から描く）。行の数が実験の値と同じか。"""
 

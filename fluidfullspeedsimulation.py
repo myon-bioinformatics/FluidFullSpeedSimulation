@@ -22,6 +22,7 @@ import json
 import math
 import random
 import sys
+from copy import deepcopy
 from pathlib import Path
 
 from fixedq import ONE, from_q, lag_gain, lag_step, qdiv, qmul, random_scales, shift_lag_step, to_q
@@ -4613,7 +4614,7 @@ SCENE_ICONS = {"🏛": "moniac-rig", "🥢": "somen-flume", "🎋": "flume", "�
                "🍷": "pythagorean-cup", "🫗": "mariotte", "🏺": "water-clock", "🚧": "inertia-limits",
                "⚗": "distillation", "👼": "angels-share", "💴": "money-flow", "🪙": "gold-flow", "⛏": "rare-metal",
                "🚿": "outlet-count", "🫀": "circulation",
-               "🪨": "coal-power", "🌀": "combined-cycle", "❄": "heat-pump", "🧠": "csf", "💧": "steam-loop", "♨": "hrsg-loop", "📉": "part-load", "🌅": "startup", "🌡": "metal", "🫧": "r32-loop", "🏠": "house", "🧬": "rna-turnover"}
+               "🪨": "coal-power", "🌀": "combined-cycle", "❄": "heat-pump", "🧠": "csf", "💧": "steam-loop", "♨": "hrsg-loop", "📉": "part-load", "🌅": "startup", "🌡": "metal", "🫧": "r32-loop", "🏠": "house", "🧬": "rna-turnover", "🧫": "rna-competition"}
 
 
 def fluid_arg(text: str) -> str:
@@ -4874,6 +4875,77 @@ def rna_turnover_scene():
     return result, columns
 
 
+@register_law("mirna-turnover")
+def _law_mirna_turnover(net, link, step):
+    """活性のある同一miRNA経路を共有する標的に、有限の分解流量を配分する。"""
+    targets = sum(net.nodes[name]["v"] for name in link["targets"])
+    share = qdiv(net.nodes[link["src"]]["v"], link["half_saturation_q"] + targets)
+    return qmul(link["capacity_per_step_q"], share)
+
+
+def rna_competition_scene(added_percent: float = 10.0):
+    """血漿中のAとBをcopies/µLで追跡する。投入直後の B/(A+B) を条件とする。"""
+    if not 0 <= added_percent < 100:
+        raise ValueError("added_percent must be in [0, 100)")
+    net = Network(dt=1 / 64, inflows="end")
+    initial = 10.0
+    columns = []
+    for condition in ("unshared", "shared"):
+        original, added = f"{condition}-A", f"{condition}-B"
+        columns.extend((original, added))
+        targets = (original, added) if condition == "shared" else (original,)
+        for name in (original, added):
+            net.tank(name, 1.0, volume=initial if name == original else 0.0)
+            net.tank(f"{name}-basal", 1.0).tank(f"{name}-mirna", 1.0)
+            net.valve(name, f"{name}-basal", tau=4 / math.log(2))
+            if name in targets:
+                net.link("mirna-turnover", name, f"{name}-mirna", targets=targets,
+                         half_saturation_q=to_q(5), capacity_per_step_q=to_q(2 * net.dt))
+    # 投入前の軌跡を同じ法則で求め、その時点のAを基準に投入量を逆算する。
+    before = deepcopy(net)
+    before.run(2)
+    pulse = before.head("unshared-A") * added_percent / (100 - added_percent)
+    for condition in ("unshared", "shared"):
+        supply = f"{condition}-supply"
+        net.tank(supply, 1.0, volume=pulse)
+        net.pump(supply, f"{condition}-B", rate=pulse / net.dt, start=2 - net.dt, until=2)
+    start = {"t": 0.0, **{f"h:{name}": net.head(name) for name in net.nodes}}
+    result = net.run(8, sample_every=8)
+    result["series"].insert(0, start)
+    result["pulse_copies_per_ul"] = pulse
+    # GIFの満水位はAが初期濃度、Bが投入濃度。4列とも各RNAの残存率を示す。
+    result["caps"] = {name: initial if name.endswith("-A") else (pulse or initial) for name in columns}
+    return result, columns
+
+
+def plasma_rna_report(percentages, blood_l: float, plasma_percent: float):
+    """1 pM = 1 fmol/mL。仮定した血漿中濃度から血漿全体の量(pmol)を換算する。"""
+    copies_per_ul_per_pm = 602214.076  # 1 pM × 10^-6 L × アボガドロ定数
+    plasma_l = blood_l * plasma_percent / 100
+    rows = []
+    for percent in percentages:
+        result, _ = rna_competition_scene(percent)
+        for row in result["series"]:
+            for condition in ("unshared", "shared"):
+                a, b = (row[f"h:{condition}-{rna}"] for rna in ("A", "B"))
+                for rna, concentration in (("A", a), ("B", b)):
+                    name = f"{condition}-{rna}"
+                    supplied = result["caps"][name] if rna == "A" else (result["pulse_copies_per_ul"] if row["t"] >= 2 else 0)
+                    pm = concentration / copies_per_ul_per_pm
+                    rows.append({"added_percent": percent, "hour": row["t"], "condition": condition, "rna": rna,
+                                 "copies_per_ul": concentration, "fmol_per_ml": pm, "total_pmol": pm * plasma_l,
+                                 "percent_of_pair": 100 * concentration / (a + b) if a + b else None,
+                                 "percent_remaining": 100 * concentration / supplied if supplied else None,
+                                 "basal_loss_fmol_per_ml": row[f"h:{name}-basal"] / copies_per_ul_per_pm,
+                                 "mirna_loss_fmol_per_ml": row[f"h:{name}-mirna"] / copies_per_ul_per_pm})
+    reference = {"study": "Kent et al. (2024)", "url": "https://pubmed.ncbi.nlm.nih.gov/39298422/",
+                 "sample": "human plasma after bivalent Spikevax booster", "participants": 19,
+                 "total_vaccine_mrna_4h_copies_per_ul_range": [6.5, 112],
+                 "peak_time_days_range": [1, 2], "intact_mrna_postpeak_half_life_days": 1.14}
+    return {"blood_l": blood_l, "plasma_percent": plasma_percent, "plasma_l": plasma_l,
+            "clinical_reference": reference, "rows": rows}
+
+
 def rig_section(scene: str, fluid: str = "water", temp_c: float | None = None, mu: float | None = None,
                 mu_scale: float | None = None) -> tuple[dict, list[str]]:
     """断面図で見る試験台（run の結果, 列）。moniac-rig は頭・貯める・戻りの管・横の槽（下の槽は水源なので省く）、
@@ -4983,6 +5055,8 @@ def rig_section(scene: str, fluid: str = "water", temp_c: float | None = None, m
         return res, heat_pump_columns()
     if scene == "rna-turnover":
         return rna_turnover_scene()
+    if scene == "rna-competition":
+        return rna_competition_scene()
     if scene == "csf":  # 🧠 吸収がふつうの頭 ｜ 止まった頭（どちらも回っている状態から 1 日。⏱️ は分）。くも膜下腔は縦いっぱいを揃える
         t_end, every = CSF["scene"]
         res = csf_network((1.0, 0.0), steady=True).run(t_end, sample_every=every)
@@ -5035,7 +5109,7 @@ HUB_SCENES = {"money-flow": ("money", 64.0, 4), "gold-flow": ("gold", 64.0, 4), 
 THERMAL_SCENES = {"coal-power": "coal", "combined-cycle": "lng"}
 RIG_SCENES = ("moniac-rig", "somen-flume", "noodle-length", "noodle-clog", "chopsticks", "cold-water",
               "bamboo-wear", "rain-runoff", "shishi-odoshi", "pythagorean-cup", "mariotte", "water-clock",
-              "inertia-limits", "distillation", "angels-share", *HUB_SCENES, "outlet-count", "circulation", *THERMAL_SCENES, "heat-pump", "csf", "steam-loop", "hrsg-loop", "part-load", "startup", "metal", "r32-loop", "house", "rna-turnover")
+              "inertia-limits", "distillation", "angels-share", *HUB_SCENES, "outlet-count", "circulation", *THERMAL_SCENES, "heat-pump", "csf", "steam-loop", "hrsg-loop", "part-load", "startup", "metal", "r32-loop", "house", "rna-turnover", "rna-competition")
 
 
 def _visc(args) -> dict:
@@ -5115,7 +5189,7 @@ DEMOS = (("moniac-rig", "water", None), ("moniac-drain", "water", None), ("flume
          ("part-load", "water", "🟧"), ("startup", "water", "🟧"),
          ("metal", "water", "🟥"), ("r32-loop", "water", "🟧"), ("house", "water", "🟥"),
          ("flume", "water", None, "kymo"), ("rain-runoff", "water", None, "kymo"),
-         ("rna-turnover", "water", None))
+         ("rna-turnover", "water", None), ("rna-competition", "water", None))
 DEMOS_SCHEMA = "fluidfullspeedsimulation-demos/1"
 _NEEDS_VS16 = set("🏛🕳🍽🌧⚗⛏❄♨🌡")  # 絵文字で出すには U+FE0F が要るもの
 
@@ -5227,6 +5301,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = cli.make_parser(suggest_unknown=True, prog="fluidfullspeedsimulation", description="🌊 流れ・遅れ・検証")
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("list", help="🗂️ 実験の一覧", allow_abbrev=False)
+    plasma = sub.add_parser("rna-plasma", help="血漿中のRNA濃度・構成比・残存率の時系列をJSONで出力", allow_abbrev=False)
+    plasma.add_argument("--added-percent", type=float, nargs="+", default=[1, 10, 50], help="投入直後のB/(A+B) [%%]")
+    plasma.add_argument("--blood-litres", type=_positive, default=5.0, help="成人全血量 [L]")
+    plasma.add_argument("--plasma-percent", type=_positive, default=55.0, help="全血に占める血漿の割合 [%%]")
     sub.add_parser("fluids", help="🧪 流体の物性", allow_abbrev=False)
     run = sub.add_parser("run", help="▶️ 実験を回す", allow_abbrev=False)
     run.add_argument("experiment", type=experiment_arg, choices=sorted(EXPERIMENTS),
@@ -5308,6 +5386,11 @@ def main(argv=None) -> int:
     if args.command == "draw":
         _draw_choices(parser, args)
     _utf8_stdout()
+    if args.command == "rna-plasma":
+        if args.plasma_percent > 100 or any(not 0 <= p < 100 for p in args.added_percent):
+            parser.error("血漿割合は0より大きく100以下、投入割合は0以上100未満です")
+        print(json.dumps(plasma_rna_report(args.added_percent, args.blood_litres, args.plasma_percent), ensure_ascii=False))
+        return 0
     if args.command == "list":
         for e in list_experiments():
             print(f"{e['icon']} {e['id']} {e['slug']}  {e['title']}")

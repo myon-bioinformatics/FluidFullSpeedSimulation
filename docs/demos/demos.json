@@ -1209,6 +1209,30 @@
         8.0
       ],
       "conserved": true
+    },
+    {
+      "id": "D39",
+      "scene": "rna-competition",
+      "icon": "🧫",
+      "fluid": "water",
+      "fill": null,
+      "file": "D39_rna-competition_water.gif",
+      "bytes": 16689,
+      "sha256": "ae58c696ab676fac2f1e083a5d067f2cdfb49f1d6be6aa926c2eff7828234104",
+      "frames": 40,
+      "canvas": "168x160",
+      "kind": "section",
+      "columns": [
+        "unshared-A",
+        "unshared-B",
+        "shared-A",
+        "shared-B"
+      ],
+      "t": [
+        0.0,
+        8.0
+      ],
+      "conserved": true
     }
   ]
 }
