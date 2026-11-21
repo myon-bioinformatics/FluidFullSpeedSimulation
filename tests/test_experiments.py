@@ -1560,7 +1560,7 @@ class RnaTurnover(unittest.TestCase):
         result, columns = ffs.section_run("rna-competition")
         self.assertEqual(columns, ["unshared-A", "unshared-B", "shared-A", "shared-B"])
         self.assertEqual(result["conservation_error_q"], 0)
-        pulse = result["pulse_pm"]
+        pulse = result["pulse_copies_per_ul"]
         self.assertGreater(pulse, 0)
         self.assertEqual(result["caps"], dict(zip(columns, (10, pulse, 10, pulse))))
         for row in result["series"]:
@@ -1586,7 +1586,10 @@ class RnaTurnover(unittest.TestCase):
         report = ffs.plasma_rna_report([0, 1, 10, 50], 5, 55)
         self.assertEqual(report["plasma_l"], 2.75)
         for row in report["rows"]:
-            self.assertAlmostEqual(row["total_pmol"], row["fmol_per_ml"] * 2.75)
+            self.assertAlmostEqual(row["total_pmol"], row["fmol_per_ml"] * 2.75, places=14)
+            self.assertAlmostEqual(row["fmol_per_ml"] * 602214.076, row["copies_per_ul"])
+            if row["rna"] == "A" and row["hour"] == 0:
+                self.assertEqual(row["copies_per_ul"], 10)
             if row["rna"] == "B":
                 if row["hour"] == 2:
                     self.assertAlmostEqual(row["percent_of_pair"], row["added_percent"])

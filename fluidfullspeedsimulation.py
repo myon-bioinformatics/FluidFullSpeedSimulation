@@ -4884,7 +4884,7 @@ def _law_mirna_turnover(net, link, step):
 
 
 def rna_competition_scene(added_percent: float = 10.0):
-    """血漿中のAとBをpMで追跡する。投入直後の B/(A+B) を条件とする。"""
+    """血漿中のAとBをcopies/µLで追跡する。投入直後の B/(A+B) を条件とする。"""
     if not 0 <= added_percent < 100:
         raise ValueError("added_percent must be in [0, 100)")
     net = Network(dt=1 / 64, inflows="end")
@@ -4912,7 +4912,7 @@ def rna_competition_scene(added_percent: float = 10.0):
     start = {"t": 0.0, **{f"h:{name}": net.head(name) for name in net.nodes}}
     result = net.run(8, sample_every=8)
     result["series"].insert(0, start)
-    result["pulse_pm"] = pulse
+    result["pulse_copies_per_ul"] = pulse
     # GIFの満水位はAが初期濃度、Bが投入濃度。4列とも各RNAの残存率を示す。
     result["caps"] = {name: initial if name.endswith("-A") else (pulse or initial) for name in columns}
     return result, columns
@@ -4920,6 +4920,7 @@ def rna_competition_scene(added_percent: float = 10.0):
 
 def plasma_rna_report(percentages, blood_l: float, plasma_percent: float):
     """1 pM = 1 fmol/mL。仮定した血漿中濃度から血漿全体の量(pmol)を換算する。"""
+    copies_per_ul_per_pm = 602214.076  # 1 pM × 10^-6 L × アボガドロ定数
     plasma_l = blood_l * plasma_percent / 100
     rows = []
     for percent in percentages:
@@ -4929,14 +4930,20 @@ def plasma_rna_report(percentages, blood_l: float, plasma_percent: float):
                 a, b = (row[f"h:{condition}-{rna}"] for rna in ("A", "B"))
                 for rna, concentration in (("A", a), ("B", b)):
                     name = f"{condition}-{rna}"
-                    supplied = result["caps"][name] if rna == "A" else (result["pulse_pm"] if row["t"] >= 2 else 0)
+                    supplied = result["caps"][name] if rna == "A" else (result["pulse_copies_per_ul"] if row["t"] >= 2 else 0)
+                    pm = concentration / copies_per_ul_per_pm
                     rows.append({"added_percent": percent, "hour": row["t"], "condition": condition, "rna": rna,
-                                 "fmol_per_ml": concentration, "total_pmol": concentration * plasma_l,
+                                 "copies_per_ul": concentration, "fmol_per_ml": pm, "total_pmol": pm * plasma_l,
                                  "percent_of_pair": 100 * concentration / (a + b) if a + b else None,
                                  "percent_remaining": 100 * concentration / supplied if supplied else None,
-                                 "basal_loss_fmol_per_ml": row[f"h:{name}-basal"],
-                                 "mirna_loss_fmol_per_ml": row[f"h:{name}-mirna"]})
-    return {"blood_l": blood_l, "plasma_percent": plasma_percent, "plasma_l": plasma_l, "rows": rows}
+                                 "basal_loss_fmol_per_ml": row[f"h:{name}-basal"] / copies_per_ul_per_pm,
+                                 "mirna_loss_fmol_per_ml": row[f"h:{name}-mirna"] / copies_per_ul_per_pm})
+    reference = {"study": "Kent et al. (2024)", "url": "https://pubmed.ncbi.nlm.nih.gov/39298422/",
+                 "sample": "human plasma after bivalent Spikevax booster", "participants": 19,
+                 "total_vaccine_mrna_4h_copies_per_ul_range": [6.5, 112],
+                 "peak_time_days_range": [1, 2], "intact_mrna_postpeak_half_life_days": 1.14}
+    return {"blood_l": blood_l, "plasma_percent": plasma_percent, "plasma_l": plasma_l,
+            "clinical_reference": reference, "rows": rows}
 
 
 def rig_section(scene: str, fluid: str = "water", temp_c: float | None = None, mu: float | None = None,
