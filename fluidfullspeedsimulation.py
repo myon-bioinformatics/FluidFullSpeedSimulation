@@ -4613,7 +4613,7 @@ SCENE_ICONS = {"🏛": "moniac-rig", "🥢": "somen-flume", "🎋": "flume", "�
                "🍷": "pythagorean-cup", "🫗": "mariotte", "🏺": "water-clock", "🚧": "inertia-limits",
                "⚗": "distillation", "👼": "angels-share", "💴": "money-flow", "🪙": "gold-flow", "⛏": "rare-metal",
                "🚿": "outlet-count", "🫀": "circulation",
-               "🪨": "coal-power", "🌀": "combined-cycle", "❄": "heat-pump", "🧠": "csf", "💧": "steam-loop", "♨": "hrsg-loop", "📉": "part-load", "🌅": "startup", "🌡": "metal", "🫧": "r32-loop", "🏠": "house", "🧬": "rna-turnover"}
+               "🪨": "coal-power", "🌀": "combined-cycle", "❄": "heat-pump", "🧠": "csf", "💧": "steam-loop", "♨": "hrsg-loop", "📉": "part-load", "🌅": "startup", "🌡": "metal", "🫧": "r32-loop", "🏠": "house", "🧬": "rna-turnover", "🧫": "rna-competition"}
 
 
 def fluid_arg(text: str) -> str:
@@ -4874,6 +4874,41 @@ def rna_turnover_scene():
     return result, columns
 
 
+@register_law("mirna-turnover")
+def _law_mirna_turnover(net, link, step):
+    """活性のある同一miRNA経路を共有する標的に、有限の分解流量を配分する。"""
+    targets = sum(net.nodes[name]["v"] for name in link["targets"])
+    share = qdiv(net.nodes[link["src"]]["v"], link["half_saturation_q"] + targets)
+    return qmul(link["capacity_per_step_q"], share)
+
+
+def rna_competition_scene():
+    """基礎分解とmiRNA依存の分解を追跡し、2時間で加えたRNAが同じ標的部位を持つ場合と比較する。"""
+    net = Network(dt=1 / 64, inflows="end")
+    initial = 10.0
+    columns = []
+    for condition in ("unshared", "shared"):
+        original, added = f"{condition}-A", f"{condition}-B"
+        columns.extend((original, added))
+        targets = (original, added) if condition == "shared" else (original,)
+        for name in (original, added):
+            net.tank(name, 1.0, volume=initial if name == original else 0.0)
+            net.tank(f"{name}-basal", 1.0).tank(f"{name}-mirna", 1.0)
+            net.valve(name, f"{name}-basal", tau=4 / math.log(2))
+            if name in targets:
+                net.link("mirna-turnover", name, f"{name}-mirna", targets=targets,
+                         half_saturation_q=to_q(5), capacity_per_step_q=to_q(2 * net.dt))
+        # 最後の1ステップで予備槽を空にし、2時間のサンプルにBの投入直後の量を記録する。
+        supply = f"{condition}-supply"
+        net.tank(supply, 1.0, volume=initial)
+        net.pump(supply, added, rate=initial / net.dt, start=2 - net.dt, until=2)
+    start = {"t": 0.0, **{f"h:{name}": net.head(name) for name in net.nodes}}
+    result = net.run(8, sample_every=8)
+    result["series"].insert(0, start)
+    result["caps"] = dict.fromkeys(columns, initial)
+    return result, columns
+
+
 def rig_section(scene: str, fluid: str = "water", temp_c: float | None = None, mu: float | None = None,
                 mu_scale: float | None = None) -> tuple[dict, list[str]]:
     """断面図で見る試験台（run の結果, 列）。moniac-rig は頭・貯める・戻りの管・横の槽（下の槽は水源なので省く）、
@@ -4983,6 +5018,8 @@ def rig_section(scene: str, fluid: str = "water", temp_c: float | None = None, m
         return res, heat_pump_columns()
     if scene == "rna-turnover":
         return rna_turnover_scene()
+    if scene == "rna-competition":
+        return rna_competition_scene()
     if scene == "csf":  # 🧠 吸収がふつうの頭 ｜ 止まった頭（どちらも回っている状態から 1 日。⏱️ は分）。くも膜下腔は縦いっぱいを揃える
         t_end, every = CSF["scene"]
         res = csf_network((1.0, 0.0), steady=True).run(t_end, sample_every=every)
@@ -5035,7 +5072,7 @@ HUB_SCENES = {"money-flow": ("money", 64.0, 4), "gold-flow": ("gold", 64.0, 4), 
 THERMAL_SCENES = {"coal-power": "coal", "combined-cycle": "lng"}
 RIG_SCENES = ("moniac-rig", "somen-flume", "noodle-length", "noodle-clog", "chopsticks", "cold-water",
               "bamboo-wear", "rain-runoff", "shishi-odoshi", "pythagorean-cup", "mariotte", "water-clock",
-              "inertia-limits", "distillation", "angels-share", *HUB_SCENES, "outlet-count", "circulation", *THERMAL_SCENES, "heat-pump", "csf", "steam-loop", "hrsg-loop", "part-load", "startup", "metal", "r32-loop", "house", "rna-turnover")
+              "inertia-limits", "distillation", "angels-share", *HUB_SCENES, "outlet-count", "circulation", *THERMAL_SCENES, "heat-pump", "csf", "steam-loop", "hrsg-loop", "part-load", "startup", "metal", "r32-loop", "house", "rna-turnover", "rna-competition")
 
 
 def _visc(args) -> dict:
@@ -5115,7 +5152,7 @@ DEMOS = (("moniac-rig", "water", None), ("moniac-drain", "water", None), ("flume
          ("part-load", "water", "🟧"), ("startup", "water", "🟧"),
          ("metal", "water", "🟥"), ("r32-loop", "water", "🟧"), ("house", "water", "🟥"),
          ("flume", "water", None, "kymo"), ("rain-runoff", "water", None, "kymo"),
-         ("rna-turnover", "water", None))
+         ("rna-turnover", "water", None), ("rna-competition", "water", None))
 DEMOS_SCHEMA = "fluidfullspeedsimulation-demos/1"
 _NEEDS_VS16 = set("🏛🕳🍽🌧⚗⛏❄♨🌡")  # 絵文字で出すには U+FE0F が要るもの
 

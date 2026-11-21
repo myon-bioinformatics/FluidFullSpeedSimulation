@@ -1556,6 +1556,30 @@ class RnaTurnover(unittest.TestCase):
                 self.assertAlmostEqual(samples[hour]["h:" + name], amount, places=9)
 
 
+    def test_rna_pulse_and_shared_mirna(self):
+        result, columns = ffs.section_run("rna-competition")
+        self.assertEqual(columns, ["unshared-A", "unshared-B", "shared-A", "shared-B"])
+        self.assertEqual(result["conservation_error_q"], 0)
+        self.assertEqual(result["caps"], dict.fromkeys(columns, 10))
+        for row in result["series"]:
+            t = row["t"]
+            with self.subTest(t=t):
+                for name in columns:
+                    amount, basal, mirna = (row["h:" + name + suffix] for suffix in ("", "-basal", "-mirna"))
+                    self.assertGreaterEqual(min(amount, basal, mirna), 0)
+                    supplied = 10 if name.endswith("-A") or t >= 2 else 0
+                    self.assertAlmostEqual(amount + basal + mirna, supplied, places=10)
+                self.assertEqual(row["h:unshared-B-mirna"], 0)
+                if t <= 2:
+                    self.assertEqual(row["h:unshared-A"], row["h:shared-A"])
+                    self.assertEqual(row["h:unshared-B"], 10 if t == 2 else 0)
+                    self.assertEqual(row["h:shared-B"], row["h:unshared-B"])
+                else:
+                    self.assertAlmostEqual(row["h:unshared-B"], 10 * 2 ** (-(t - 2) / 4), places=9)
+                    self.assertLess(row["h:shared-B"], row["h:unshared-B"])
+                    self.assertGreater(row["h:shared-A"], row["h:unshared-A"])
+
+
 class Records(unittest.TestCase):
     """📒 静止の図の元になる行（DRAgoWing が `verify --jsonl` の記録から描く）。行の数が実験の値と同じか。"""
 
