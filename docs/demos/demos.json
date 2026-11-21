@@ -1186,6 +1186,29 @@
         286.0
       ],
       "conserved": true
+    },
+    {
+      "id": "D38",
+      "scene": "rna-turnover",
+      "icon": "🧬",
+      "fluid": "water",
+      "fill": null,
+      "file": "D38_rna-turnover_water.gif",
+      "bytes": 9247,
+      "sha256": "6b3a376f3cdecc4ffeab18cbbe501ff4d160830cbb3b8cd3d9e43da3b2936c05",
+      "frames": 40,
+      "canvas": "128x160",
+      "kind": "section",
+      "columns": [
+        "baseline",
+        "double-synthesis",
+        "double-half-life"
+      ],
+      "t": [
+        0.0,
+        8.0
+      ],
+      "conserved": true
     }
   ]
 }

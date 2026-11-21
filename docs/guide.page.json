@@ -535,6 +535,35 @@
               "alt": "D37 rain-runoff kymo"
             }
           ]
+        },
+        {
+          "type": "card",
+          "title": "D38 🧬 RNAの合成と分解",
+          "text": "左から基準・合成速度2倍・半減期2倍。すべて初期量10、縦軸は共通で0〜20（任意単位）。",
+          "blocks": [
+            {
+              "type": "image",
+              "src": "./demos/D38_rna-turnover_water.gif",
+              "alt": "0〜8時間のRNA量。4時間で合成を止めると、半減期が長い右列が最もゆっくり減る。"
+            },
+            {
+              "type": "text",
+              "text": "基準の半減期は2時間。最初の4時間は合成量と分解量が釣り合います。4時間時点の量は左から10、17.5、15。全条件の合成を止めた後、8時間時点では2.5、4.375、7.5です。"
+            },
+            {
+              "type": "text",
+              "text": "SSISではlin-4に対応する8mer候補がlin-14の3′ UTRに3件、lin-28に1件あります。上の合成速度と半減期は比較用の仮定です。実際のRNA量や競合の有無は別途測定が必要です。"
+            },
+            {
+              "type": "links",
+              "items": [
+                {
+                  "label": "SSISの検索例と参照配列",
+                  "href": "https://github.com/myon-bioinformatics/search_seq_including_spaces/blob/d329dabd8a09eae5b5955678c3fb362a6c43637c/docs/roadmap-tools.md#transcript-region-search"
+                }
+              ]
+            }
+          ]
         }
       ]
     },

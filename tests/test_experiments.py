@@ -1544,6 +1544,18 @@ class CerebrospinalFluid(unittest.TestCase):
         self.assertEqual(blocked[-1], 16)
 
 
+class RnaTurnover(unittest.TestCase):
+    def test_rna_turnover_at_synthesis_stop_and_after_decay(self):
+        result, columns = ffs.rig_section("rna-turnover")
+        self.assertEqual(columns, ["baseline", "double-synthesis", "double-half-life"])
+        self.assertEqual(result["conservation_error_q"], 0)
+        self.assertEqual(result["caps"], dict.fromkeys(columns, 20.0))
+        samples = {row["t"]: row for row in result["series"]}
+        for hour, expected in [(0, (10, 10, 10)), (4, (10, 17.5, 15)), (8, (2.5, 4.375, 7.5))]:
+            for name, amount in zip(columns, expected):
+                self.assertAlmostEqual(samples[hour]["h:" + name], amount, places=9)
+
+
 class Records(unittest.TestCase):
     """📒 静止の図の元になる行（DRAgoWing が `verify --jsonl` の記録から描く）。行の数が実験の値と同じか。"""
 
