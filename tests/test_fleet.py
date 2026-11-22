@@ -9,7 +9,7 @@ PARENT_PIN = "2e450118fde453272de9997608e25c31a984463c"
 ACCEPTED = {
     "vendor/cli_args.py": "9ff06c4326fc7ba934112abecbc59451ab07be6a",
     "vendor/py_launch.cjs": PARENT_PIN,
-    "vendor/fleet_check.py": "81f6aea6231d4490e581443fdeb43a09e6018ff0",
+    "vendor/fleet_check.py": "64db25eb0fd9025dbe3cbcbced8b88a39ecb9266",
 }
 
 
@@ -24,3 +24,11 @@ class Fleet(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# 🧰 Scripts: 📝 each one describes itself and ⌨️ one that reads sys.argv declares its arguments (argparse /
+# cli_args). Read with ast, never run; the portfolio's script catalog reads the same facts.
+
+class ScriptsDescribeThemselves(unittest.TestCase):
+    def test_every_script_has_a_description_and_declared_arguments(self):
+        fleet.check_scripts(fleet.repo_root(__file__))
