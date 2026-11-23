@@ -4,3 +4,7 @@ __pycache__/
 .pytest_cache/
 build/
 *.jsonl
+.coverage
+.coverage.*
+htmlcov/
+.DS_Store
