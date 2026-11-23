@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   runtime:
-    uses: myon-bioinformatics/myon-bioinformatics/.github/workflows/reusable-stdlib-runtime.yml@98a0e611cc879fde2d047da806de5a2121a65524
+    uses: myon-bioinformatics/myon-bioinformatics/.github/workflows/reusable-stdlib-runtime.yml@fbf433b296ec047f1c9acdf4d5d12c81ff7f59e8
     with:
       python-versions: '["3.11","3.15"]'
       extra-runners: '[{"os":"windows-latest","python":"3.15"},{"os":"macos-latest","python":"3.15"}]'
