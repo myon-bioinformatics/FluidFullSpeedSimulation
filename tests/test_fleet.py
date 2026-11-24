@@ -8,7 +8,7 @@ ROOT = fleet.repo_root(__file__)
 PARENT_PIN = "1368174821fb03be258ecf3312ce0ea809f6ea22"  # Workflows only; vendored files keep the commits in ACCEPTED.
 ACCEPTED = {
     "vendor/cli_args.py": "5ae22b1a1b808eca93e3c385a8db867fbeb8ee32",
-    "vendor/py_launch.cjs": "2e450118fde453272de9997608e25c31a984463c",
+    "vendor/py_launch.cjs": "de63762d8485e4d398a651715d34ebf4a04c23f2",
     "vendor/fleet_check.py": "bc57f08a590ee1cb33a8bb37c1bb3b8f28a2f3c9",
 }
 
