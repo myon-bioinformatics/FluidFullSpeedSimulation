@@ -14,634 +14,644 @@
       ]
     },
     {
-      "type": "section",
-      "title": "📥 取得",
-      "blocks": [
+      "type": "tabs",
+      "id": "guide",
+      "tabs": [
         {
-          "type": "output",
-          "text": "git clone https://github.com/myon-bioinformatics/FluidFullSpeedSimulation.git\ncd FluidFullSpeedSimulation\nuv sync --locked"
-        }
-      ]
-    },
-    {
-      "type": "section",
-      "title": "▶️ 実行",
-      "blocks": [
-        {
-          "type": "card",
-          "title": "🗂️ 実験の一覧",
-          "text": "",
+          "label": "🎞 GIF デモ",
           "blocks": [
-            {
-              "type": "output",
-              "text": "$ python fluidfullspeedsimulation.py list\n🧮 E01 tank-integrator  水槽は積分器（整数で厳密）\n💧 E02 fluid-drain  流体ごとの排水（細管 / 小孔）\n⏳ E03 transport-delay  管を通る遅れ\n🪜 E04 weir  堰とカム（非線形の出口）\n🎈 E05 float-valve  浮き弁と遅れ\n🌐 E06 coupled-loop  2 台連結（遅延つきの環）\n…"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "🧪 流体の物性",
-          "text": "",
-          "blocks": [
-            {
-              "type": "output",
-              "text": "$ python fluidfullspeedsimulation.py fluids\n💧 🟦 water           ρ=998.21 kg/m³  μ=1.0016 mPa·s  ν=1.003 mm²/s\n🍶 🟨 ethanol         ρ=789.45 kg/m³  μ=1.2 mPa·s  ν=1.52 mm²/s\n🧴 🟧 methanol        ρ=791.1 kg/m³  μ=0.587 mPa·s  ν=0.742 mm²/s\n🟢 🟩 namekian-water  ρ=998.21 kg/m³  μ=0.80128 mPa·s  ν=0.8027 mm²/s  🏷️ 仮置き（粘度は水の 0.8 倍）\n☠️ 🟪 poison-water    ρ=998.21 kg/m³  μ=5.008 mPa·s  ν=5.017 mm²/s  🏷️ 仮置き（粘度は水の 5 倍）"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "🎋 1 本だけ回す",
-          "text": "名前でもアイコン（🥢 など）でも選べます。",
-          "blocks": [
-            {
-              "type": "output",
-              "text": "$ python fluidfullspeedsimulation.py run flume\n✅ E08 🎋 flume  38/38"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "✅ 全実験を検証",
-          "text": "終了コード 0 / 1。",
-          "blocks": [
-            {
-              "type": "output",
-              "text": "$ python fluidfullspeedsimulation.py verify"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "🎨 場面を描く",
-          "text": "GIF・PNG と受領記録 JSON を書きます。",
-          "blocks": [
-            {
-              "type": "output",
-              "text": "$ python fluidfullspeedsimulation.py draw 🥢 --view files"
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "type": "section",
-      "title": "🎞️ デモ",
-      "blocks": [
-        {
-          "type": "text",
-          "text": "draw の場面を既定の引数で 1 枚ずつ（README と同じ GIF）。"
-        },
-        {
-          "type": "card",
-          "title": "D01 🏛️ moniac-rig",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D01_moniac-rig_water.gif",
-              "alt": "D01 moniac-rig"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D02 🕳️ moniac-drain",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D02_moniac-drain_water.gif",
-              "alt": "D02 moniac-drain"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D03 🎋 flume",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D03_flume_water.gif",
-              "alt": "D03 flume"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D04 🫙 flume-hopper",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D04_flume-hopper_water.gif",
-              "alt": "D04 flume-hopper"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D05 🥢 somen-flume",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D05_somen-flume_water.gif",
-              "alt": "D05 somen-flume"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D06 🍜 noodle-length",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D06_noodle-length_water.gif",
-              "alt": "D06 noodle-length"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D07 🧱 noodle-clog",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D07_noodle-clog_water.gif",
-              "alt": "D07 noodle-clog"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D08 🍽️ chopsticks",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D08_chopsticks_water.gif",
-              "alt": "D08 chopsticks"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D09 🧊 cold-water",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D09_cold-water_water.gif",
-              "alt": "D09 cold-water"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D10 🪵 bamboo-wear",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D10_bamboo-wear_water.gif",
-              "alt": "D10 bamboo-wear"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D11 🌧️ rain-runoff",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D11_rain-runoff_water.gif",
-              "alt": "D11 rain-runoff"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D12 🎍 shishi-odoshi",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D12_shishi-odoshi_water.gif",
-              "alt": "D12 shishi-odoshi"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D13 🍷 pythagorean-cup",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D13_pythagorean-cup_poison-water.gif",
-              "alt": "D13 pythagorean-cup"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D14 🫗 mariotte",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D14_mariotte_water.gif",
-              "alt": "D14 mariotte"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D15 🏺 water-clock",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D15_water-clock_water.gif",
-              "alt": "D15 water-clock"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D16 🌊 dam-break",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D16_dam-break_namekian-water.gif",
-              "alt": "D16 dam-break"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D17 🚧 inertia-limits",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D17_inertia-limits_water.gif",
-              "alt": "D17 inertia-limits"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D18 ⚗️ distillation",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D18_distillation_water.gif",
-              "alt": "D18 distillation"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D19 👼 angels-share",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D19_angels-share_water.gif",
-              "alt": "D19 angels-share"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D20 💴 money-flow",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D20_money-flow_water.gif",
-              "alt": "D20 money-flow"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D21 🪙 gold-flow",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D21_gold-flow_water.gif",
-              "alt": "D21 gold-flow"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D22 ⛏️ rare-metal",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D22_rare-metal_water.gif",
-              "alt": "D22 rare-metal"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D23 🚿 outlet-count",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D23_outlet-count_water.gif",
-              "alt": "D23 outlet-count"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D24 🫀 circulation",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D24_circulation_water.gif",
-              "alt": "D24 circulation"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D25 🪨 coal-power",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D25_coal-power_water.gif",
-              "alt": "D25 coal-power"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D26 🌀 combined-cycle",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D26_combined-cycle_water.gif",
-              "alt": "D26 combined-cycle"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D27 ❄️ heat-pump",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D27_heat-pump_water.gif",
-              "alt": "D27 heat-pump"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D28 🧠 csf",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D28_csf_water.gif",
-              "alt": "D28 csf"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D29 💧 steam-loop",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D29_steam-loop_water.gif",
-              "alt": "D29 steam-loop"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D30 ♨️ hrsg-loop",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D30_hrsg-loop_water.gif",
-              "alt": "D30 hrsg-loop"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D31 📉 part-load",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D31_part-load_water.gif",
-              "alt": "D31 part-load"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D32 🌅 startup",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D32_startup_water.gif",
-              "alt": "D32 startup"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D33 🌡️ metal",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D33_metal_water.gif",
-              "alt": "D33 metal"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D34 🫧 r32-loop",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D34_r32-loop_water.gif",
-              "alt": "D34 r32-loop"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D35 🏠 house",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D35_house_water.gif",
-              "alt": "D35 house"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D36 🕰️🎋 flume",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D36_flume-kymo_water.gif",
-              "alt": "D36 flume kymo"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D37 🕰️🌧️ rain-runoff",
-          "text": "",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D37_rain-runoff-kymo_water.gif",
-              "alt": "D37 rain-runoff kymo"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "D38 🧬 RNAの合成と分解",
-          "text": "左から基準・合成速度2倍・半減期2倍。すべて初期量10、縦軸は共通で0〜20（任意単位）。",
-          "blocks": [
-            {
-              "type": "image",
-              "src": "./demos/D38_rna-turnover_water.gif",
-              "alt": "0〜8時間のRNA量。4時間で合成を止めると、半減期が長い右列が最もゆっくり減る。"
-            },
             {
               "type": "text",
-              "text": "基準の半減期は2時間。最初の4時間は合成量と分解量が釣り合います。4時間時点の量は左から10、17.5、15。全条件の合成を止めた後、8時間時点では2.5、4.375、7.5です。"
+              "text": "draw の場面を既定の引数で 1 枚ずつ（README と同じ GIF）。"
             },
             {
-              "type": "text",
-              "text": "SSISではlin-4に対応する8mer候補がlin-14の3′ UTRに3件、lin-28に1件あります。上の合成速度と半減期は比較用の仮定です。実際のRNA量や競合の有無は別途測定が必要です。"
-            },
-            {
-              "type": "links",
-              "items": [
+              "type": "card",
+              "title": "D01 🏛️ moniac-rig",
+              "text": "",
+              "blocks": [
                 {
-                  "label": "SSISの検索例と参照配列",
-                  "href": "https://github.com/myon-bioinformatics/search_seq_including_spaces/blob/d329dabd8a09eae5b5955678c3fb362a6c43637c/docs/roadmap-tools.md#transcript-region-search"
+                  "type": "image",
+                  "src": "./demos/D01_moniac-rig_water.gif",
+                  "alt": "D01 moniac-rig"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D02 🕳️ moniac-drain",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D02_moniac-drain_water.gif",
+                  "alt": "D02 moniac-drain"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D03 🎋 flume",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D03_flume_water.gif",
+                  "alt": "D03 flume"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D04 🫙 flume-hopper",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D04_flume-hopper_water.gif",
+                  "alt": "D04 flume-hopper"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D05 🥢 somen-flume",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D05_somen-flume_water.gif",
+                  "alt": "D05 somen-flume"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D06 🍜 noodle-length",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D06_noodle-length_water.gif",
+                  "alt": "D06 noodle-length"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D07 🧱 noodle-clog",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D07_noodle-clog_water.gif",
+                  "alt": "D07 noodle-clog"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D08 🍽️ chopsticks",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D08_chopsticks_water.gif",
+                  "alt": "D08 chopsticks"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D09 🧊 cold-water",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D09_cold-water_water.gif",
+                  "alt": "D09 cold-water"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D10 🪵 bamboo-wear",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D10_bamboo-wear_water.gif",
+                  "alt": "D10 bamboo-wear"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D11 🌧️ rain-runoff",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D11_rain-runoff_water.gif",
+                  "alt": "D11 rain-runoff"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D12 🎍 shishi-odoshi",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D12_shishi-odoshi_water.gif",
+                  "alt": "D12 shishi-odoshi"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D13 🍷 pythagorean-cup",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D13_pythagorean-cup_poison-water.gif",
+                  "alt": "D13 pythagorean-cup"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D14 🫗 mariotte",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D14_mariotte_water.gif",
+                  "alt": "D14 mariotte"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D15 🏺 water-clock",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D15_water-clock_water.gif",
+                  "alt": "D15 water-clock"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D16 🌊 dam-break",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D16_dam-break_namekian-water.gif",
+                  "alt": "D16 dam-break"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D17 🚧 inertia-limits",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D17_inertia-limits_water.gif",
+                  "alt": "D17 inertia-limits"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D18 ⚗️ distillation",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D18_distillation_water.gif",
+                  "alt": "D18 distillation"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D19 👼 angels-share",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D19_angels-share_water.gif",
+                  "alt": "D19 angels-share"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D20 💴 money-flow",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D20_money-flow_water.gif",
+                  "alt": "D20 money-flow"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D21 🪙 gold-flow",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D21_gold-flow_water.gif",
+                  "alt": "D21 gold-flow"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D22 ⛏️ rare-metal",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D22_rare-metal_water.gif",
+                  "alt": "D22 rare-metal"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D23 🚿 outlet-count",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D23_outlet-count_water.gif",
+                  "alt": "D23 outlet-count"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D24 🫀 circulation",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D24_circulation_water.gif",
+                  "alt": "D24 circulation"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D25 🪨 coal-power",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D25_coal-power_water.gif",
+                  "alt": "D25 coal-power"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D26 🌀 combined-cycle",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D26_combined-cycle_water.gif",
+                  "alt": "D26 combined-cycle"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D27 ❄️ heat-pump",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D27_heat-pump_water.gif",
+                  "alt": "D27 heat-pump"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D28 🧠 csf",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D28_csf_water.gif",
+                  "alt": "D28 csf"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D29 💧 steam-loop",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D29_steam-loop_water.gif",
+                  "alt": "D29 steam-loop"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D30 ♨️ hrsg-loop",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D30_hrsg-loop_water.gif",
+                  "alt": "D30 hrsg-loop"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D31 📉 part-load",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D31_part-load_water.gif",
+                  "alt": "D31 part-load"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D32 🌅 startup",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D32_startup_water.gif",
+                  "alt": "D32 startup"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D33 🌡️ metal",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D33_metal_water.gif",
+                  "alt": "D33 metal"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D34 🫧 r32-loop",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D34_r32-loop_water.gif",
+                  "alt": "D34 r32-loop"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D35 🏠 house",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D35_house_water.gif",
+                  "alt": "D35 house"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D36 🕰️🎋 flume",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D36_flume-kymo_water.gif",
+                  "alt": "D36 flume kymo"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D37 🕰️🌧️ rain-runoff",
+              "text": "",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D37_rain-runoff-kymo_water.gif",
+                  "alt": "D37 rain-runoff kymo"
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D38 🧬 RNAの合成と分解",
+              "text": "左から基準・合成速度2倍・半減期2倍。すべて初期量10、縦軸は共通で0〜20（任意単位）。",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D38_rna-turnover_water.gif",
+                  "alt": "0〜8時間のRNA量。4時間で合成を止めると、半減期が長い右列が最もゆっくり減る。"
+                },
+                {
+                  "type": "text",
+                  "text": "基準の半減期は2時間。最初の4時間は合成量と分解量が釣り合います。4時間時点の量は左から10、17.5、15。全条件の合成を止めた後、8時間時点では2.5、4.375、7.5です。"
+                },
+                {
+                  "type": "text",
+                  "text": "SSISではlin-4に対応する8mer候補がlin-14の3′ UTRに3件、lin-28に1件あります。上の合成速度と半減期は比較用の仮定です。実際のRNA量や競合の有無は別途測定が必要です。"
+                },
+                {
+                  "type": "links",
+                  "items": [
+                    {
+                      "label": "SSISの検索例と参照配列",
+                      "href": "https://github.com/myon-bioinformatics/search_seq_including_spaces/blob/d329dabd8a09eae5b5955678c3fb362a6c43637c/docs/roadmap-tools.md#transcript-region-search"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "card",
+              "title": "D39 🧫 血漿中で似たRNAを加えた後の残存率",
+              "text": "成人の全血5 L、血漿55%（2.75 L）を代表値として採用し、血漿内で均一に混ざると仮定します。比較対象は血漿中のRNA AとBです。",
+              "blocks": [
+                {
+                  "type": "image",
+                  "src": "./demos/D39_rna-competition_water.gif",
+                  "alt": "左2列はRNA Aだけが標的、右2列はA・Bが同じmiRNAの標的。各組の左がA、右がBで、縦軸は各RNAの開始・投入時濃度を100%とした残存率。"
+                },
+                {
+                  "type": "text",
+                  "text": "Aの開始濃度は10 copies/µL。2時間でBを加え、B/(A+B)を10%にします。左の組はAだけがmiRNAの標的、右の組はAとBが標的部位を共有します。GIFはAの開始時・Bの投入時を100%とした残存率です。"
+                },
+                {
+                  "type": "text",
+                  "text": "投入6時間後、Bの残存率は部位共有なしで35.4%、共有ありで6.0%。同じ時点でBがA+Bに占める割合はそれぞれ40.9%、10.0%です。A・Bが同じ割合で減ると、構成比は変わらず両方の濃度が下がります。"
+                },
+                {
+                  "type": "text",
+                  "text": "基礎分解の半減期は4時間。活性のあるmiRNA経路も仮定し、各標的の分解速度は 2 (copies/µL)/時 × その標的の濃度 / (5 copies/µL + 標的濃度の合計) とします。RNA濃度、標的への作用、分解速度は比較用の仮定です。ヒト血漿ではAgo2と結合した循環miRNAが観測されています。ここでの処理能力は血漿での実測値ではありません。組織移行、血球への分配、新規合成はモデルに含めていません。"
+                },
+                {
+                  "type": "text",
+                  "text": "python -S fluidfullspeedsimulation.py rna-plasma で投入比率1・10・50%の時系列JSONを出力します。--added-percent 0 5 20、--blood-litres 5、--plasma-percent 55 で比較条件を指定できます。total_pmolは血漿中濃度（pM = fmol/mL）× 血漿量（L）です。"
+                },
+                {
+                  "type": "text",
+                  "text": "ヒト血漿の参照例（Kentら、2024年）。二価Spikevax追加接種者19人の総ワクチンmRNAは、接種4時間後に6.5〜112 copies/µL、ピークは1〜2日後でした。完全性を保つと判定されたmRNAのピーク後の推定半減期は1.14日です。D39では比較の濃度スケールとして観測範囲内の10 copies/µLを選びました。6.5〜112は個人間の範囲で、1.14日は製剤接種後の血中動態です。内在性RNAの基礎半減期やmiRNA分解速度はこの研究から求めていません。"
+                },
+                {
+                  "type": "links",
+                  "items": [
+                    {
+                      "label": "成人の全血量と血漿比の参考値（Merck）",
+                      "href": "https://www.merckmillipore.com/AZ/en/technical-documents/technical-article/clinical-testing-and-diagnostics-manufacturing/hematology/blood-basics"
+                    },
+                    {
+                      "label": "ヒト血漿中のAgo2・miRNA複合体（Arroyoら）",
+                      "href": "https://pubmed.ncbi.nlm.nih.gov/21383194/"
+                    },
+                    {
+                      "label": "COVID-19 mRNAワクチン接種後の血漿中mRNA（Kentら、2024年）",
+                      "href": "https://pubmed.ncbi.nlm.nih.gov/39298422/"
+                    }
+                  ]
                 }
               ]
             }
           ]
         },
         {
-          "type": "card",
-          "title": "D39 🧫 血漿中で似たRNAを加えた後の残存率",
-          "text": "成人の全血5 L、血漿55%（2.75 L）を代表値として採用し、血漿内で均一に混ざると仮定します。比較対象は血漿中のRNA AとBです。",
+          "label": "🧩 機能一覧",
           "blocks": [
             {
-              "type": "image",
-              "src": "./demos/D39_rna-competition_water.gif",
-              "alt": "左2列はRNA Aだけが標的、右2列はA・Bが同じmiRNAの標的。各組の左がA、右がBで、縦軸は各RNAの開始・投入時濃度を100%とした残存率。"
-            },
-            {
-              "type": "text",
-              "text": "Aの開始濃度は10 copies/µL。2時間でBを加え、B/(A+B)を10%にします。左の組はAだけがmiRNAの標的、右の組はAとBが標的部位を共有します。GIFはAの開始時・Bの投入時を100%とした残存率です。"
-            },
-            {
-              "type": "text",
-              "text": "投入6時間後、Bの残存率は部位共有なしで35.4%、共有ありで6.0%。同じ時点でBがA+Bに占める割合はそれぞれ40.9%、10.0%です。A・Bが同じ割合で減ると、構成比は変わらず両方の濃度が下がります。"
-            },
-            {
-              "type": "text",
-              "text": "基礎分解の半減期は4時間。活性のあるmiRNA経路も仮定し、各標的の分解速度は 2 (copies/µL)/時 × その標的の濃度 / (5 copies/µL + 標的濃度の合計) とします。RNA濃度、標的への作用、分解速度は比較用の仮定です。ヒト血漿ではAgo2と結合した循環miRNAが観測されています。ここでの処理能力は血漿での実測値ではありません。組織移行、血球への分配、新規合成はモデルに含めていません。"
-            },
-            {
-              "type": "text",
-              "text": "python -S fluidfullspeedsimulation.py rna-plasma で投入比率1・10・50%の時系列JSONを出力します。--added-percent 0 5 20、--blood-litres 5、--plasma-percent 55 で比較条件を指定できます。total_pmolは血漿中濃度（pM = fmol/mL）× 血漿量（L）です。"
-            },
-            {
-              "type": "text",
-              "text": "ヒト血漿の参照例（Kentら、2024年）。二価Spikevax追加接種者19人の総ワクチンmRNAは、接種4時間後に6.5〜112 copies/µL、ピークは1〜2日後でした。完全性を保つと判定されたmRNAのピーク後の推定半減期は1.14日です。D39では比較の濃度スケールとして観測範囲内の10 copies/µLを選びました。6.5〜112は個人間の範囲で、1.14日は製剤接種後の血中動態です。内在性RNAの基礎半減期やmiRNA分解速度はこの研究から求めていません。"
-            },
-            {
-              "type": "links",
-              "items": [
+              "type": "section",
+              "title": "📥 取得",
+              "blocks": [
                 {
-                  "label": "成人の全血量と血漿比の参考値（Merck）",
-                  "href": "https://www.merckmillipore.com/AZ/en/technical-documents/technical-article/clinical-testing-and-diagnostics-manufacturing/hematology/blood-basics"
-                },
-                {
-                  "label": "ヒト血漿中のAgo2・miRNA複合体（Arroyoら）",
-                  "href": "https://pubmed.ncbi.nlm.nih.gov/21383194/"
-                },
-                {
-                  "label": "COVID-19 mRNAワクチン接種後の血漿中mRNA（Kentら、2024年）",
-                  "href": "https://pubmed.ncbi.nlm.nih.gov/39298422/"
+                  "type": "output",
+                  "text": "git clone https://github.com/myon-bioinformatics/FluidFullSpeedSimulation.git\ncd FluidFullSpeedSimulation\nuv sync --locked"
                 }
               ]
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "type": "section",
-      "title": "🚿 単弁の検証",
-      "blocks": [
-        {
-          "type": "text",
-          "text": "開度 1/2・経過時間 2τ。旧方式は残量を多く見積もり、dt/τ=1/8 で +3.17%、1/64 で +0.39%。"
-        },
-        {
-          "type": "text",
-          "text": "既定の q48 は指数解に対応。開度・流入・ポンプ・弁の本数・質量保存を回帰テストで確認。"
-        },
-        {
-          "type": "text",
-          "text": "⚠️ dt/τ=64 では係数の丸めにより例外が発生する既知の問題があります。"
-        },
-        {
-          "type": "links",
-          "items": [
-            {
-              "label": "📐 式と検証結果",
-              "href": "https://github.com/myon-bioinformatics/FluidFullSpeedSimulation/blob/main/docs/single-valve-discretization.md"
             },
             {
-              "label": "🧪 回帰テスト",
-              "href": "https://github.com/myon-bioinformatics/FluidFullSpeedSimulation/blob/main/tests/test_network.py"
+              "type": "section",
+              "title": "▶️ 実行",
+              "blocks": [
+                {
+                  "type": "card",
+                  "title": "🗂️ 実験の一覧",
+                  "text": "",
+                  "blocks": [
+                    {
+                      "type": "output",
+                      "text": "$ python fluidfullspeedsimulation.py list\n🧮 E01 tank-integrator  水槽は積分器（整数で厳密）\n💧 E02 fluid-drain  流体ごとの排水（細管 / 小孔）\n⏳ E03 transport-delay  管を通る遅れ\n🪜 E04 weir  堰とカム（非線形の出口）\n🎈 E05 float-valve  浮き弁と遅れ\n🌐 E06 coupled-loop  2 台連結（遅延つきの環）\n…"
+                    }
+                  ]
+                },
+                {
+                  "type": "card",
+                  "title": "🧪 流体の物性",
+                  "text": "",
+                  "blocks": [
+                    {
+                      "type": "output",
+                      "text": "$ python fluidfullspeedsimulation.py fluids\n💧 🟦 water           ρ=998.21 kg/m³  μ=1.0016 mPa·s  ν=1.003 mm²/s\n🍶 🟨 ethanol         ρ=789.45 kg/m³  μ=1.2 mPa·s  ν=1.52 mm²/s\n🧴 🟧 methanol        ρ=791.1 kg/m³  μ=0.587 mPa·s  ν=0.742 mm²/s\n🟢 🟩 namekian-water  ρ=998.21 kg/m³  μ=0.80128 mPa·s  ν=0.8027 mm²/s  🏷️ 仮置き（粘度は水の 0.8 倍）\n☠️ 🟪 poison-water    ρ=998.21 kg/m³  μ=5.008 mPa·s  ν=5.017 mm²/s  🏷️ 仮置き（粘度は水の 5 倍）"
+                    }
+                  ]
+                },
+                {
+                  "type": "card",
+                  "title": "🎋 1 本だけ回す",
+                  "text": "名前でもアイコン（🥢 など）でも選べます。",
+                  "blocks": [
+                    {
+                      "type": "output",
+                      "text": "$ python fluidfullspeedsimulation.py run flume\n✅ E08 🎋 flume  38/38"
+                    }
+                  ]
+                },
+                {
+                  "type": "card",
+                  "title": "✅ 全実験を検証",
+                  "text": "終了コード 0 / 1。",
+                  "blocks": [
+                    {
+                      "type": "output",
+                      "text": "$ python fluidfullspeedsimulation.py verify"
+                    }
+                  ]
+                },
+                {
+                  "type": "card",
+                  "title": "🎨 場面を描く",
+                  "text": "GIF・PNG と受領記録 JSON を書きます。",
+                  "blocks": [
+                    {
+                      "type": "output",
+                      "text": "$ python fluidfullspeedsimulation.py draw 🥢 --view files"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "section",
+              "title": "🚿 単弁の検証",
+              "blocks": [
+                {
+                  "type": "text",
+                  "text": "開度 1/2・経過時間 2τ。旧方式は残量を多く見積もり、dt/τ=1/8 で +3.17%、1/64 で +0.39%。"
+                },
+                {
+                  "type": "text",
+                  "text": "既定の q48 は指数解に対応。開度・流入・ポンプ・弁の本数・質量保存を回帰テストで確認。"
+                },
+                {
+                  "type": "text",
+                  "text": "⚠️ dt/τ=64 では係数の丸めにより例外が発生する既知の問題があります。"
+                },
+                {
+                  "type": "links",
+                  "items": [
+                    {
+                      "label": "📐 式と検証結果",
+                      "href": "https://github.com/myon-bioinformatics/FluidFullSpeedSimulation/blob/main/docs/single-valve-discretization.md"
+                    },
+                    {
+                      "label": "🧪 回帰テスト",
+                      "href": "https://github.com/myon-bioinformatics/FluidFullSpeedSimulation/blob/main/tests/test_network.py"
+                    }
+                  ]
+                }
+              ]
             }
           ]
         }
