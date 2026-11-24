@@ -12,6 +12,7 @@
 """
 
 import contextlib
+import functools
 import io
 import json
 import math
@@ -33,10 +34,14 @@ from network import Network, build, simulate
 
 # ──── experiments ─────────────────────────────────────────────────
 
+# ⚡ 既定の引数で回した結果は同じなので 1 回だけ回して使い回す（E27 は 1 回 30 秒）
+_ran = functools.cache(ffs.run_experiment)
+
+
 class Experiments(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.results = {eid: ffs.run_experiment(eid) for eid in ffs.EXPERIMENTS}
+        cls.results = {eid: _ran(eid) for eid in ffs.EXPERIMENTS}
 
     def test_every_experiment_passes(self):
         for eid, r in self.results.items():
@@ -77,7 +82,7 @@ class RandomisedSweeps(unittest.TestCase):
 
     def test_float_valve_kc_split_holds_for_random_gains(self):
         """弱い弁は A×10^-4、強い弁は K_c×(1.5 + A)。どちらも乱数で選び、K_c をまたぐ結論が保たれるか。"""
-        kc = ffs.run_experiment("E05")["summary"]["critical_gain"]
+        kc = _ran("E05")["summary"]["critical_gain"]
         for low, high in zip(random_scales(33, 2, n_min=4, n_max=4), random_scales(34, 2, n_min=0, n_max=0)):
             with self.subTest(low=low["label"], high=f"{1.5 + high['A']:.3g}·Kc"):
                 res = ffs.run_experiment("E05", gain_low=low["value"], gain_high=kc * (1.5 + high["A"]))
@@ -713,9 +718,9 @@ class Simulation(unittest.TestCase):
 class HubFlowChecks(unittest.TestCase):
     def test_all_checks_pass(self):
         for eid in ("E26", "E27", "E28", "E29", "E30"):
-            slug, _icon, _title, fn = ffs.EXPERIMENTS[eid]
-            with self.subTest(experiment=slug):
-                bad = [c["id"] for c in fn()["checks"] if not c["ok"]]
+            r = _ran(eid)
+            with self.subTest(experiment=r["slug"]):
+                bad = [c["id"] for c in r["checks"] if not c["ok"]]
                 self.assertEqual(bad, [])
 
 

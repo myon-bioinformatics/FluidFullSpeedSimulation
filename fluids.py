@@ -263,7 +263,9 @@ class Section:
             return area / self.size
         if area >= self.area(self.size):
             return self.size
-        return bisection(lambda h: self.area(h) < area, 0.0, self.size, 60)
+        r, acos, sin = self.size, math.acos, math.sin
+        # ⚡ area(h) をその場で（0 < h < r なので area と同じ式・同じ順の演算 → 結果はビット単位で同じ）。1 回 60 段 × 毎ステップ呼ばれる
+        return bisection(lambda h: r * r * ((th := 2.0 * acos(1.0 - h / r)) - sin(th)) / 2.0 < area, 0.0, r, 60)
 
 
 def hydraulic_radius(section: Section, h: float) -> float:

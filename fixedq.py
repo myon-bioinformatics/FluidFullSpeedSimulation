@@ -24,6 +24,10 @@ ONE = 1 << FRAC_BITS
 
 def to_q(x) -> int:
     """数値（int・float・str・Fraction）を Q 整数へ。str は 10 進のまま厳密に読む。"""
+    if type(x) is float and math.isfinite(y := x * ONE):
+        return round(y)  # ⚡ ×2^48 は 2 進の浮動小数点でも厳密 → round(Fraction(x) * ONE) と同じ値（偶数丸めも同じ）
+    if type(x) is int:
+        return x << FRAC_BITS
     if isinstance(x, bool):
         raise TypeError("bool is not a quantity")
     f = Fraction(x) if not isinstance(x, str) else Fraction(x.strip())
