@@ -1,7 +1,7 @@
 # 🌊 FluidFullSpeedSimulation
 
 <p align="center">
-  <img src="assets/brand/icon.png" width="128" height="128" alt="FluidFullSpeedSimulation のアイコン。竹の樋に水とそうめんが流れ、箸で麺を取っている。" />
+  <img src="https://myon-bioinformatics.github.io/FluidFullSpeedSimulation/icon.png" width="128" height="128" alt="FluidFullSpeedSimulation のアイコン。竹の樋に水とそうめんが流れ、箸で麺を取っている。" />
 </p>
 
 📘 [利用ガイド / Usage guide](https://myon-bioinformatics.github.io/FluidFullSpeedSimulation/) (GitHub Pages)
