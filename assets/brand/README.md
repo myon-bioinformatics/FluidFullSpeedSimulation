@@ -9,6 +9,6 @@
 | [favicon-32.png](favicon-32.png) | 同上 32×32 | 32×32 | ファビコンと同じ切り出し | `d341f380622c41e8205a128cbed95ceadc448649f53267a28ede07bcfe135f01` |
 | [favicon-16.png](favicon-16.png) | 同上 16×16 | 16×16 | ファビコンと同じ切り出し | `f824be863192df3cae0eb422307f0d0baa3d67d0ca51c04a1f481964e19e1a0d` |
 | [favicon.ico](favicon.ico) | 同上 ICO（16 / 32 / 64 を格納）。Pages ではサイト根の `/favicon.ico` にも複製する | ICO | ファビコンと同じ切り出し | `2d74bca3c1e68964efe0907649ef58859196331506c2c57e481b4b424a5d46eb` |
-| [concept-diagram.png](concept-diagram.png) | 概念図パネル。README の概要でクリック拡大する | 1076×1010 | (454, 6)–(1529, 1015)（パネル枠 (456, 8)–(1527, 1013) に 2 px の余白） | `b8d0517a027004d0e97e30c5fd28b2ec139e3a32ff44d7140c588694bd52b3a6` |
+| [repository-concept.png](repository-concept.png) | 概念図パネル。README の概要でクリック拡大する | 1076×1010 | (454, 6)–(1529, 1015)（パネル枠 (456, 8)–(1527, 1013) に 2 px の余白） | `b8d0517a027004d0e97e30c5fd28b2ec139e3a32ff44d7140c588694bd52b3a6` |
 
 利用ガイドの `docs/guide.page.json` には `favicon` だけを渡す。`icon` を渡すとページ本文先頭に alt のない 80×80 画像が出るため、入れていない。
