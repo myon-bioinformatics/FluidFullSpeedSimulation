@@ -16,7 +16,9 @@ jobs:
     uses: myon-bioinformatics/myon-bioinformatics/.github/workflows/reusable-stdlib-runtime.yml@0778ede0c872d609bb2dc590f9f9898a39a18668
     with:
       python-versions: '["3.11","3.15"]'
-      extra-runners: '[{"os":"windows-latest","python":"3.15"},{"os":"macos-latest","python":"3.15"}]'
+      # ⏱ Windows / macOS on main only; PRs run the two ubuntu lanes
+      extra-runners: ${{ github.event_name == 'pull_request' && '[]' || '[{"os":"windows-latest","python":"3.15"},{"os":"macos-latest","python":"3.15"}]' }}
+      # unittest already runs every experiment (test_every_experiment_passes); one CLI run keeps the `python -S script` path
       commands: |
         python -S -m unittest discover -s tests -v
-        python -S fluidfullspeedsimulation.py verify
+        python -S fluidfullspeedsimulation.py run E01
