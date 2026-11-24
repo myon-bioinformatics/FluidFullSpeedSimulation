@@ -15,7 +15,7 @@
 
 ## 🧭 概念図
 
-[![FluidFullSpeedSimulation の概念図。作動流体、共通の流路、そうめん・水時計・蒸留・MONIAC などの実験群、Q 整数シミュレーションエンジン。](assets/brand/concept-diagram.png)](assets/brand/concept-diagram.png)
+[![FluidFullSpeedSimulation の概念図。作動流体、共通の流路、そうめん・水時計・蒸留・MONIAC などの実験群、Q 整数シミュレーションエンジン。](assets/brand/repository-concept.png)](assets/brand/repository-concept.png)
 
 クリックで拡大できます。切り出したアイコン・ファビコン・概念図は [assets/brand/](assets/brand/) に分けて置いてあります。
 
