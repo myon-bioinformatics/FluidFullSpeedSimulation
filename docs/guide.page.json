@@ -143,6 +143,7 @@
                         "title": "📜 場面の一覧",
                         "command": "python3 fluidfullspeedsimulation.py list",
                         "expect": "🧮 E01 tank-integrator  水槽は積分器（整数で厳密）\n💧 E02 fluid-drain  流体ごとの排水（細管 / 小孔）\n…",
+                        "expect_stdout_contains": "🧮 E01 tank-integrator  水槽は積分器（整数で厳密）\n💧 E02 fluid-drain  流体ごとの排水（細管 / 小孔）",
                         "run": true
                       },
                       {
@@ -150,6 +151,7 @@
                         "title": "🎋 流しそうめんを検証",
                         "command": "python3 fluidfullspeedsimulation.py run flume",
                         "expect": "✅ E08 🎋 flume  38/38",
+                        "expect_stdout_contains": "✅ E08 🎋 flume  38/38",
                         "run": true
                       }
                     ]

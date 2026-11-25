@@ -16,7 +16,7 @@ concurrency:
 jobs:
   changes:
     name: Change detection
-    uses: myon-bioinformatics/myon-bioinformatics/.github/workflows/reusable-change-detection.yml@1cd621c8a46d18611a9135bdc8a0e9d46013d58d
+    uses: myon-bioinformatics/myon-bioinformatics/.github/workflows/reusable-change-detection.yml@dccd07ea5c9820764e99d77251e9490afa77fe6e
 
   test:
     name: pytest (Python ${{ matrix.python-version }})
@@ -71,7 +71,7 @@ jobs:
     permissions:
       contents: read
       actions: read
-    uses: myon-bioinformatics/myon-bioinformatics/.github/workflows/reusable-junit-identity.yml@1cd621c8a46d18611a9135bdc8a0e9d46013d58d
+    uses: myon-bioinformatics/myon-bioinformatics/.github/workflows/reusable-junit-identity.yml@dccd07ea5c9820764e99d77251e9490afa77fe6e
     with:
       commit-sha: ${{ github.event.pull_request.head.sha || github.sha }}
       expected-reports: ${{ github.event_name == 'pull_request' && '["junit-py3.14/pytest-3.14.xml"]' || '["junit-py3.11/pytest-3.11.xml","junit-py3.12/pytest-3.12.xml","junit-py3.13/pytest-3.13.xml","junit-py3.14/pytest-3.14.xml","junit-py3.15/pytest-3.15.xml"]' }}
