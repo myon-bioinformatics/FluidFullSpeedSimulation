@@ -15,8 +15,8 @@ jobs:
   runtime:
     uses: myon-bioinformatics/myon-bioinformatics/.github/workflows/reusable-stdlib-runtime.yml@dccd07ea5c9820764e99d77251e9490afa77fe6e
     with:
-      python-versions: '["3.11","3.15"]'
-      # ⏱ Windows / macOS on main only; PRs run the two ubuntu lanes
+      # PR: one Ubuntu smoke lane; main: both Ubuntu versions plus Windows and macOS.
+      python-versions: ${{ github.event_name == 'pull_request' && '["3.15"]' || '["3.11","3.15"]' }}
       extra-runners: ${{ github.event_name == 'pull_request' && '[]' || '[{"os":"windows-latest","python":"3.15"},{"os":"macos-latest","python":"3.15"}]' }}
       # unittest already runs every experiment (test_every_experiment_passes); one CLI run keeps the `python -S script` path
       commands: |
