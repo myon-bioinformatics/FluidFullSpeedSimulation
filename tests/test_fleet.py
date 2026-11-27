@@ -5,8 +5,7 @@ import unittest
 from vendor import fleet_check as fleet
 
 ROOT = fleet.repo_root(__file__)
-PARENT_PIN = "43cfe1df924ea96ca44f47a6771c18102c38f7f3"  # Workflows only; vendored files keep the commits in ACCEPTED.
-LEAN_PARENT_PIN = "538293c3a4cb3b84ae22ff5a57a79a4abfec715d"  # New formal lane; existing workflow pins stay unchanged.
+PARENT_PIN = "538293c3a4cb3b84ae22ff5a57a79a4abfec715d"  # Workflows only; vendored files keep the commits in ACCEPTED.
 ACCEPTED = {
     "vendor/cli_args.py": "5ae22b1a1b808eca93e3c385a8db867fbeb8ee32",
     "vendor/py_launch.cjs": "de63762d8485e4d398a651715d34ebf4a04c23f2",
@@ -20,16 +19,7 @@ class Fleet(unittest.TestCase):
         self.assertEqual({w for w in rows if not w.endswith("-LICENSE")}, set(ACCEPTED))
 
     def test_parent_workflows_use_the_reviewed_commit(self):
-        refs = fleet.parent_refs(ROOT)
-        self.assertEqual(set(refs), {PARENT_PIN, LEAN_PARENT_PIN})
-        # Only this new reusable workflow may use the Lean verifier revision.
-        # A changed pin anywhere else, including a checkout, still fails.
-        self.assertEqual(refs.count(LEAN_PARENT_PIN), 1)
-        self.assertEqual(
-            fleet.check_actions(ROOT, workflow="lean-verification.yml"),
-            [("myon-bioinformatics/myon-bioinformatics/.github/workflows/reusable-lean-verify.yml",
-              LEAN_PARENT_PIN, None)],
-        )
+        self.assertEqual(set(fleet.parent_refs(ROOT)), {PARENT_PIN})
 
 
 if __name__ == "__main__":
@@ -52,4 +42,3 @@ class ScriptsDescribeThemselves(unittest.TestCase):
         for path in sorted(root.glob("*.py")):
             if path.name != "conftest.py":
                 fleet.check_imports(root, path.name)
-
