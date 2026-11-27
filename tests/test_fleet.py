@@ -5,7 +5,7 @@ import unittest
 from vendor import fleet_check as fleet
 
 ROOT = fleet.repo_root(__file__)
-PARENT_PIN = "dccd07ea5c9820764e99d77251e9490afa77fe6e"  # Workflows only; vendored files keep the commits in ACCEPTED.
+PARENT_PIN = "43cfe1df924ea96ca44f47a6771c18102c38f7f3"  # Workflows only; vendored files keep the commits in ACCEPTED.
 ACCEPTED = {
     "vendor/cli_args.py": "5ae22b1a1b808eca93e3c385a8db867fbeb8ee32",
     "vendor/py_launch.cjs": "de63762d8485e4d398a651715d34ebf4a04c23f2",
