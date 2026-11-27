@@ -2,7 +2,7 @@
 
 FFSS の実行時依存は Python 標準ライブラリだけです。Lean は任意の検証用ツールであり、
 通常の実行や Python テストからは呼び出しません。共通の実行・結果判定は親リポジトリ
-[`myon-bioinformatics/lean_verify.py`](https://github.com/myon-bioinformatics/myon-bioinformatics/blob/538293c3a4cb3b84ae22ff5a57a79a4abfec715d/lean_verify.py)
+[`myon-bioinformatics/lean_verify.py`](https://github.com/myon-bioinformatics/myon-bioinformatics/blob/6c2558c4251698c50bc07bad86fb49f902b2738f/lean_verify.py)
 で管理し、FFSS は対象となる命題と Python 側の接続テストを管理します。
 
 ## 証明する範囲
