@@ -7,7 +7,7 @@ PREFIX = "urn:ffss:hub:"
 FIELD = "urn:ffss:field:"
 # JSON lexical form preserves ordered tuples (the only sequence type in HUB_FLOWS).
 DATATYPE = "urn:ffss:parameter-json"
-LINE = re.compile(r'<urn:ffss:hub:([a-z-]+)> <urn:ffss:field:([a-z_]+)> ("(?:[^"\\\\]|\\\\.)*")\^\^<urn:ffss:parameter-json> \\.')
+LINE = re.compile(r'<urn:ffss:hub:([a-z-]+)> <urn:ffss:field:([a-z_]+)> ("(?:[^"\\]|\\.)*")\^\^<urn:ffss:parameter-json> \.')
 
 def _value(value):
     if value is None or type(value) in (str, int):
