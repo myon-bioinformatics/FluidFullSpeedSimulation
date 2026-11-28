@@ -24,7 +24,7 @@ permissions:
 jobs:
   conservation:
     # Parent PR #401 supplies the shared verifier and required formal CI lane.
-    uses: myon-bioinformatics/myon-bioinformatics/.github/workflows/reusable-lean-verify.yml@27c46411c0a07d9b4d0f1ad5751ed1bb9e869b5c
+    uses: myon-bioinformatics/myon-bioinformatics/.github/workflows/reusable-lean-verify.yml@main
     with:
       project-directory: formal
       proof: Conservation.lean
