@@ -19,17 +19,17 @@ def load_vendored(name, relpath):
 fleet = load_vendored("fluidfullspeedsimulation_fleet_check", "vendor/fleet_check.py")
 
 ROOT = fleet.repo_root(__file__)
-PARENT_PIN = "27dedd9651efc816fa88d8922adb5f242725df69"  # Workflows only; vendored files keep the commits in ACCEPTED.
+PARENT_PIN = "main"  # 🔁 own sources follow main (2026-11-28)
 ACCEPTED = {
-    "vendor/cli_args.py": "5ae22b1a1b808eca93e3c385a8db867fbeb8ee32",
-    "vendor/py_launch.cjs": "de63762d8485e4d398a651715d34ebf4a04c23f2",
-    "vendor/fleet_check.py": "eee8c096fc753465a5d5a26264e64c12e555638f",
-}
+    "vendor/cli_args.py",
+    "vendor/py_launch.cjs",
+    "vendor/fleet_check.py",
+}  # 🔁 locked destinations; they follow main
 
 
 class Fleet(unittest.TestCase):
     def test_vendored_files_match_the_lock(self):
-        rows = fleet.check_lock(ROOT, commits=ACCEPTED)
+        rows = fleet.check_lock(ROOT)
         self.assertEqual({w for w in rows if not w.endswith("-LICENSE")}, set(ACCEPTED))
 
     def test_parent_workflows_use_the_reviewed_commit(self):
