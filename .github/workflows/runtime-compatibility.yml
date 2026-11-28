@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   runtime:
-    uses: myon-bioinformatics/myon-bioinformatics/.github/workflows/reusable-stdlib-runtime.yml@27dedd9651efc816fa88d8922adb5f242725df69
+    uses: myon-bioinformatics/myon-bioinformatics/.github/workflows/reusable-stdlib-runtime.yml@main
     with:
       # PR は ubuntu 3.15 だけ。push（main）と schedule は ubuntu 3.11・3.15 に Windows・macOS 3.15 を足す。
       python-versions: ${{ github.event_name == 'pull_request' && '["3.15"]' || '["3.11","3.15"]' }}
@@ -24,3 +24,14 @@ jobs:
       commands: |
         python -S -m unittest discover -s tests -v
         python -S fluidfullspeedsimulation.py run E01
+
+  # 🔁 own sources follow main: on schedule / manual run, take main of own repositories and push to main
+  follow-main:
+    if: github.event_name == 'schedule'
+    uses: myon-bioinformatics/myon-bioinformatics/.github/workflows/reusable-follow-main.yml@main
+    permissions:
+      contents: write
+    with:
+      node-version: "26"
+      check: |
+        uv run --locked python -m pytest -q
