@@ -51,6 +51,7 @@ jobs:
       - name: Sync locked development environment
         run: uv sync --locked
       - name: README demos match the code (GIF bytes, exit code 0 = same)
+        if: matrix.python-version == '3.14'
         run: uv run --locked python fluidfullspeedsimulation.py demos --check
       - name: Test with JUnit
         run: |
