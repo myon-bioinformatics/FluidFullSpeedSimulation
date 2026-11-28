@@ -1,8 +1,22 @@
 """🔒 共通の検査（親の vendor/fleet_check.py）: vendor.lock.json と vendor/ のバイト列、親 workflow の固定 commit。"""
 
+import importlib.util
+import sys
+from pathlib import Path
 import unittest
 
-from vendor import fleet_check as fleet
+
+def load_vendored(name, relpath):
+    """Load a vendored file by path under a repo-unique name (cli_args README: Loading a vendored copy)."""
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, Path(__file__).resolve().parents[1] / relpath)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
+
+
+fleet = load_vendored("fluidfullspeedsimulation_fleet_check", "vendor/fleet_check.py")
 
 ROOT = fleet.repo_root(__file__)
 PARENT_PIN = "27dedd9651efc816fa88d8922adb5f242725df69"  # Workflows only; vendored files keep the commits in ACCEPTED.
